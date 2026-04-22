@@ -8,7 +8,12 @@
  * Each handler takes a PrometheusBackend and returns { status, body }.
  */
 import yaml from 'js-yaml';
-import { AlertingOSClient, AlertmanagerSilence, PrometheusBackend } from '../../services/alerting';
+import {
+  AlertingOSClient,
+  AlertmanagerSilence,
+  Datasource,
+  PrometheusBackend,
+} from '../../services/alerting';
 import { toHandlerResult } from './route_utils';
 import type { HandlerResult } from './route_utils';
 
@@ -33,13 +38,14 @@ export async function handleGetAlertmanagerAlerts(
 
 export async function handleGetAlertmanagerSilences(
   promBackend: PrometheusBackend,
-  client: AlertingOSClient
+  client: AlertingOSClient,
+  ds: Datasource
 ): Promise<HandlerResult> {
   try {
     if (!promBackend.getSilences) {
       return { status: 501, body: { error: 'Alertmanager not configured' } };
     }
-    const silences = await promBackend.getSilences(client);
+    const silences = await promBackend.getSilences(client, ds);
     return { status: 200, body: { silences } };
   } catch (e: unknown) {
     return toHandlerResult(e);

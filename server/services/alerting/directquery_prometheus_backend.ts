@@ -346,11 +346,11 @@ export class DirectQueryPrometheusBackend implements PrometheusBackend, Promethe
     }
   }
 
-  async getSilences(client: AlertingOSClient): Promise<AlertmanagerSilence[]> {
+  async getSilences(client: AlertingOSClient, ds: Datasource): Promise<AlertmanagerSilence[]> {
     try {
       const data = await this.get<AlertmanagerSilence[]>(
         client,
-        this.requireDefaultDs(),
+        ds,
         '/alertmanager/api/v2/silences'
       );
       return Array.isArray(data) ? data : [];

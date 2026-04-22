@@ -45,6 +45,11 @@ export {
   emptyFilters,
 } from '../../../common/services/alerting/filter';
 export type { FilterState } from '../../../common/services/alerting/filter';
+export { silenceToSuppressionRule } from '../../../common/services/alerting/suppression';
+export type {
+  SuppressionRuleConfig,
+  SilenceState,
+} from '../../../common/services/alerting/suppression';
 
 export type { AlertManagerError, NotFoundError, ValidationError, InternalError } from './errors';
 export {

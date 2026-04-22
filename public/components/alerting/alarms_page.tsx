@@ -20,7 +20,7 @@ import { CreateMonitor, MonitorFormState } from './create_monitor';
 import { AlertsDashboard } from './alerts_dashboard';
 import { AlertDetailFlyout } from './alert_detail_flyout';
 import { NotificationRoutingPanel } from './notification_routing_panel';
-// Phase 2: import { SuppressionRulesPanel } from './suppression_rules_panel';
+import { SuppressionRulesPanel } from './suppression_rules_panel';
 import { CreateLogsMonitor, LogsMonitorFormState } from './create_logs_monitor';
 import { CreateMetricsMonitor, MetricsMonitorFormState } from './create_metrics_monitor';
 // Phase 2: import SloListing from './slo_listing';
@@ -39,12 +39,13 @@ interface AlarmsPageProps {
   apiClient: AlarmsApiClient;
 }
 
-type TabId = 'alerts' | 'rules' | 'routing';
+type TabId = 'alerts' | 'rules' | 'routing' | 'suppression';
 
 const TAB_LABELS: Record<TabId, string> = {
   alerts: 'Alerts',
   rules: 'Rules',
   routing: 'Routing',
+  suppression: 'Suppression',
 };
 
 // Fetch a large page from the server so child tables can paginate client-side.
@@ -677,6 +678,7 @@ export const AlarmsPage: React.FC<AlarmsPageProps> = ({ apiClient }) => {
     { id: 'alerts' as TabId, name: `Alerts (${alertsTotal})` },
     { id: 'rules' as TabId, name: rulesTotal >= 0 ? `Rules (${rulesTotal})` : 'Rules' },
     { id: 'routing' as TabId, name: 'Routing' },
+    { id: 'suppression' as TabId, name: 'Suppression' },
   ];
 
   const renderTable = () => {
@@ -722,6 +724,9 @@ export const AlarmsPage: React.FC<AlarmsPageProps> = ({ apiClient }) => {
     }
     if (activeTab === 'routing') {
       return <NotificationRoutingPanel apiClient={apiClient} />;
+    }
+    if (activeTab === 'suppression') {
+      return <SuppressionRulesPanel apiClient={apiClient} datasources={datasources} />;
     }
     return null;
   };

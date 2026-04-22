@@ -22,6 +22,7 @@ import type {
   UnifiedRule,
   OSMonitor,
 } from '../../../../common/types/alerting/types';
+import type { SuppressionRuleConfig } from '../../../../common/services/alerting/suppression';
 
 // ---------------------------------------------------------------------------
 // HttpClient interface — implemented by OSD's http service adapter or fetch()
@@ -114,6 +115,12 @@ export interface MonitorDeleteResponse {
   deleted: boolean;
 }
 
+/** Response from GET /suppression-rules */
+export interface SuppressionRulesListResponse {
+  rules: SuppressionRuleConfig[];
+  warnings: DatasourceWarning[];
+}
+
 // ---------------------------------------------------------------------------
 // Path configuration
 // ---------------------------------------------------------------------------
@@ -123,6 +130,7 @@ interface ApiPaths {
   alerts: string;
   rules: string;
   monitors: (dsId: string) => string;
+  suppressionRules: string;
   alertmanagerConfig: string;
   acknowledgeAlert: (id: string) => string;
   alertDetail: (dsId: string, alertId: string) => string;
@@ -138,6 +146,7 @@ const OSD_PATHS: ApiPaths = {
   alerts: '/api/alerting/unified/alerts',
   rules: '/api/alerting/unified/rules',
   monitors: (dsId) => `/api/alerting/opensearch/${dsId}/monitors`,
+  suppressionRules: '/api/alerting/suppression-rules',
   alertmanagerConfig: '/api/alerting/alertmanager/config',
   acknowledgeAlert: (id) => `/api/alerting/alerts/${encodeURIComponent(id)}/acknowledge`,
   alertDetail: (dsId, alertId) =>
@@ -287,6 +296,26 @@ export class AlarmsApiClient {
 
   async getAlertmanagerConfig(): Promise<AlertmanagerConfigResponse> {
     return this.httpGet<AlertmanagerConfigResponse>(this.paths.alertmanagerConfig);
+  }
+
+  // ---- Suppression rules --------------------------------------------------
+
+  /**
+   * List suppression rules. Silences from the given Prometheus datasources are
+   * returned as read-only rules; unreachable datasources are reported in
+   * `response.warnings` rather than failing the call. Passing no datasources
+   * returns an empty list without hitting the server.
+   */
+  async listSuppressionRules(opts?: {
+    datasourceIds?: string[];
+  }): Promise<SuppressionRulesListResponse> {
+    const ids = opts?.datasourceIds;
+    if (!ids || ids.length === 0) {
+      return { rules: [], warnings: [] };
+    }
+    return this.httpGet<SuppressionRulesListResponse>(this.paths.suppressionRules, {
+      datasourceIds: ids.join(','),
+    });
   }
 
   // ---- Prometheus Metadata ------------------------------------------------

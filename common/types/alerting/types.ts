@@ -547,8 +547,8 @@ export interface PrometheusBackend {
   /** Get alerts from Alertmanager (richer than Prometheus /api/v1/alerts — includes routing info) */
   getAlertmanagerAlerts?(client: AlertingOSClient): Promise<AlertmanagerAlert[]>;
 
-  /** List active silences */
-  getSilences?(client: AlertingOSClient): Promise<AlertmanagerSilence[]>;
+  /** List active silences for the given Prometheus datasource. */
+  getSilences?(client: AlertingOSClient, ds: Datasource): Promise<AlertmanagerSilence[]>;
 
   /** Create a new silence (returns the silence ID) */
   createSilence?(client: AlertingOSClient, silence: AlertmanagerSilence): Promise<string>;
@@ -567,8 +567,8 @@ export interface PrometheusBackend {
 
   /**
    * Alertmanager is a global endpoint reached through any Prometheus datasource.
-   * Setting a default lets `getAlertmanagerStatus` and friends resolve a
-   * `directQueryName` for the resource path.
+   * Setting a default lets `getAlertmanagerStatus` resolve a `directQueryName`
+   * for the resource path without an explicit datasource argument.
    */
   setDefaultDatasource?(ds: Datasource): void;
 }

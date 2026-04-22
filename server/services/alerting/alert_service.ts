@@ -36,7 +36,7 @@ import {
   MonitorType,
   MonitorStatus,
 } from '../../../common/types/alerting/types';
-import { TimeoutError } from './timeout_error';
+import { TimeoutError, withTimeout } from './timeout_error';
 
 const DEFAULT_TIMEOUT_MS = 10_000;
 const DEFAULT_MAX_RESULTS = 5_000;
@@ -481,7 +481,6 @@ export class MultiBackendAlertService {
       alertHistory,
       conditionPreviewData,
       notificationRouting,
-      // Suppression rules from the in-memory service (not from OS API)
       suppressionRules: [],
       raw: monitor,
     };
@@ -595,7 +594,7 @@ export class MultiBackendAlertService {
     });
 
     try {
-      const data = await this.withTimeout(
+      const data = await withTimeout(
         this.fetchAlertsRaw(client, ds),
         timeoutMs,
         `Datasource ${ds.name} timed out after ${timeoutMs}ms`
@@ -634,7 +633,7 @@ export class MultiBackendAlertService {
     });
 
     try {
-      const data = await this.withTimeout(
+      const data = await withTimeout(
         this.fetchRulesRaw(client, ds),
         timeoutMs,
         `Datasource ${ds.name} timed out after ${timeoutMs}ms`
@@ -700,34 +699,6 @@ export class MultiBackendAlertService {
       if (match.length > 0) resolved.push(match[0]);
     }
     return resolved;
-  }
-
-  private withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
-    return new Promise<T>((resolve, reject) => {
-      let settled = false;
-      const timer = setTimeout(() => {
-        if (!settled) {
-          settled = true;
-          reject(new TimeoutError(message, ms));
-        }
-      }, ms);
-      promise.then(
-        (val) => {
-          if (!settled) {
-            settled = true;
-            clearTimeout(timer);
-            resolve(val);
-          }
-        },
-        (err) => {
-          if (!settled) {
-            settled = true;
-            clearTimeout(timer);
-            reject(err);
-          }
-        }
-      );
-    });
   }
 
   /**

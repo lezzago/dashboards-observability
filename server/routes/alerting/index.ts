@@ -67,6 +67,7 @@ import {
 } from './metadata_handlers';
 import type { PrometheusMetadataService } from '../../services/alerting/prometheus_metadata_service';
 import { handleGetAlertmanagerConfig } from './alertmanager_handlers';
+import { handleListSuppressionRules } from './suppression_handlers';
 
 export function registerAlertingRoutes(
   router: IRouter,
@@ -638,6 +639,40 @@ export function registerAlertingRoutes(
       }
       promBackend.setDefaultDatasource?.(promDs);
       const result = await handleGetAlertmanagerConfig(promBackend, await getAlertingClient(ctx));
+      return res.ok({ body: result.body });
+    }
+  );
+
+  // ===========================================================================
+  // Suppression Rules Routes
+  // ===========================================================================
+
+  router.get(
+    {
+      path: '/api/alerting/suppression-rules',
+      validate: {
+        query: schema.object({ datasourceIds: schema.maybe(schema.string()) }),
+      },
+    },
+    async (ctx, req, res) => {
+      const csv = req.query.datasourceIds;
+      const ids = csv
+        ? csv
+            .split(',')
+            .map((s) => s.trim())
+            .filter(Boolean)
+        : [];
+      const datasources: Datasource[] = [];
+      if (ids.length > 0) {
+        await discoverOsdDatasources(ctx);
+        for (const id of ids) {
+          const ds = await datasourceService.get(id);
+          if (ds && ds.type === 'prometheus') datasources.push(ds);
+        }
+      }
+      const promBackend = alertService.getPrometheusBackend?.() ?? null;
+      const client = await getAlertingClient(ctx);
+      const result = await handleListSuppressionRules(promBackend, client, datasources);
       return res.ok({ body: result.body });
     }
   );

@@ -45,6 +45,20 @@ export const STATE_COLORS: Record<string, string> = {
 };
 
 // ============================================================================
+// Silence state (Alertmanager suppression rules)
+// ============================================================================
+
+/**
+ * Maps Alertmanager silence states to OUI semantic badge color names.
+ * Used by the Suppression Rules panel and detail flyout.
+ */
+export const SILENCE_STATE_COLORS: Record<string, string> = {
+  active: 'success',
+  pending: 'warning',
+  expired: 'subdued',
+};
+
+// ============================================================================
 // Monitor status
 // ============================================================================
 
