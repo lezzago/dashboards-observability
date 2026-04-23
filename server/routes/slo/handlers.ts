@@ -10,7 +10,9 @@
 
 import type { Logger } from '../../../common/types/alerting/types';
 import {
+  SloDeployContext,
   SloNotFoundError,
+  SloRulerError,
   SloValidationError,
   SloVersionConflictError,
   SloService,
@@ -37,6 +39,22 @@ function toSloError(e: unknown, logger?: Logger): HandlerResult {
       },
     };
   }
+  if (e instanceof SloRulerError) {
+    if (logger) logger.warn(`Ruler dual-write failed: ${e.code} (HTTP ${e.httpStatus})`);
+    // Surface upstream status verbatim when available (4xx) so the wizard can
+    // show Cortex's own diagnostic. 0 (unreachable) maps to 502 — closest
+    // semantic match (upstream gateway failure).
+    const status = e.httpStatus >= 400 && e.httpStatus < 600 ? e.httpStatus : 502;
+    return {
+      status,
+      body: {
+        error: e.message,
+        code: e.code,
+        httpStatus: e.httpStatus,
+        rawBody: e.rawBody,
+      },
+    };
+  }
   return toHandlerResult(e, logger);
 }
 
@@ -57,10 +75,11 @@ export async function handleCreateSLO(
   svc: SloService,
   input: SloCreateInput,
   createdBy: string,
-  logger?: Logger
+  logger?: Logger,
+  deploy?: SloDeployContext
 ): Promise<HandlerResult> {
   try {
-    const doc = await svc.create(input, createdBy);
+    const doc = await svc.create(input, createdBy, deploy);
     return { status: 201, body: doc };
   } catch (e) {
     return toSloError(e, logger);
@@ -87,10 +106,11 @@ export async function handleUpdateSLO(
   id: string,
   input: SloUpdateInput,
   updatedBy: string,
-  logger?: Logger
+  logger?: Logger,
+  deploy?: SloDeployContext
 ): Promise<HandlerResult> {
   try {
-    const doc = await svc.update(id, input, updatedBy);
+    const doc = await svc.update(id, input, updatedBy, deploy);
     return { status: 200, body: doc };
   } catch (e) {
     return toSloError(e, logger);
@@ -100,10 +120,11 @@ export async function handleUpdateSLO(
 export async function handleDeleteSLO(
   svc: SloService,
   id: string,
-  logger?: Logger
+  logger?: Logger,
+  deploy?: SloDeployContext
 ): Promise<HandlerResult> {
   try {
-    const result = await svc.delete(id);
+    const result = await svc.delete(id, deploy);
     if (!result.deleted) return { status: 404, body: { error: 'SLO not found' } };
     return { status: 200, body: { deleted: true, generatedRuleNames: result.generatedRuleNames } };
   } catch (e) {
@@ -115,10 +136,11 @@ export async function handleEnableSLO(
   svc: SloService,
   id: string,
   updatedBy: string,
-  logger?: Logger
+  logger?: Logger,
+  deploy?: SloDeployContext
 ): Promise<HandlerResult> {
   try {
-    const doc = await svc.setEnabled(id, true, updatedBy);
+    const doc = await svc.setEnabled(id, true, updatedBy, deploy);
     return { status: 200, body: doc };
   } catch (e) {
     return toSloError(e, logger);
@@ -129,10 +151,11 @@ export async function handleDisableSLO(
   svc: SloService,
   id: string,
   updatedBy: string,
-  logger?: Logger
+  logger?: Logger,
+  deploy?: SloDeployContext
 ): Promise<HandlerResult> {
   try {
-    const doc = await svc.setEnabled(id, false, updatedBy);
+    const doc = await svc.setEnabled(id, false, updatedBy, deploy);
     return { status: 200, body: doc };
   } catch (e) {
     return toSloError(e, logger);

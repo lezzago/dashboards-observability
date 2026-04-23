@@ -10,9 +10,13 @@
  */
 
 import { schema } from '@osd/config-schema';
-import type { IRouter, Logger } from '../../../../../src/core/server';
+import type { IRouter, Logger, RequestHandlerContext } from '../../../../../src/core/server';
 import { OBSERVABILITY_BASE } from '../../../common/constants/shared';
+import type { SloDeployContext } from '../../../common/slo/slo_service';
 import { SloService } from '../../../common/slo/slo_service';
+import type { AlertingOSClient, Datasource } from '../../../common/types/alerting/types';
+import type { InMemoryDatasourceService } from '../../services/alerting/datasource_service';
+import type { RulerClient } from '../../services/slo/ruler_client';
 import {
   handleCreateSLO,
   handleDeleteSLO,
@@ -24,6 +28,19 @@ import {
   handlePreviewSLORules,
   handleUpdateSLO,
 } from './handlers';
+
+/**
+ * OSD context type with the optional `dataSource` plugin extension. Same
+ * shape used by the alerting routes — declared here so SLO routes don't
+ * reach into the alerting tree for it.
+ */
+type SloHandlerContext = RequestHandlerContext & {
+  dataSource?: {
+    opensearch: {
+      getClient: (id: string) => Promise<AlertingOSClient>;
+    };
+  };
+};
 
 const SLO_BASE = `${OBSERVABILITY_BASE}/v1/slos`;
 
@@ -219,7 +236,62 @@ const updateBody = schema.object({
 // Registration
 // ============================================================================
 
-export function registerSloRoutes(router: IRouter, sloService: SloService, logger: Logger) {
+/**
+ * Build the per-request SloDeployContext the service needs to dual-write to
+ * the ruler on create/update/delete. Returns `undefined` (no ruler call) when:
+ *   - the ruler client isn't configured (legacy / offline dev),
+ *   - the datasource service hasn't discovered `datasourceId` yet,
+ *   - the datasource has no `directQueryName` (not a DirectQuery Prometheus).
+ *
+ * TODO(W1.5): derive `workspaceId` from OSD's workspace scope once the SLO
+ * spec carries a workspace reference. For now the datasource ID doubles as a
+ * tenant discriminator — safe because `slo-generated-<ds>` is deterministic
+ * and unique per Prometheus connection. Cross-ref memo §Workspace → Cortex
+ * tenant mapping.
+ */
+async function buildDeployContext(
+  ctx: SloHandlerContext,
+  datasourceId: string | undefined,
+  rulerClient: RulerClient | undefined,
+  datasourceService: InMemoryDatasourceService | undefined,
+  logger: Logger
+): Promise<SloDeployContext | undefined> {
+  if (!rulerClient || !datasourceService || !datasourceId) return undefined;
+
+  const ds = await datasourceService.get(datasourceId);
+  if (!ds) {
+    logger.debug(`SLO deploy context unavailable: datasource "${datasourceId}" not known`);
+    return undefined;
+  }
+  if (!ds.directQueryName) {
+    logger.debug(
+      `SLO deploy context unavailable: datasource "${datasourceId}" has no directQueryName`
+    );
+    return undefined;
+  }
+
+  // Local-cluster fallback (no MDS) — the alerting routes use the same pattern.
+  const client: AlertingOSClient =
+    ds.mdsId && ctx.dataSource
+      ? await ctx.dataSource.opensearch.getClient(ds.mdsId)
+      : ctx.core.opensearch.client.asCurrentUser;
+
+  return {
+    ruler: rulerClient,
+    client,
+    datasource: ds as Datasource,
+    // TODO: pull real workspaceId from OSD request scope once plumbed.
+    workspaceId: datasourceId,
+  };
+}
+
+export function registerSloRoutes(
+  router: IRouter,
+  sloService: SloService,
+  logger: Logger,
+  rulerClient?: RulerClient,
+  datasourceService?: InMemoryDatasourceService
+) {
   router.get(
     {
       path: SLO_BASE,
@@ -273,9 +345,16 @@ export function registerSloRoutes(router: IRouter, sloService: SloService, logge
     }
   );
 
-  router.post({ path: SLO_BASE, validate: { body: createBody } }, async (_ctx, req, res) => {
+  router.post({ path: SLO_BASE, validate: { body: createBody } }, async (ctx, req, res) => {
     // TODO: once request auth context is wired, pull from req.auth.
-    const result = await handleCreateSLO(sloService, req.body, 'osd-user', logger);
+    const deploy = await buildDeployContext(
+      ctx as SloHandlerContext,
+      req.body?.spec?.datasourceId,
+      rulerClient,
+      datasourceService,
+      logger
+    );
+    const result = await handleCreateSLO(sloService, req.body, 'osd-user', logger, deploy);
     if (result.status === 201) return res.ok({ body: result.body });
     return res.customError({
       statusCode: result.status,
@@ -339,8 +418,25 @@ export function registerSloRoutes(router: IRouter, sloService: SloService, logge
         body: updateBody,
       },
     },
-    async (_ctx, req, res) => {
-      const result = await handleUpdateSLO(sloService, req.params.id, req.body, 'osd-user', logger);
+    async (ctx, req, res) => {
+      // The update body may not carry datasourceId (partial spec); fetch the
+      // existing doc to resolve the datasource for the deploy context.
+      const existing = await sloService.get(req.params.id);
+      const deploy = await buildDeployContext(
+        ctx as SloHandlerContext,
+        existing?.spec.datasourceId,
+        rulerClient,
+        datasourceService,
+        logger
+      );
+      const result = await handleUpdateSLO(
+        sloService,
+        req.params.id,
+        req.body,
+        'osd-user',
+        logger,
+        deploy
+      );
       if (result.status === 200) return res.ok({ body: result.body });
       return res.customError({
         statusCode: result.status,
@@ -357,8 +453,16 @@ export function registerSloRoutes(router: IRouter, sloService: SloService, logge
       path: `${SLO_BASE}/{id}`,
       validate: { params: schema.object({ id: schema.string() }) },
     },
-    async (_ctx, req, res) => {
-      const result = await handleDeleteSLO(sloService, req.params.id, logger);
+    async (ctx, req, res) => {
+      const existing = await sloService.get(req.params.id);
+      const deploy = await buildDeployContext(
+        ctx as SloHandlerContext,
+        existing?.spec.datasourceId,
+        rulerClient,
+        datasourceService,
+        logger
+      );
+      const result = await handleDeleteSLO(sloService, req.params.id, logger, deploy);
       if (result.status === 200) return res.ok({ body: result.body });
       return res.customError({
         statusCode: result.status,
@@ -372,8 +476,16 @@ export function registerSloRoutes(router: IRouter, sloService: SloService, logge
       path: `${SLO_BASE}/{id}/enable`,
       validate: { params: schema.object({ id: schema.string() }) },
     },
-    async (_ctx, req, res) => {
-      const result = await handleEnableSLO(sloService, req.params.id, 'osd-user', logger);
+    async (ctx, req, res) => {
+      const existing = await sloService.get(req.params.id);
+      const deploy = await buildDeployContext(
+        ctx as SloHandlerContext,
+        existing?.spec.datasourceId,
+        rulerClient,
+        datasourceService,
+        logger
+      );
+      const result = await handleEnableSLO(sloService, req.params.id, 'osd-user', logger, deploy);
       if (result.status === 200) return res.ok({ body: result.body });
       return res.customError({
         statusCode: result.status,
@@ -387,8 +499,16 @@ export function registerSloRoutes(router: IRouter, sloService: SloService, logge
       path: `${SLO_BASE}/{id}/disable`,
       validate: { params: schema.object({ id: schema.string() }) },
     },
-    async (_ctx, req, res) => {
-      const result = await handleDisableSLO(sloService, req.params.id, 'osd-user', logger);
+    async (ctx, req, res) => {
+      const existing = await sloService.get(req.params.id);
+      const deploy = await buildDeployContext(
+        ctx as SloHandlerContext,
+        existing?.spec.datasourceId,
+        rulerClient,
+        datasourceService,
+        logger
+      );
+      const result = await handleDisableSLO(sloService, req.params.id, 'osd-user', logger, deploy);
       if (result.status === 200) return res.ok({ body: result.body });
       return res.customError({
         statusCode: result.status,

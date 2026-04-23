@@ -37,6 +37,7 @@ import {
 import { PrometheusMetadataService } from '../services/alerting/prometheus_metadata_service';
 import { registerSloRoutes } from './slo';
 import type { SloService } from '../../common/slo/slo_service';
+import { DirectQueryRulerClient } from '../services/slo/ruler_client';
 
 export function setupRoutes({
   router,
@@ -107,6 +108,11 @@ export function setupRoutes({
   );
 
   if (sloService) {
-    registerSloRoutes(router, sloService, logger);
+    // Real ruler writes go through the same DirectQuery proxy the read path
+    // already uses. The alerting datasource service is reused for datasource
+    // lookup (directQueryName, mdsId) — it's already seeded on the first
+    // /api/alerting/* call via `discoverOsdDatasources`.
+    const rulerClient = new DirectQueryRulerClient(logger);
+    registerSloRoutes(router, sloService, logger, rulerClient, alertingDatasourceService);
   }
 }

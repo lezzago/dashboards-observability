@@ -16,10 +16,16 @@
  * default that the UI can render without breaking.
  */
 
-import type { Logger, PaginatedResponse } from '../types/alerting/types';
+import type {
+  AlertingOSClient,
+  Datasource,
+  Logger,
+  PaginatedResponse,
+} from '../types/alerting/types';
 import type {
   ISloStore,
   Dimension,
+  GeneratedRuleGroup,
   SloCreateInput,
   SloDocument,
   SloHealthState,
@@ -37,12 +43,73 @@ import {
 } from './slo_promql_generator';
 import { validateSloSpec, validateSloId } from './slo_validators';
 import { InMemorySloStore } from './slo_store';
-import { SloNotFoundError, SloValidationError, SloVersionConflictError } from './slo_errors';
+import {
+  SloNotFoundError,
+  SloRulerError,
+  SloValidationError,
+  SloVersionConflictError,
+} from './slo_errors';
 
 /** Status cache TTL — listing pages call the batch endpoint at this cadence. */
 const STATUS_CACHE_TTL_MS = 60_000;
 
-export { SloNotFoundError, SloValidationError, SloVersionConflictError };
+export { SloNotFoundError, SloRulerError, SloValidationError, SloVersionConflictError };
+
+// ============================================================================
+// Ruler deployment context
+// ============================================================================
+
+/**
+ * Minimal ruler-client surface the service needs. Mirrors `RulerClient` in
+ * `server/services/slo/ruler_client.ts` but declared here so `slo_service.ts`
+ * (importable from both server and tests) doesn't reach into the server tree.
+ */
+export interface SloRulerClient {
+  upsertRuleGroup(
+    client: AlertingOSClient,
+    datasource: Datasource,
+    namespace: string,
+    group: GeneratedRuleGroup
+  ): Promise<void>;
+  deleteRuleGroup(
+    client: AlertingOSClient,
+    datasource: Datasource,
+    namespace: string,
+    groupName: string
+  ): Promise<void>;
+}
+
+/**
+ * Per-request deployment context passed to `create` / `update` / `delete`.
+ * When absent, ruler calls are skipped entirely — e.g. unit tests, dev-server
+ * paths without a real DirectQuery backend, or legacy callers that haven't
+ * been plumbed through yet.
+ *
+ * Design choice (memo §Dual-write): methods take `deploy?`, rather than the
+ * constructor taking a RulerClient, because the OS client / datasource / ws
+ * are all request-scoped and can't live on the service instance.
+ */
+export interface SloDeployContext {
+  ruler: SloRulerClient;
+  client: AlertingOSClient;
+  datasource: Datasource;
+  /**
+   * Workspace identifier for namespace scoping. Pass `'default'` if the
+   * caller has no workspace concept (standalone, tests). The namespace is
+   * `slo-generated-<workspaceId>` — hyphen (not slash) because the SQL
+   * plugin's REST router treats `{namespace}` as a single path segment.
+   */
+  workspaceId: string;
+}
+
+/**
+ * Compose the per-workspace ruler namespace. Hyphen separator (not slash) so
+ * the whole thing stays a single `{namespace}` path segment when routed
+ * through `/_plugins/_directquery/_resources/{dqName}/api/v1/rules/{namespace}`.
+ */
+export function sloRulerNamespaceFor(workspaceId: string): string {
+  return `${SLO_RULER_NAMESPACE}-${workspaceId}`;
+}
 
 // ============================================================================
 // Service
@@ -64,7 +131,11 @@ export class SloService {
 
   // ---------- CRUD ----------
 
-  async create(input: SloCreateInput, createdBy = 'system'): Promise<SloDocument> {
+  async create(
+    input: SloCreateInput,
+    createdBy = 'system',
+    deploy?: SloDeployContext
+  ): Promise<SloDocument> {
     // Normalize (clamp target precision, etc.) BEFORE validation so the
     // range check and rule generation both see the canonical value.
     // Validators stay pure — never mutate — so normalization lives here.
@@ -83,6 +154,7 @@ export class SloService {
     await this.assertNameUnique(spec.datasourceId, spec.name, null);
 
     const now = new Date().toISOString();
+    const namespace = deploy ? sloRulerNamespaceFor(deploy.workspaceId) : SLO_RULER_NAMESPACE;
     // Build the document with minimal status so we can generate rules from it,
     // then fill in the provisioning record with the resulting names.
     const doc: SloDocument = {
@@ -97,19 +169,37 @@ export class SloService {
         provisioning: {
           backend: 'prometheus',
           ruleGroupName: '',
-          rulerNamespace: SLO_RULER_NAMESPACE,
+          rulerNamespace: namespace,
           generatedRuleNames: [],
         },
       },
     };
 
-    const group = generateSloRuleGroup(doc);
+    const group = generateSloRuleGroup(doc, {
+      workspaceId: deploy?.workspaceId,
+    });
     if (doc.status.provisioning.backend === 'prometheus') {
       doc.status.provisioning.ruleGroupName = group.groupName;
       doc.status.provisioning.generatedRuleNames = extractGeneratedRuleNames(group);
     }
 
-    await this.store.save(doc);
+    // Ruler-first, SO-second (memo §Dual-write atomicity). An SloRulerError
+    // here propagates unchanged — the SO is never written and the wizard
+    // renders the raw upstream body so the user can self-service.
+    if (deploy) {
+      await deploy.ruler.upsertRuleGroup(deploy.client, deploy.datasource, namespace, group);
+    }
+
+    try {
+      await this.store.save(doc);
+    } catch (saveErr) {
+      // Compensation: ruler wrote, SO didn't. One best-effort delete; swallow
+      // + warn on compensation failure. Reconciler (W3) sweeps danglers.
+      if (deploy) {
+        await this.safeRollback(deploy, namespace, group.groupName);
+      }
+      throw saveErr;
+    }
     this.logger.info(
       `Created SLO: ${doc.id} (${doc.spec.name}) — ${group.rules.length} rules generated`
     );
@@ -120,7 +210,12 @@ export class SloService {
     return this.store.get(id);
   }
 
-  async update(id: string, input: SloUpdateInput, updatedBy = 'system'): Promise<SloDocument> {
+  async update(
+    id: string,
+    input: SloUpdateInput,
+    updatedBy = 'system',
+    deploy?: SloDeployContext
+  ): Promise<SloDocument> {
     const existing = await this.store.get(id);
     if (!existing) throw new SloNotFoundError(id);
 
@@ -139,6 +234,14 @@ export class SloService {
       await this.assertNameUnique(merged.datasourceId, merged.name, id);
     }
 
+    // If the caller provides a deploy context, derive the namespace from the
+    // workspace; otherwise preserve whatever namespace the existing SO carries.
+    const namespace = deploy
+      ? sloRulerNamespaceFor(deploy.workspaceId)
+      : existing.status.provisioning.backend === 'prometheus'
+      ? existing.status.provisioning.rulerNamespace
+      : SLO_RULER_NAMESPACE;
+
     const updated: SloDocument = {
       id: existing.id,
       spec: merged,
@@ -147,40 +250,121 @@ export class SloService {
         version: existing.status.version + 1,
         updatedAt: new Date().toISOString(),
         updatedBy,
+        provisioning:
+          existing.status.provisioning.backend === 'prometheus'
+            ? { ...existing.status.provisioning, rulerNamespace: namespace }
+            : existing.status.provisioning,
       },
     };
 
-    const group = generateSloRuleGroup(updated);
+    const group = generateSloRuleGroup(updated, {
+      workspaceId: deploy?.workspaceId,
+    });
     if (updated.status.provisioning.backend === 'prometheus') {
       updated.status.provisioning.ruleGroupName = group.groupName;
       updated.status.provisioning.generatedRuleNames = extractGeneratedRuleNames(group);
     }
 
-    await this.store.save(updated);
+    if (deploy) {
+      await deploy.ruler.upsertRuleGroup(deploy.client, deploy.datasource, namespace, group);
+    }
+
+    try {
+      await this.store.save(updated);
+    } catch (saveErr) {
+      if (deploy) {
+        await this.safeRollback(deploy, namespace, group.groupName);
+      }
+      throw saveErr;
+    }
     this.statusCache.delete(id);
     this.logger.info(`Updated SLO: ${id} → v${updated.status.version}`);
     return updated;
   }
 
-  async delete(id: string): Promise<{ deleted: boolean; generatedRuleNames: string[] }> {
+  async delete(
+    id: string,
+    deploy?: SloDeployContext
+  ): Promise<{ deleted: boolean; generatedRuleNames: string[] }> {
     const existing = await this.store.get(id);
     if (!existing) return { deleted: false, generatedRuleNames: [] };
+
+    // SO-first (memo §Dual-write atomicity §delete): a failed ruler delete
+    // must not resurrect an SO the user thinks is gone. Dangling rule
+    // groups are swept by the Wave 3 reconciler using `generatedRuleNames`.
     await this.store.delete(id);
     this.statusCache.delete(id);
-    this.logger.info(`Deleted SLO: ${id}`);
+
     const names =
       existing.status.provisioning.backend === 'prometheus'
         ? existing.status.provisioning.generatedRuleNames
         : [];
+
+    if (deploy && existing.status.provisioning.backend === 'prometheus') {
+      const namespace = existing.status.provisioning.rulerNamespace || SLO_RULER_NAMESPACE;
+      const groupName = existing.status.provisioning.ruleGroupName;
+      if (groupName) {
+        try {
+          await deploy.ruler.deleteRuleGroup(
+            deploy.client,
+            deploy.datasource,
+            namespace,
+            groupName
+          );
+        } catch (err) {
+          this.logger.warn(
+            `Ruler delete failed for SLO ${id} (ns=${namespace} group=${groupName}): ${
+              err instanceof Error ? err.message : String(err)
+            }. SO was deleted; reconciler will sweep dangling group.`
+          );
+        }
+      }
+    }
+
+    this.logger.info(`Deleted SLO: ${id}`);
     return { deleted: true, generatedRuleNames: names };
   }
 
   // ---------- enable / disable ----------
 
-  async setEnabled(id: string, enabled: boolean, updatedBy = 'system'): Promise<SloDocument> {
+  async setEnabled(
+    id: string,
+    enabled: boolean,
+    updatedBy = 'system',
+    deploy?: SloDeployContext
+  ): Promise<SloDocument> {
     const existing = await this.store.get(id);
     if (!existing) throw new SloNotFoundError(id);
-    return this.update(id, { spec: { enabled }, version: existing.status.version }, updatedBy);
+    return this.update(
+      id,
+      { spec: { enabled }, version: existing.status.version },
+      updatedBy,
+      deploy
+    );
+  }
+
+  /**
+   * Compensation rollback for the ruler-OK / SO-fails edge case.
+   * Best-effort: swallow errors so the original SO failure surfaces to the
+   * caller unchanged. Reconciler (W3) covers the case where this itself fails.
+   */
+  private async safeRollback(
+    deploy: SloDeployContext,
+    namespace: string,
+    groupName: string
+  ): Promise<void> {
+    try {
+      await deploy.ruler.deleteRuleGroup(deploy.client, deploy.datasource, namespace, groupName);
+      this.logger.info(
+        `Ruler rollback succeeded for ${groupName} in ${namespace} (SO write failed)`
+      );
+    } catch (err) {
+      this.logger.warn(
+        `Ruler rollback failed for ${groupName} in ${namespace}: ${
+          err instanceof Error ? err.message : String(err)
+        }. Dangling rule group; reconciler will sweep.`
+      );
+    }
   }
 
   // ---------- preview ----------
