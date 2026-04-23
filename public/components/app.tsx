@@ -34,6 +34,7 @@ import {
   ApplicationMapPage as ApmApplicationMap,
   ApplicationMapPageProps as ApmApplicationMapProps,
 } from './apm/pages/application_map';
+import { SlosPage, SlosPageProps } from './apm/pages/slos';
 import { ApmConfigProvider } from './apm/config/apm_config_context';
 
 interface ObservabilityAppDeps {
@@ -71,6 +72,14 @@ const ApmApplicationMapWithProvider = (props: ApmApplicationMapProps) => (
   </ApmConfigProvider>
 );
 
+// Same wrapping pattern as Services / Application Map — gives the SLO pages
+// access to the APM-configured Prometheus connection via useApmConfig().
+const SlosPageWithProvider = (props: SlosPageProps & { DepsStart: AppPluginStartDependencies }) => (
+  <ApmConfigProvider dataService={props.DepsStart?.data}>
+    <SlosPage {...props} />
+  </ApmConfigProvider>
+);
+
 const pages = {
   applications: ApplicationAnalyticsHome,
   logs: EventAnalytics,
@@ -85,6 +94,7 @@ const pages = {
   alerting: AlertingHome,
   'apm-services': ApmServicesWithProvider,
   'apm-application-map': ApmApplicationMapWithProvider,
+  'apm-slo': SlosPageWithProvider,
 };
 
 export const App = ({

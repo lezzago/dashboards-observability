@@ -21,7 +21,7 @@ import {
   TRACE_SERVICE_MAP_MAX_NODES,
   TRACE_SERVICE_MAP_MAX_EDGES,
 } from '../../common/constants/trace_analytics';
-import { APM_ENABLED_SETTING } from '../../common/constants/apm';
+import { APM_ENABLED_SETTING, SLO_ENABLED_SETTING } from '../../common/constants/apm';
 import {
   ALERT_MANAGER_DEFAULT_DATASOURCES_SETTING,
   ALERT_MANAGER_MAX_DATASOURCES_DEFAULT,
@@ -160,6 +160,24 @@ export const registerObservabilityUISettings = (
       description: i18n.translate('observability.apmEnabled.description', {
         defaultMessage:
           'Enable the APM (Application Performance Monitoring) feature. When enabled and the Discover Traces feature is active, APM Services and Application Map pages are available in the navigation. Otherwise, Trace Analytics pages are shown as fallback.',
+      }),
+      schema: schema.boolean(),
+      requiresPageReload: true,
+      scope: UiSettingScope.GLOBAL,
+    },
+  });
+
+  // SLO/SLI Feature Toggle - requires APM to also be enabled
+  uiSettings.register({
+    [SLO_ENABLED_SETTING]: {
+      name: i18n.translate('observability.sloEnabled.name', {
+        defaultMessage: 'Enable SLO/SLI',
+      }),
+      value: false,
+      category: ['Observability'],
+      description: i18n.translate('observability.sloEnabled.description', {
+        defaultMessage:
+          'Enable the SLO/SLI page under Application Monitoring. Requires APM to also be enabled.',
       }),
       schema: schema.boolean(),
       requiresPageReload: true,

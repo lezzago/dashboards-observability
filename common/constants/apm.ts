@@ -20,3 +20,11 @@ export const observabilityApmApplicationMapPluginOrder = 5101;
 export const observabilityApmApplicationConfigID = 'observability-apm-application-config';
 export const observabilityApmApplicationConfigTitle = 'Configuration';
 export const observabilityApmApplicationConfigPluginOrder = 5102;
+
+// APM application IDs - SLO/SLI
+export const observabilityApmSloID = 'observability-apm-slo';
+export const observabilityApmSloTitle = 'SLO/SLI';
+export const observabilityApmSloPluginOrder = 5103;
+
+// UI Setting key for SLO feature toggle (ships dark; requires APM_ENABLED_SETTING to also be true)
+export const SLO_ENABLED_SETTING = 'observability:sloEnabled';

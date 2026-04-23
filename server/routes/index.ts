@@ -35,17 +35,21 @@ import {
   DirectQueryPrometheusBackend,
 } from '../services/alerting';
 import { PrometheusMetadataService } from '../services/alerting/prometheus_metadata_service';
+import { registerSloRoutes } from './slo';
+import type { SloService } from '../../common/slo/slo_service';
 
 export function setupRoutes({
   router,
   client,
   dataSourceEnabled,
   logger,
+  sloService,
 }: {
   router: IRouter;
   client: ILegacyClusterClient;
   dataSourceEnabled: boolean;
   logger: Logger;
+  sloService?: SloService;
 }) {
   PanelsRouter(router);
   VisualizationsRouter(router);
@@ -101,4 +105,8 @@ export function setupRoutes({
     logger,
     metadataService
   );
+
+  if (sloService) {
+    registerSloRoutes(router, sloService, logger);
+  }
 }

@@ -70,12 +70,16 @@ import {
 } from '../common/constants/shared';
 import {
   APM_ENABLED_SETTING,
+  SLO_ENABLED_SETTING,
   observabilityApmServicesID,
   observabilityApmServicesTitle,
   observabilityApmServicesPluginOrder,
   observabilityApmApplicationMapID,
   observabilityApmApplicationMapTitle,
   observabilityApmApplicationMapPluginOrder,
+  observabilityApmSloID,
+  observabilityApmSloTitle,
+  observabilityApmSloPluginOrder,
 } from '../common/constants/apm';
 import { QueryManager } from '../common/query_manager';
 import {
@@ -194,6 +198,7 @@ export class ObservabilityPlugin
   }
   private mdsFlagStatus: boolean = false;
   private apmEnabled: boolean = false;
+  private sloEnabled: boolean = false;
   private appUpdater$ = new BehaviorSubject<AppUpdater>(() => ({}));
   private apmAppUpdater$ = new BehaviorSubject<AppUpdater>(() => ({}));
   private traceAnalyticsAppUpdater$ = new BehaviorSubject<AppUpdater>(() => ({}));
@@ -222,6 +227,14 @@ export class ObservabilityPlugin
     } catch (_error) {
       // Handle authentication errors during setup
       this.apmEnabled = false;
+    }
+
+    // Read SLO enabled setting — only effective when APM is also enabled
+    try {
+      const sloSettingValue = core.uiSettings.get(SLO_ENABLED_SETTING);
+      this.sloEnabled = sloSettingValue ?? false;
+    } catch (_error) {
+      this.sloEnabled = false;
     }
 
     // redirect legacy notebooks URL to current URL under observability
@@ -441,6 +454,18 @@ export class ObservabilityPlugin
           updater$: this.apmAppUpdater$,
         });
 
+        // SLO/SLI — ships behind observability:sloEnabled until GA
+        if (this.sloEnabled) {
+          core.application.register({
+            id: observabilityApmSloID,
+            title: observabilityApmSloTitle,
+            category: APPLICATION_MONITORING_CATEGORY,
+            order: observabilityApmSloPluginOrder,
+            mount: appMountWithStartPage('apm-slo', '/slos'),
+            updater$: this.apmAppUpdater$,
+          });
+        }
+
         // Trace Analytics apps - visible when traces capability DISABLED (fallback)
         core.application.register({
           id: observabilityTracesNewNavID,
@@ -528,7 +553,8 @@ export class ObservabilityPlugin
       core,
       this.apmEnabled,
       APPLICATION_MONITORING_CATEGORY,
-      !!this.config.alertManager?.enabled
+      !!this.config.alertManager?.enabled,
+      this.sloEnabled
     );
 
     const embeddableFactory = new ObservabilityEmbeddableFactoryDefinition(async () => ({

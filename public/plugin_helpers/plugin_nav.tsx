@@ -21,6 +21,7 @@ import {
 import {
   observabilityApmServicesID,
   observabilityApmApplicationMapID,
+  observabilityApmSloID,
 } from '../../common/constants/apm';
 import { AppPluginStartDependencies } from '../types';
 
@@ -28,7 +29,8 @@ export function registerAllPluginNavGroups(
   core: CoreSetup<AppPluginStartDependencies>,
   apmEnabled: boolean,
   applicationMonitoringCategory: AppCategory,
-  alertManagerEnabled: boolean = false
+  alertManagerEnabled: boolean = false,
+  sloEnabled: boolean = false
 ) {
   core.chrome.navGroup.addNavLinksToGroup(DEFAULT_NAV_GROUPS.observability, [
     {
@@ -118,7 +120,7 @@ export function registerAllPluginNavGroups(
   if (apmEnabled) {
     // APM Mode - register nav links for both APM and Trace Analytics apps
     // Visibility controlled by explore.discoverTracesEnabled capability in start()
-    core.chrome.navGroup.addNavLinksToGroup(DEFAULT_NAV_GROUPS.observability, [
+    const apmLinks = [
       {
         id: observabilityApmServicesID,
         category: applicationMonitoringCategory,
@@ -143,7 +145,16 @@ export function registerAllPluginNavGroups(
         showInAllNavGroup: true,
         order: 100,
       },
-    ]);
+    ];
+    if (sloEnabled) {
+      apmLinks.push({
+        id: observabilityApmSloID,
+        category: applicationMonitoringCategory,
+        showInAllNavGroup: true,
+        order: 300,
+      });
+    }
+    core.chrome.navGroup.addNavLinksToGroup(DEFAULT_NAV_GROUPS.observability, apmLinks);
   } else {
     // Trace Analytics Mode - UI setting disabled
     core.chrome.navGroup.addNavLinksToGroup(DEFAULT_NAV_GROUPS.observability, [

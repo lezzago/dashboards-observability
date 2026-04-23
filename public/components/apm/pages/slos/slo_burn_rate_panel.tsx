@@ -1,0 +1,326 @@
+/*
+ * Copyright OpenSearch Contributors
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/**
+ * Burn-rate matrix for an SLO objective.
+ *
+ * Renders one card per MWMBR tier (PageQuick / PageSlow / TicketQuick / TicketSlow)
+ * showing the short- and long-window error ratios alongside the threshold that
+ * would fire the alert. Matches the rule generator so operators can reconcile
+ * "why is alert X firing?" or "which tier is closest?" without leaving the page.
+ *
+ * Inline PromQL is used (rather than the generated recording rule names) so the
+ * panel lights up immediately on services whose raw metrics are scraped, even
+ * before the ruler has evaluated the SLO rules.
+ */
+
+import React, { useMemo } from 'react';
+import {
+  EuiFlexGroup,
+  EuiFlexItem,
+  EuiHealth,
+  EuiPanel,
+  EuiSpacer,
+  EuiText,
+  EuiToolTip,
+} from '@elastic/eui';
+import { euiThemeVars } from '@osd/ui-shared-deps/theme';
+import { usePromQLChartData } from '../../shared/hooks/use_promql_chart_data';
+import { TimeRange } from '../../common/types/service_types';
+import type { BurnRateConfig, Objective, SloDocument } from '../../../../../common/slo/slo_types';
+import { buildErrorRatioExprForWindow } from './slo_query_builders';
+
+export interface SloBurnRatePanelProps {
+  slo: SloDocument;
+  objective: Objective;
+  prometheusConnectionId: string;
+  timeRange: TimeRange;
+  refreshTrigger: number;
+}
+
+/** Friendly labels for the four default MWMBR tiers, in index order. */
+const TIER_LABELS = ['Page · Quick', 'Page · Slow', 'Ticket · Quick', 'Ticket · Slow'] as const;
+
+function formatPct(value: number | null): string {
+  if (value === null || !Number.isFinite(value)) return '—';
+  if (Math.abs(value) < 0.0001) return '0%';
+  return `${(value * 100).toFixed(3).replace(/\.?0+$/, '')}%`;
+}
+
+function formatMultiplier(n: number): string {
+  const rounded = Math.round(n * 10) / 10;
+  return Number.isInteger(rounded) ? `${rounded}x` : `${rounded.toFixed(1)}x`;
+}
+
+/**
+ * Health of a single tier: a tier is "firing" when BOTH windows exceed the
+ * threshold (mirroring the alert expression `short > t AND long > t`). When
+ * only one window exceeds, we show "warming" since the `and` prevents the alert.
+ */
+type TierHealth = 'firing' | 'warming' | 'ok' | 'no_data';
+
+function classifyTier(short: number | null, long: number | null, threshold: number): TierHealth {
+  if (short === null && long === null) return 'no_data';
+  const s = short ?? 0;
+  const l = long ?? 0;
+  if (s > threshold && l > threshold) return 'firing';
+  if (s > threshold || l > threshold) return 'warming';
+  return 'ok';
+}
+
+function healthColor(h: TierHealth): string {
+  switch (h) {
+    case 'firing':
+      return 'danger';
+    case 'warming':
+      return 'warning';
+    case 'ok':
+      return 'success';
+    default:
+      return 'subdued';
+  }
+}
+
+function healthLabel(h: TierHealth): string {
+  switch (h) {
+    case 'firing':
+      return 'firing';
+    case 'warming':
+      return 'warming';
+    case 'ok':
+      return 'healthy';
+    default:
+      return 'no data';
+  }
+}
+
+/**
+ * Horizontal bar visualising `ratio / threshold`. Caps at 150% so an extreme
+ * burst doesn't make the other tiers illegible.
+ */
+const BurnBar: React.FC<{ ratio: number | null; threshold: number }> = ({ ratio, threshold }) => {
+  const pct =
+    ratio === null || !Number.isFinite(ratio) || threshold <= 0
+      ? 0
+      : Math.min(150, (ratio / threshold) * 100);
+  const thresholdPct = Math.min(100, (threshold / (threshold * 1.5)) * 100); // always 66.6%
+  const exceeded = ratio !== null && ratio > threshold;
+  const fillColor = exceeded ? euiThemeVars.euiColorDanger : euiThemeVars.euiColorSuccess;
+
+  return (
+    <div
+      style={{
+        position: 'relative',
+        height: 6,
+        background: euiThemeVars.euiColorLightestShade,
+        borderRadius: 3,
+        overflow: 'hidden',
+      }}
+    >
+      <div
+        style={{
+          width: `${Math.min(100, pct / 1.5)}%`,
+          height: '100%',
+          background: fillColor,
+          transition: 'width 200ms ease',
+        }}
+      />
+      <div
+        style={{
+          position: 'absolute',
+          left: `${thresholdPct}%`,
+          top: -2,
+          bottom: -2,
+          width: 1,
+          background: euiThemeVars.euiColorMediumShade,
+        }}
+      />
+    </div>
+  );
+};
+
+interface TierCardProps {
+  tier: BurnRateConfig;
+  label: string;
+  threshold: number;
+  slo: SloDocument;
+  objective: Objective;
+  prometheusConnectionId: string;
+  timeRange: TimeRange;
+  refreshTrigger: number;
+}
+
+/**
+ * One tier card. Fetches the short-window and long-window error ratios
+ * separately (two lightweight scalar queries) so the cards update independently
+ * and a slow long-window query doesn't block the page.
+ */
+const TierCard: React.FC<TierCardProps> = ({
+  tier,
+  label,
+  threshold,
+  slo,
+  objective,
+  prometheusConnectionId,
+  timeRange,
+  refreshTrigger,
+}) => {
+  const shortQuery = useMemo(() => buildErrorRatioExprForWindow(slo, objective, tier.shortWindow), [
+    slo,
+    objective,
+    tier.shortWindow,
+  ]);
+  const longQuery = useMemo(() => buildErrorRatioExprForWindow(slo, objective, tier.longWindow), [
+    slo,
+    objective,
+    tier.longWindow,
+  ]);
+
+  const shortData = usePromQLChartData({
+    promqlQuery: shortQuery ?? '',
+    timeRange,
+    prometheusConnectionId,
+    refreshTrigger,
+    enabled: Boolean(shortQuery),
+  });
+  const longData = usePromQLChartData({
+    promqlQuery: longQuery ?? '',
+    timeRange,
+    prometheusConnectionId,
+    refreshTrigger,
+    enabled: Boolean(longQuery),
+  });
+
+  const short = shortData.latestValue;
+  const long = longData.latestValue;
+  const health = classifyTier(short, long, threshold);
+  const loading = shortData.isLoading || longData.isLoading;
+
+  return (
+    <EuiPanel
+      paddingSize="s"
+      hasBorder
+      hasShadow={false}
+      data-test-subj={`slos-burnrate-tier-${tier.severity}-${tier.shortWindow}-${tier.longWindow}`}
+    >
+      <EuiFlexGroup gutterSize="s" alignItems="center" responsive={false}>
+        <EuiFlexItem>
+          <EuiText size="s">
+            <strong>{label}</strong>
+          </EuiText>
+          <EuiText size="xs" color="subdued">
+            {formatMultiplier(tier.burnRateMultiplier)} burn · {tier.severity}
+          </EuiText>
+        </EuiFlexItem>
+        <EuiFlexItem grow={false}>
+          <EuiHealth color={healthColor(health)}>{healthLabel(health)}</EuiHealth>
+        </EuiFlexItem>
+      </EuiFlexGroup>
+
+      <EuiSpacer size="s" />
+
+      <EuiFlexGroup gutterSize="m" alignItems="center" responsive={false}>
+        <EuiFlexItem>
+          <EuiText size="xs" color="subdued">
+            short ({tier.shortWindow})
+          </EuiText>
+          <EuiText size="s">
+            <strong
+              style={{
+                color:
+                  short !== null && short > threshold ? euiThemeVars.euiColorDanger : undefined,
+              }}
+            >
+              {loading ? '…' : formatPct(short)}
+            </strong>
+          </EuiText>
+          <EuiSpacer size="xs" />
+          <BurnBar ratio={short} threshold={threshold} />
+        </EuiFlexItem>
+        <EuiFlexItem>
+          <EuiText size="xs" color="subdued">
+            long ({tier.longWindow})
+          </EuiText>
+          <EuiText size="s">
+            <strong
+              style={{
+                color: long !== null && long > threshold ? euiThemeVars.euiColorDanger : undefined,
+              }}
+            >
+              {loading ? '…' : formatPct(long)}
+            </strong>
+          </EuiText>
+          <EuiSpacer size="xs" />
+          <BurnBar ratio={long} threshold={threshold} />
+        </EuiFlexItem>
+      </EuiFlexGroup>
+
+      <EuiSpacer size="xs" />
+      <EuiToolTip
+        content={`Fires when BOTH windows exceed ${formatPct(
+          threshold
+        )} (burn rate × error budget). For: ${tier.forDuration}.`}
+      >
+        <EuiText size="xs" color="subdued">
+          threshold {formatPct(threshold)} · for {tier.forDuration}
+        </EuiText>
+      </EuiToolTip>
+    </EuiPanel>
+  );
+};
+
+export const SloBurnRatePanel: React.FC<SloBurnRatePanelProps> = ({
+  slo,
+  objective,
+  prometheusConnectionId,
+  timeRange,
+  refreshTrigger,
+}) => {
+  const tiers = slo.spec.alerting.strategy === 'mwmbr' ? slo.spec.alerting.burnRates : [];
+  const errorBudget = 1 - objective.target;
+
+  if (tiers.length === 0) {
+    return null;
+  }
+
+  return (
+    <EuiPanel data-test-subj="slos-burnrate-panel">
+      <EuiFlexGroup alignItems="center" gutterSize="s">
+        <EuiFlexItem>
+          <EuiText size="m">
+            <h4>Burn-rate alerts</h4>
+          </EuiText>
+          <EuiText size="xs" color="subdued">
+            Each tier fires when its short- and long-window error ratios both exceed
+            {` burn × budget (= ${formatPct(errorBudget)}).`} Mirrors the deployed MWMBR rules.
+          </EuiText>
+        </EuiFlexItem>
+      </EuiFlexGroup>
+
+      <EuiSpacer size="s" />
+
+      <EuiFlexGroup gutterSize="s" wrap>
+        {tiers.map((tier, i) => {
+          const threshold = tier.burnRateMultiplier * errorBudget;
+          const label = TIER_LABELS[i] ?? `Tier ${i + 1}`;
+          return (
+            <EuiFlexItem key={`${tier.shortWindow}-${tier.longWindow}`} style={{ minWidth: 260 }}>
+              <TierCard
+                tier={tier}
+                label={label}
+                threshold={threshold}
+                slo={slo}
+                objective={objective}
+                prometheusConnectionId={prometheusConnectionId}
+                timeRange={timeRange}
+                refreshTrigger={refreshTrigger}
+              />
+            </EuiFlexItem>
+          );
+        })}
+      </EuiFlexGroup>
+    </EuiPanel>
+  );
+};

@@ -30,6 +30,8 @@ import {
   getVisualizationSavedObject,
   notebookSavedObject,
 } from './saved_objects/observability_saved_object';
+import { SloService } from '../common/slo/slo_service';
+import { SavedObjectSloStore } from './services/slo/slo_saved_object_store';
 import { AssistantPluginSetup, ObservabilityPluginSetup, ObservabilityPluginStart } from './types';
 
 export interface ObservabilityPluginSetupDependencies {
@@ -40,6 +42,7 @@ export interface ObservabilityPluginSetupDependencies {
 export class ObservabilityPlugin
   implements Plugin<ObservabilityPluginSetup, ObservabilityPluginStart> {
   private readonly logger: Logger;
+  private sloService?: SloService;
 
   constructor(private readonly initializerContext: PluginInitializerContext) {
     this.logger = initializerContext.logger.get();
@@ -220,12 +223,92 @@ export class ObservabilityPlugin
     core.savedObjects.registerType(integrationInstanceType);
     core.savedObjects.registerType(integrationTemplateType);
 
+    // Register the SLO saved-object type. Persists the full { spec, status }
+    // document; the listing page filters against the top-level projections
+    // populated by SavedObjectSloStore on write. See design §4.
+    //
+    // Note on mapping shape: `spec` and `status` are stored as opaque JSON
+    // (`enabled: false`). OpenSearch refuses to declare dotted sub-paths like
+    // `spec.name` alongside a disabled parent object — it parses the dotted
+    // key as a path *into* `spec` and rejects the mapping with
+    // `the [enabled] parameter can't be updated`. All indexed projections
+    // therefore live at the top level under non-dotted keys; the store is
+    // responsible for duplicating values out of `spec`/`status` on write.
+    const sloDefinitionType: SavedObjectsType = {
+      name: 'slo-definition',
+      hidden: false,
+      namespaceType: 'single',
+      mappings: {
+        properties: {
+          // Indexed projections derived from spec on write
+          name: { type: 'text' },
+          description: { type: 'text' },
+          datasourceId: { type: 'keyword' },
+          enabled: { type: 'boolean' },
+          mode: { type: 'keyword' },
+          service: { type: 'keyword' },
+          ownerTeams: { type: 'keyword' },
+          ownerPrimaryUser: { type: 'keyword' },
+          tier: { type: 'keyword' },
+
+          // Duplicated discriminators
+          primaryOwnerTeam: { type: 'keyword' },
+          sliNodeType: { type: 'keyword' },
+          sliBackend: { type: 'keyword' },
+          sliLeafType: { type: 'keyword' },
+          dimensionNames: { type: 'keyword' },
+          dimensionValues: { type: 'keyword' },
+          objectiveCount: { type: 'integer' },
+          worstTarget: { type: 'float' },
+          labelKeys: { type: 'keyword' },
+          labelValues: { type: 'keyword' },
+
+          // Audit projections
+          version: { type: 'integer' },
+          createdAt: { type: 'date' },
+          createdBy: { type: 'keyword' },
+          updatedAt: { type: 'date' },
+          updatedBy: { type: 'keyword' },
+
+          // Opaque JSON payloads — must be declared AFTER their scalar
+          // projections so dotted keys aren't interpreted as paths inside them.
+          spec: { type: 'object', enabled: false },
+          status: { type: 'object', enabled: false },
+        },
+      },
+      management: {
+        importableAndExportable: true,
+        getInAppUrl(obj) {
+          return {
+            path: `/app/observability-apm-slo#/slos/${obj.id}`,
+            uiCapabilitiesPath: 'advancedSettings.show',
+          };
+        },
+        getTitle(obj) {
+          const attrs = obj.attributes as { name?: string; spec?: { name?: string } };
+          return String(attrs.name ?? attrs.spec?.name ?? obj.id);
+        },
+      },
+    };
+    core.savedObjects.registerType(sloDefinitionType);
+
+    // SLO service — starts with InMemorySloStore; upgraded to SavedObjectSloStore in start().
+    const sloLogger = {
+      info: (msg: string) => this.logger.info(msg),
+      warn: (msg: string) => this.logger.warn(msg),
+      error: (msg: string) => this.logger.error(msg),
+      debug: (msg: string) => this.logger.debug(msg),
+    };
+    const sloService = new SloService(sloLogger);
+    this.sloService = sloService;
+
     // Register server side APIs
     setupRoutes({
       router,
       client: openSearchObservabilityClient,
       dataSourceEnabled,
       logger: this.logger,
+      sloService,
     });
 
     core.savedObjects.registerType(getVisualizationSavedObject(dataSourceEnabled));
@@ -277,8 +360,25 @@ export class ObservabilityPlugin
     return {};
   }
 
-  public start(_core: CoreStart) {
+  public start(core: CoreStart) {
     this.logger.debug('Observability: Started');
+
+    // Upgrade SLO storage to saved objects for persistence across restarts.
+    // Gracefully falls back to the in-memory store if the repository can't be created.
+    if (this.sloService) {
+      try {
+        const repository = core.savedObjects.createInternalRepository(['slo-definition']);
+        this.sloService.setStore(new SavedObjectSloStore(repository));
+        this.logger.info('Observability: SLO storage upgraded to SavedObjects');
+      } catch (err: unknown) {
+        this.logger.warn(
+          `Observability: Failed to create SavedObjectSloStore, using in-memory fallback: ${
+            err instanceof Error ? err.message : String(err)
+          }`
+        );
+      }
+    }
+
     return {};
   }
 

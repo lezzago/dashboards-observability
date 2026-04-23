@@ -5,7 +5,7 @@
 
 import { UiSettingsServiceSetup } from '../../../../../src/core/server/ui_settings';
 import { registerObservabilityUISettings } from './register_settings';
-import { APM_ENABLED_SETTING } from '../../common/constants/apm';
+import { APM_ENABLED_SETTING, SLO_ENABLED_SETTING } from '../../common/constants/apm';
 import {
   ALERT_MANAGER_MAX_DATASOURCES_SETTING,
   ALERT_MANAGER_MAX_DATASOURCES_DEFAULT,
@@ -43,6 +43,20 @@ describe('registerObservabilityUISettings', () => {
     const description = apmSettingCall[0][APM_ENABLED_SETTING].description;
 
     expect(description).toContain('Discover Traces');
+  });
+
+  it('should register the SLO toggle off by default', () => {
+    registerObservabilityUISettings(mockUiSettings);
+
+    const calls = (mockUiSettings.register as jest.Mock).mock.calls;
+    const sloSettingCall = calls.find((call) => call[0][SLO_ENABLED_SETTING]);
+
+    expect(sloSettingCall).toBeDefined();
+    expect(sloSettingCall[0][SLO_ENABLED_SETTING]).toMatchObject({
+      value: false,
+      category: ['Observability'],
+      requiresPageReload: true,
+    });
   });
 
   describe('Alert Manager settings', () => {
