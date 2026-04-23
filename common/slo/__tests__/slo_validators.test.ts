@@ -126,6 +126,45 @@ describe('validateSloSpec', () => {
     const result = validateSloSpec(minimalSpec({ labels: { foo: 'value"with"quotes' } }));
     expect(result.errors['spec.labels["foo"]']).toBeDefined();
   });
+
+  // W1.3(a) — UUID cardinality guardrail (design §10.3).
+  it('accepts non-UUID label values', () => {
+    const result = validateSloSpec(minimalSpec({ labels: { env: 'prod' } }));
+    expect(result.errors['spec.labels["env"]']).toBeUndefined();
+  });
+
+  it('rejects UUID-shaped label values (cardinality guardrail)', () => {
+    const result = validateSloSpec(
+      minimalSpec({ labels: { trace_id: '550e8400-e29b-41d4-a716-446655440000' } })
+    );
+    expect(result.errors['spec.labels["trace_id"]']).toContain('UUID');
+  });
+
+  it('rejects UUID-shaped label values in an array', () => {
+    const result = validateSloSpec(
+      minimalSpec({
+        labels: { trace_ids: ['ok-value', '550E8400-E29B-41D4-A716-446655440000'] },
+      })
+    );
+    expect(result.errors['spec.labels["trace_ids"]']).toContain('UUID');
+  });
+
+  // W1.3(b) — 4 KiB annotation cap (design §10.3).
+  it('accepts annotations just under the 4096-byte cap', () => {
+    // `{"k":"<value>"}` → value length budget ≈ 4096 − len('{"k":""}') − 1
+    // Use 4080-char string so JSON.stringify length lands just under 4096.
+    const big = 'a'.repeat(4080);
+    const result = validateSloSpec(minimalSpec({ annotations: { k: big } }));
+    expect(JSON.stringify({ k: big }).length).toBeLessThanOrEqual(4096);
+    expect(result.errors['spec.annotations']).toBeUndefined();
+  });
+
+  it('rejects annotations exceeding the 4096-byte cap', () => {
+    const big = 'a'.repeat(5000);
+    const result = validateSloSpec(minimalSpec({ annotations: { k: big } }));
+    expect(result.errors['spec.annotations']).toBeDefined();
+    expect(result.errors['spec.annotations']).toContain('4096');
+  });
 });
 
 describe('validateSloId', () => {

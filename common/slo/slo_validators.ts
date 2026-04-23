@@ -17,6 +17,16 @@ const LABEL_NAME_RE = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
 const UNSAFE_LABEL_VALUE_RE = /["\\\n{}()]/;
 const SLUG_ID_RE = /^[a-z][a-z0-9-]{2,62}$/;
 
+/**
+ * Cardinality guardrail (design §10.3): UUID-shaped label values explode
+ * per-series metric storage. Rejected on create/update; users should tag
+ * workloads with stable labels (service, env, route) instead.
+ */
+const UUID_LABEL_VALUE_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** Annotation payload cap (design §10.3). Keeps saved-object size bounded. */
+const ANNOTATIONS_BYTE_CAP = 4096;
+
 /** Reserved keys in `spec.labels` — reject these so we don't clobber emitted labels. */
 const RESERVED_LABEL_KEYS = new Set([
   'slo_id',
@@ -247,8 +257,19 @@ export function validateSloSpec(input: Partial<SloSpec>): SloValidationResult {
         } else if (UNSAFE_LABEL_VALUE_RE.test(val)) {
           errors[`spec.labels["${k}"]`] =
             'Label value must not contain double quotes, backslashes, newlines, or braces';
+        } else if (UUID_LABEL_VALUE_RE.test(val)) {
+          errors[`spec.labels["${k}"]`] = 'Label values must not be UUIDs (cardinality guardrail)';
         }
       }
+    }
+  }
+
+  // --- Annotations (size cap only; not propagated to rules) ---
+  if (input.annotations !== undefined && input.annotations !== null) {
+    // JSON.stringify gives a deterministic byte count that tracks the on-disk
+    // saved-object size. Design §10.3 pins this to 4 KiB.
+    if (JSON.stringify(input.annotations).length > ANNOTATIONS_BYTE_CAP) {
+      errors['spec.annotations'] = `Annotations exceed ${ANNOTATIONS_BYTE_CAP}-byte size cap`;
     }
   }
 

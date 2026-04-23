@@ -115,6 +115,17 @@ describe('ruleSuffix', () => {
     const s = ruleSuffix('x', 'y', 'z');
     expect(s).toMatch(/^[0-9a-f]{8}$/);
   });
+
+  // Pinned-hash guard: design §6.3 / §13.1 commits to sha256(workspace:sloId:objective).slice(0,8).
+  // Value computed with:
+  //   node -e "console.log(require('crypto').createHash('sha256')
+  //     .update('ws-1:slo-abc:availability').digest('hex').slice(0,8))"
+  // If this value changes, external dashboards / Alertmanager silences /
+  // GitOps manifests pinning rule names will break. Coordinate a migration
+  // before touching this.
+  it('matches the pinned sha256 prefix for a known triple (§13.1 commitment)', () => {
+    expect(ruleSuffix('ws-1', 'slo-abc', 'availability')).toBe('3e048ec6');
+  });
 });
 
 describe('slugifySloObjective', () => {

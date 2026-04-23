@@ -21,6 +21,7 @@
  *   slo_label_<key>
  */
 
+import { createHash } from 'crypto';
 import type {
   BurnRateConfig,
   GeneratedRule,
@@ -109,20 +110,15 @@ export function slugifySloObjective(sloName: string, objectiveName: string): str
  * Workspace-scoped so multi-tenant rulers don't collide; objective-scoped so
  * multi-objective SLOs don't collide within their own rule group.
  *
- * FNV-1a over the concatenated tuple. 32-bit output rendered as 8 hex chars.
- * Not cryptographic — design §9(5) just wants determinism + low collision risk.
+ * First 8 hex chars of sha256 over the concatenated tuple — commits to the
+ * design §6.3 / §13.1 rule-name contract so external dashboards, Alertmanager
+ * silences, and GitOps manifests that pin rule names stay stable across
+ * implementations. Not a security primitive; chosen for collision-resistance
+ * and portability (identical hex in any sha256 implementation).
  */
 export function ruleSuffix(workspaceId: string, sloId: string, objectiveName: string): string {
   const input = `${workspaceId}:${sloId}:${objectiveName}`;
-  // FNV-1a — bitwise ops are required for the hash mixing step.
-  /* eslint-disable no-bitwise */
-  let h = 0x811c9dc5;
-  for (let i = 0; i < input.length; i++) {
-    h ^= input.charCodeAt(i);
-    h = Math.imul(h, 0x01000193);
-  }
-  return (h >>> 0).toString(16).padStart(8, '0');
-  /* eslint-enable no-bitwise */
+  return createHash('sha256').update(input).digest('hex').slice(0, 8);
 }
 
 /** Parse a Prometheus duration (e.g. "5m", "1h", "3d") to milliseconds. */

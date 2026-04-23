@@ -65,7 +65,11 @@ export class SloService {
   // ---------- CRUD ----------
 
   async create(input: SloCreateInput, createdBy = 'system'): Promise<SloDocument> {
-    const { errors } = validateSloSpec(input.spec);
+    // Normalize (clamp target precision, etc.) BEFORE validation so the
+    // range check and rule generation both see the canonical value.
+    // Validators stay pure — never mutate — so normalization lives here.
+    const spec = normalizeSpec(input.spec);
+    const { errors } = validateSloSpec(spec);
     if (Object.keys(errors).length > 0) throw new SloValidationError(errors);
 
     const id = input.id ?? generateUuidV4();
@@ -76,14 +80,14 @@ export class SloService {
 
     // Name uniqueness within the datasource (workspace scoping is handled by
     // the saved-objects layer; the name check is best-effort here).
-    await this.assertNameUnique(input.spec.datasourceId, input.spec.name, null);
+    await this.assertNameUnique(spec.datasourceId, spec.name, null);
 
     const now = new Date().toISOString();
     // Build the document with minimal status so we can generate rules from it,
     // then fill in the provisioning record with the resulting names.
     const doc: SloDocument = {
       id,
-      spec: input.spec,
+      spec,
       status: {
         version: 1,
         createdAt: now,
@@ -124,7 +128,9 @@ export class SloService {
       throw new SloVersionConflictError(existing, input.version);
     }
 
-    const merged: SloSpec = { ...existing.spec, ...input.spec };
+    // Merge partial input onto the current spec, then normalize (clamp target
+    // precision, etc.) BEFORE validation so rule generation sees canonical values.
+    const merged: SloSpec = normalizeSpec({ ...existing.spec, ...input.spec });
 
     const { errors } = validateSloSpec(merged);
     if (Object.keys(errors).length > 0) throw new SloValidationError(errors);
@@ -180,14 +186,17 @@ export class SloService {
   // ---------- preview ----------
 
   previewRules(input: SloCreateInput) {
-    const { errors } = validateSloSpec(input.spec);
+    // Preview and deploy must see the same normalized spec (design §9(5): what
+    // the user sees is what gets deployed). Clamp targets before validation.
+    const spec = normalizeSpec(input.spec);
+    const { errors } = validateSloSpec(spec);
     if (Object.keys(errors).length > 0) throw new SloValidationError(errors);
 
     const now = new Date().toISOString();
     const id = input.id ?? 'slo-preview-00000000-0000-0000-0000-000000000000';
     const doc: SloDocument = {
       id,
-      spec: input.spec,
+      spec,
       status: {
         version: 0,
         createdAt: now,
@@ -416,6 +425,25 @@ function inferUnit(doc: SloDocument): 'ratio' | 'seconds' | 'count' {
   const def = doc.spec.sli.definition;
   if (def.backend === 'prometheus' && def.type === 'latency_threshold') return 'seconds';
   return 'ratio';
+}
+
+/**
+ * Normalize an incoming SloSpec into its canonical persisted shape.
+ *
+ * Rules:
+ *   - Each objective's `target` is clamped to 6 significant digits
+ *     (design §3.2, §13.1: `target ∈ [0.5, 0.99999]`, clamped pre-rule-gen).
+ *     Done here — not in the validator — because validators must stay pure.
+ *
+ * Pure; safe to call more than once (idempotent on an already-clamped spec).
+ */
+function normalizeSpec<T extends Partial<SloSpec>>(spec: T): T {
+  if (!Array.isArray(spec.objectives)) return spec;
+  const clamped = spec.objectives.map((obj) => {
+    if (typeof obj.target !== 'number' || !Number.isFinite(obj.target)) return obj;
+    return { ...obj, target: Math.round(obj.target * 1e6) / 1e6 };
+  });
+  return { ...spec, objectives: clamped };
 }
 
 /**
