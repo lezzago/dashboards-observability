@@ -3,13 +3,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   EuiBasicTableColumn,
   EuiButton,
   EuiButtonEmpty,
   EuiEmptyPrompt,
-  EuiFieldSearch,
   EuiFlexGroup,
   EuiFlexItem,
   EuiHealth,
@@ -26,11 +25,23 @@ import {
   EuiToolTip,
 } from '@elastic/eui';
 import { euiThemeVars } from '@osd/ui-shared-deps/theme';
+import { useHistory, useLocation } from 'react-router-dom';
 import { ChromeStart, NotificationsStart } from '../../../../../../../src/core/public';
 import { HeaderControlledComponentsWrapper } from '../../../../plugin_helpers/plugin_headerControl';
 import { SloOverviewPanel } from './slo_overview_panel';
+import { SloListFilterPanel } from './slo_list_filter_panel';
+import { SloListFilterChips } from './slo_list_filter_chips';
+import {
+  deserializeFiltersFromSearch,
+  filtersEqual,
+  serializeFiltersToSearch,
+} from './slo_list_filter_url';
 import type { SloApiClient } from './slo_api_client';
-import type { SloHealthState, SloSummary } from '../../../../../common/slo/slo_types';
+import type {
+  SloHealthState,
+  SloListFilters,
+  SloSummary,
+} from '../../../../../common/slo/slo_types';
 
 export interface SloListingPageProps {
   apiClient: SloApiClient;
@@ -93,31 +104,96 @@ const BudgetColumnBar: React.FC<{ remaining: number }> = ({ remaining }) => {
   );
 };
 
+/**
+ * Translate the overview panel's KPI-tile state into a listing filter delta.
+ * The tile's "firing" pseudo-state stays client-side — we don't have a
+ * server-side `firingCount > 0` filter, but we do have state=breached which
+ * is the closest real facet, so a firing tile click maps to it.
+ */
+function stateTileToFilterState(
+  tile: SloHealthState | 'firing' | null
+): SloHealthState[] | undefined {
+  if (tile === null) return undefined;
+  if (tile === 'firing') return ['breached'];
+  return [tile];
+}
+
+function filterStateToTile(state: SloHealthState[] | undefined): SloHealthState | 'firing' | null {
+  if (!state || state.length !== 1) return null;
+  return state[0];
+}
+
 export const SloListingPage: React.FC<SloListingPageProps> = ({
   apiClient,
   chrome,
   notifications,
   parentBreadcrumb,
 }) => {
+  const history = useHistory();
+  const location = useLocation();
+
+  // Hash-query round-trip: on mount and on hash changes, hydrate filters from
+  // the URL so sharing a link preserves the view.
+  const [filters, setFilters] = useState<SloListFilters>(() =>
+    deserializeFiltersFromSearch(location.search)
+  );
   const [items, setItems] = useState<SloSummary[]>([]);
+  const [totalUnfiltered, setTotalUnfiltered] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<Error | null>(null);
-  const [searchQuery, setSearchQuery] = useState('');
-  // State filter driven by the overview KPI tiles. "firing" is a pseudo-state
-  // meaning "any SLO with firingCount > 0" — convenient for the "jump to
-  // what's on fire" workflow even though it doesn't map to a single state.
-  const [stateFilter, setStateFilter] = useState<SloHealthState | 'firing' | null>(null);
 
   useEffect(() => {
     chrome.setBreadcrumbs([parentBreadcrumb, { text: 'SLO/SLI' }]);
   }, [chrome, parentBreadcrumb]);
 
+  // Filter ↔ URL sync. Single effect, guarded by a ref that stores the last
+  // serialized string we reconciled. Writing to URL via history.replace
+  // intentionally does NOT re-trigger a setFilters, and an external URL
+  // change (paste, back button) does NOT re-write the URL we just received.
+  // Without this guard the two effects form a loop: write URL → read URL →
+  // parse → setFilters(newObj) → compare → write URL → ...
+  const lastSyncedSearch = useRef<string>(serializeFiltersToSearch(filters));
+  useEffect(() => {
+    const rawUrl = location.search.startsWith('?') ? location.search.slice(1) : location.search;
+    const fromState = serializeFiltersToSearch(filters);
+
+    if (fromState === rawUrl) {
+      lastSyncedSearch.current = fromState;
+      return;
+    }
+
+    if (rawUrl !== lastSyncedSearch.current) {
+      // URL changed out from under us (paste / back button). Pull into state.
+      const parsed = deserializeFiltersFromSearch(location.search);
+      if (!filtersEqual(parsed, filters)) {
+        lastSyncedSearch.current = rawUrl;
+        setFilters(parsed);
+      }
+      return;
+    }
+
+    // State changed; push to URL.
+    lastSyncedSearch.current = fromState;
+    history.replace({
+      pathname: location.pathname,
+      search: fromState.length ? `?${fromState}` : '',
+    });
+  }, [filters, location.search, location.pathname, history]);
+
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const result = await apiClient.list({ pageSize: 100 });
+      // Server-side filtering via the SloListFilters contract.
+      const result = await apiClient.list({ ...filters, pageSize: 100 });
       setItems(result.results);
+      // Track whether the workspace has any SLOs at all, so we can tell
+      // "no SLOs exist" from "filters narrowed to zero". The total the server
+      // returns is post-filter; if any filter is applied we can't tell from
+      // this response alone, so only lock it on the unfiltered fetch.
+      if (Object.keys(filters).length === 0) {
+        setTotalUnfiltered(result.total);
+      }
     } catch (e) {
       const err = e instanceof Error ? e : new Error(String(e));
       setError(err);
@@ -128,30 +204,11 @@ export const SloListingPage: React.FC<SloListingPageProps> = ({
     } finally {
       setLoading(false);
     }
-  }, [apiClient, notifications]);
+  }, [apiClient, filters, notifications]);
 
   useEffect(() => {
     load();
   }, [load]);
-
-  const filteredItems = useMemo(() => {
-    const q = searchQuery.trim().toLowerCase();
-    let out = items;
-    if (stateFilter === 'firing') {
-      out = out.filter((i) => i.status.firingCount > 0);
-    } else if (stateFilter) {
-      out = out.filter((i) => i.status.state === stateFilter);
-    }
-    if (q) {
-      out = out.filter(
-        (i) =>
-          i.name.toLowerCase().includes(q) ||
-          i.service.toLowerCase().includes(q) ||
-          (i.description?.toLowerCase().includes(q) ?? false)
-      );
-    }
-    return out;
-  }, [items, searchQuery, stateFilter]);
 
   // EuiBasicTable render signature:
   //   - with `field`:    render(value, row)
@@ -246,6 +303,18 @@ export const SloListingPage: React.FC<SloListingPageProps> = ({
     []
   );
 
+  const hasAnyFilter = useMemo(
+    () =>
+      Object.keys(filters).some((k) => {
+        const v = (filters as Record<string, unknown>)[k];
+        if (Array.isArray(v)) return v.length > 0;
+        return v !== undefined && v !== '';
+      }),
+    [filters]
+  );
+
+  const clearAllFilters = useCallback(() => setFilters({}), []);
+
   const createButton = (
     <EuiButton
       fill
@@ -276,6 +345,19 @@ export const SloListingPage: React.FC<SloListingPageProps> = ({
     </EuiButtonEmpty>
   );
 
+  // Overview panel tile-click: map the tile to a state filter slice so the
+  // strip + chips stay in sync with the tile highlight.
+  const overviewActive = filterStateToTile(filters.state);
+  const setOverviewStateFilter = (tile: SloHealthState | 'firing' | null) => {
+    setFilters((prev) => ({ ...prev, state: stateTileToFilterState(tile) }));
+  };
+
+  // --- Render states ---
+  const isFirstLoad = loading && items.length === 0 && totalUnfiltered === null;
+  const noSlosExist =
+    !loading && !hasAnyFilter && items.length === 0 && (totalUnfiltered ?? 0) === 0;
+  const filteredToZero = !loading && hasAnyFilter && items.length === 0;
+
   return (
     <EuiPage data-test-subj="slosPage">
       <EuiPageBody component="main">
@@ -284,7 +366,7 @@ export const SloListingPage: React.FC<SloListingPageProps> = ({
         />
         <EuiPageContent color="transparent" hasBorder={false} paddingSize="none">
           <EuiPageContentBody>
-            {loading && items.length === 0 ? (
+            {isFirstLoad ? (
               <EuiFlexGroup alignItems="center" justifyContent="center" style={{ minHeight: 200 }}>
                 <EuiFlexItem grow={false}>
                   <EuiLoadingSpinner size="xl" />
@@ -300,8 +382,8 @@ export const SloListingPage: React.FC<SloListingPageProps> = ({
                   actions={<EuiButton onClick={load}>Retry</EuiButton>}
                 />
               </EuiPanel>
-            ) : items.length === 0 ? (
-              <EuiPanel style={{ marginTop: '8px' }}>
+            ) : noSlosExist ? (
+              <EuiPanel style={{ marginTop: '8px' }} data-test-subj="slos-empty-no-slos">
                 <EuiEmptyPrompt
                   iconType="visualizeApp"
                   title={<h2>No SLOs yet</h2>}
@@ -333,50 +415,80 @@ export const SloListingPage: React.FC<SloListingPageProps> = ({
               </EuiPanel>
             ) : (
               <>
-                {/* Aggregate health at a glance — client-side derived from the listing. */}
-                <SloOverviewPanel
-                  items={items}
-                  activeStateFilter={stateFilter}
-                  onStateFilterChange={setStateFilter}
-                />
-                <EuiSpacer size="m" />
+                {/* Aggregate health at a glance — server-side list provides the items. */}
+                {items.length > 0 && (
+                  <>
+                    <SloOverviewPanel
+                      items={items}
+                      activeStateFilter={overviewActive}
+                      onStateFilterChange={setOverviewStateFilter}
+                    />
+                    <EuiSpacer size="m" />
+                  </>
+                )}
 
-                <EuiFieldSearch
-                  placeholder="Filter by name, service, or description"
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  isClearable
-                  fullWidth
-                  compressed
-                  data-test-subj="slosSearchBar"
+                <SloListFilterPanel filters={filters} onChange={setFilters} items={items} />
+                <EuiSpacer size="xs" />
+                <SloListFilterChips
+                  filters={filters}
+                  onChange={setFilters}
+                  onClearAll={clearAllFilters}
                 />
                 <EuiSpacer size="s" />
-                <EuiPanel>
-                  <EuiFlexGroup justifyContent="spaceBetween" alignItems="center">
-                    <EuiFlexItem grow={false}>
-                      <EuiText size="m">
-                        <h4>SLO catalog</h4>
-                      </EuiText>
-                    </EuiFlexItem>
-                    <EuiFlexItem grow={false}>
-                      <EuiText size="s" color="subdued">
-                        {filteredItems.length} of {items.length}
-                      </EuiText>
-                    </EuiFlexItem>
-                  </EuiFlexGroup>
-                  <EuiSpacer size="s" />
-                  <EuiInMemoryTable<SloSummary>
-                    items={filteredItems}
-                    columns={columns}
-                    pagination={{
-                      initialPageSize: 20,
-                      pageSizeOptions: [10, 20, 50, 100],
-                    }}
-                    sorting={{ sort: { field: 'name', direction: 'asc' } }}
-                    loading={loading}
-                    data-test-subj="slos-table"
-                  />
-                </EuiPanel>
+
+                {filteredToZero ? (
+                  <EuiPanel data-test-subj="slos-empty-filtered-zero">
+                    <EuiEmptyPrompt
+                      iconType="search"
+                      title={<h2>No SLOs match your filters</h2>}
+                      body={
+                        <p>
+                          Try widening the filters, or clear them to see every SLO in this
+                          workspace.
+                        </p>
+                      }
+                      actions={
+                        <EuiButton
+                          onClick={clearAllFilters}
+                          data-test-subj="slos-empty-filtered-clear"
+                        >
+                          Clear filters
+                        </EuiButton>
+                      }
+                    />
+                  </EuiPanel>
+                ) : (
+                  <EuiPanel>
+                    <EuiFlexGroup justifyContent="spaceBetween" alignItems="center">
+                      <EuiFlexItem grow={false}>
+                        <EuiText size="m">
+                          <h4>SLO catalog</h4>
+                        </EuiText>
+                      </EuiFlexItem>
+                      <EuiFlexItem grow={false}>
+                        <EuiText
+                          size="s"
+                          color="subdued"
+                          data-test-subj="slos-listing-result-count"
+                        >
+                          {items.length} SLO{items.length === 1 ? '' : 's'}
+                        </EuiText>
+                      </EuiFlexItem>
+                    </EuiFlexGroup>
+                    <EuiSpacer size="s" />
+                    <EuiInMemoryTable<SloSummary>
+                      items={items}
+                      columns={columns}
+                      pagination={{
+                        initialPageSize: 20,
+                        pageSizeOptions: [10, 20, 50, 100],
+                      }}
+                      sorting={{ sort: { field: 'name', direction: 'asc' } }}
+                      loading={loading}
+                      data-test-subj="slos-table"
+                    />
+                  </EuiPanel>
+                )}
               </>
             )}
           </EuiPageContentBody>
