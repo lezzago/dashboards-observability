@@ -32,6 +32,7 @@ import {
 } from './saved_objects/observability_saved_object';
 import { SloService } from '../common/slo/slo_service';
 import { SavedObjectSloStore } from './services/slo/slo_saved_object_store';
+import { DirectQueryStatusAggregator } from './services/slo/status_aggregator';
 import { AssistantPluginSetup, ObservabilityPluginSetup, ObservabilityPluginStart } from './types';
 
 export interface ObservabilityPluginSetupDependencies {
@@ -300,6 +301,10 @@ export class ObservabilityPlugin
       debug: (msg: string) => this.logger.debug(msg),
     };
     const sloService = new SloService(sloLogger);
+    // Live-status aggregator (W3.1). DirectQuery-backed — queries the ruler
+    // through the SQL plugin for recording-rule values + firing alerts.
+    // Offline dev paths (no aggregator) fall through to the stub automatically.
+    sloService.setStatusAggregator(new DirectQueryStatusAggregator(sloLogger));
     this.sloService = sloService;
 
     // Register server side APIs

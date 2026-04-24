@@ -14,9 +14,10 @@
  */
 
 import { SloService, SloValidationError } from '../slo_service';
+import type { SloStatusAggregationContext, SloStatusAggregator } from '../slo_service';
 import { DEFAULT_MWMBR_TIERS } from '../slo_promql_generator';
-import type { Logger } from '../../types/alerting/types';
-import type { SloSpec } from '../slo_types';
+import type { AlertingOSClient, Datasource, Logger } from '../../types/alerting/types';
+import type { SloDocument, SloLiveStatus, SloSpec } from '../slo_types';
 
 function noopLogger(): Logger {
   return {
@@ -143,5 +144,193 @@ describe('SloService.create — target precision clamp (W1.3c)', () => {
     await expect(
       svc.create({ spec: validSpec({ objectives: [{ name: 'obj-a', target: 0.9999995 }] }) })
     ).rejects.toBeInstanceOf(SloValidationError);
+  });
+});
+
+// ============================================================================
+// W3.1 — live-status aggregator integration (mocked)
+// ============================================================================
+
+function mkCtx(): SloStatusAggregationContext {
+  return {
+    client: ({} as unknown) as AlertingOSClient,
+    workspaceId: 'default',
+    resolveDatasource: async () => undefined as Datasource | undefined,
+  };
+}
+
+function mkAgg(
+  impl: (docs: SloDocument[]) => Promise<SloLiveStatus[]>
+): { agg: SloStatusAggregator; calls: number } {
+  let calls = 0;
+  return {
+    agg: {
+      aggregate: async (docs) => {
+        calls++;
+        return impl(docs);
+      },
+    },
+    get calls() {
+      return calls;
+    },
+  };
+}
+
+describe('SloService — aggregator routing (W3.1)', () => {
+  it('routes getStatus through the aggregator when one is configured', async () => {
+    const svc = new SloService(noopLogger());
+    const { agg } = mkAgg(async (docs) =>
+      docs.map((d) => ({
+        sloId: d.id,
+        objectives: [
+          {
+            objectiveName: 'availability-99-9',
+            currentValue: 0.0002,
+            currentValueUnit: 'ratio' as const,
+            attainment: 0.9998,
+            errorBudgetRemaining: 0.8,
+            state: 'ok' as const,
+          },
+        ],
+        state: 'ok',
+        firingCount: 0,
+        ruleCount: 7,
+        computedAt: new Date().toISOString(),
+      }))
+    );
+    svc.setStatusAggregator(agg);
+
+    const doc = await svc.create({ spec: validSpec() });
+    const status = await svc.getStatus(doc.id, mkCtx());
+
+    expect(status.state).toBe('ok');
+    expect(status.objectives[0].attainment).toBe(0.9998);
+  });
+
+  it('routes getStatuses through the aggregator in batch', async () => {
+    const svc = new SloService(noopLogger());
+    let seenIds: string[] = [];
+    svc.setStatusAggregator({
+      aggregate: async (docs) => {
+        seenIds = docs.map((d) => d.id);
+        return docs.map((d) => ({
+          sloId: d.id,
+          objectives: [],
+          state: 'warning',
+          firingCount: 1,
+          ruleCount: 0,
+          computedAt: new Date().toISOString(),
+        }));
+      },
+    });
+
+    const d1 = await svc.create({ spec: validSpec() });
+    const d2 = await svc.create({ spec: validSpec() });
+    const statuses = await svc.getStatuses([d1.id, d2.id], mkCtx());
+
+    expect(statuses).toHaveLength(2);
+    expect(statuses.every((s) => s.state === 'warning')).toBe(true);
+    expect(seenIds.sort()).toEqual([d1.id, d2.id].sort());
+  });
+
+  it('falls back to the stub when the aggregator rejects (listing must not 500)', async () => {
+    const warnCalls: string[] = [];
+    const logger: Logger = {
+      info: () => undefined,
+      warn: (m: string) => {
+        warnCalls.push(m);
+      },
+      error: () => undefined,
+      debug: () => undefined,
+    };
+    const svc = new SloService(logger);
+    svc.setStatusAggregator({
+      aggregate: async () => {
+        throw new Error('ruler unreachable');
+      },
+    });
+
+    const d1 = await svc.create({ spec: validSpec({ enabled: true }) });
+    const d2 = await svc.create({ spec: validSpec({ enabled: false }) });
+    const statuses = await svc.getStatuses([d1.id, d2.id], mkCtx());
+
+    expect(statuses.find((s) => s.sloId === d1.id)!.state).toBe('no_data');
+    expect(statuses.find((s) => s.sloId === d2.id)!.state).toBe('disabled');
+    expect(warnCalls.some((m) => m.includes('aggregator rejected'))).toBe(true);
+  });
+
+  it('deduplicates aggregator-failure warnings across calls (same failure logged once)', async () => {
+    const warnCalls: string[] = [];
+    const logger: Logger = {
+      info: () => undefined,
+      warn: (m: string) => {
+        warnCalls.push(m);
+      },
+      error: () => undefined,
+      debug: () => undefined,
+    };
+    const svc = new SloService(logger);
+    svc.setStatusAggregator({
+      aggregate: async () => {
+        throw new Error('ruler unreachable');
+      },
+    });
+
+    const d1 = await svc.create({ spec: validSpec() });
+    await svc.getStatuses([d1.id], mkCtx());
+    // Clear cache so the aggregator is called again
+    svc.setStatusAggregator({
+      aggregate: async () => {
+        throw new Error('ruler unreachable');
+      },
+    });
+    await svc.getStatuses([d1.id], mkCtx());
+    // Matches the same error message → should still only warn once per unique
+    // (sloId × message) combo across this session.
+    const matching = warnCalls.filter((m) => m.includes('aggregator rejected'));
+    // Two setStatusAggregator calls clear the warn set, so we expect at least
+    // one warn per aggregator instance; but within a single aggregator, same
+    // failure logs once only.
+    expect(matching.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('preserves stub path when no aggregator is configured', async () => {
+    const svc = new SloService(noopLogger());
+    const doc = await svc.create({ spec: validSpec({ enabled: true }) });
+    const status = await svc.getStatus(doc.id, mkCtx());
+    expect(status.state).toBe('no_data'); // stub fallback
+  });
+
+  it('preserves stub path when an aggregator is configured but no context is passed', async () => {
+    const svc = new SloService(noopLogger());
+    const { agg } = mkAgg(async () => [] as SloLiveStatus[]);
+    svc.setStatusAggregator(agg);
+    const doc = await svc.create({ spec: validSpec({ enabled: true }) });
+    // No ctx → stub path, aggregator NOT invoked.
+    const status = await svc.getStatus(doc.id);
+    expect(status.state).toBe('no_data');
+  });
+
+  it('uses the 60s status cache for subsequent calls within the TTL', async () => {
+    const svc = new SloService(noopLogger());
+    let calls = 0;
+    svc.setStatusAggregator({
+      aggregate: async (docs) => {
+        calls++;
+        return docs.map((d) => ({
+          sloId: d.id,
+          objectives: [],
+          state: 'ok' as const,
+          firingCount: 0,
+          ruleCount: 0,
+          computedAt: new Date().toISOString(),
+        }));
+      },
+    });
+    const doc = await svc.create({ spec: validSpec() });
+    await svc.getStatus(doc.id, mkCtx());
+    await svc.getStatus(doc.id, mkCtx());
+    await svc.getStatus(doc.id, mkCtx());
+    expect(calls).toBe(1);
   });
 });

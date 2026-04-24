@@ -50,7 +50,18 @@ import {
   SloVersionConflictError,
 } from './slo_errors';
 
-/** Status cache TTL — listing pages call the batch endpoint at this cadence. */
+/**
+ * Status cache TTL. Rationale (design §12.12 was open):
+ *   - Recording rules evaluate every 60s (DEFAULT_INTERVAL_SECONDS in the
+ *     generator), so the freshest sample available is at most ~60s old. Any
+ *     TTL shorter than the eval interval just wastes ruler calls on identical
+ *     samples. Matching the interval gives ~1 cache miss per eval.
+ *   - Listing pages poll on the order of 10–30s. Without the cache each open
+ *     listing tab would issue N ruler queries per poll; with 60s TTL one batch
+ *     per minute covers every open tab.
+ *   - A user who fixed a breach sees their status flip within ~1m (next cache
+ *     expiry + next eval), which is the right tradeoff. >5m would feel stale.
+ */
 const STATUS_CACHE_TTL_MS = 60_000;
 
 export { SloNotFoundError, SloRulerError, SloValidationError, SloVersionConflictError };
@@ -102,6 +113,26 @@ export interface SloDeployContext {
   workspaceId: string;
 }
 
+// ============================================================================
+// Live-status aggregator context (W3.1)
+// ============================================================================
+
+/**
+ * Minimal aggregator surface the service needs. Mirrors `SloStatusAggregator`
+ * in `server/services/slo/status_aggregator.ts` — declared here so
+ * `slo_service.ts` (importable from browser bundles via tests) doesn't reach
+ * into the server tree.
+ */
+export interface SloStatusAggregator {
+  aggregate(docs: SloDocument[], ctx: SloStatusAggregationContext): Promise<SloLiveStatus[]>;
+}
+
+export interface SloStatusAggregationContext {
+  client: AlertingOSClient;
+  resolveDatasource: (datasourceId: string) => Promise<Datasource | undefined>;
+  workspaceId: string;
+}
+
 /**
  * Compose the per-workspace ruler namespace. Hyphen separator (not slash) so
  * the whole thing stays a single `{namespace}` path segment when routed
@@ -118,6 +149,18 @@ export function sloRulerNamespaceFor(workspaceId: string): string {
 export class SloService {
   private store: ISloStore;
   private statusCache = new Map<string, { status: SloLiveStatus; expiresAt: number }>();
+  /**
+   * Aggregator is optional — when unset, getStatuses falls back to the W1.2
+   * stub (disabled/no_data). Request-scoped state (client, workspace,
+   * datasource resolver) is passed per-call via `SloStatusAggregationContext`.
+   */
+  private aggregator?: SloStatusAggregator;
+  /**
+   * De-dup key for aggregator-failure warnings: one warn per (sloId × code).
+   * Prevents the listing-page poll from spamming the log when the ruler is
+   * down. Cleared on store swap (new env → fresh slate).
+   */
+  private readonly loggedAggregatorFailures = new Set<string>();
 
   constructor(private readonly logger: Logger, store?: ISloStore) {
     this.store = store ?? new InMemorySloStore();
@@ -126,7 +169,19 @@ export class SloService {
   setStore(store: ISloStore): void {
     this.store = store;
     this.statusCache.clear();
+    this.loggedAggregatorFailures.clear();
     this.logger.info('SloService: storage backend replaced');
+  }
+
+  setStatusAggregator(aggregator: SloStatusAggregator | undefined): void {
+    this.aggregator = aggregator;
+    this.statusCache.clear();
+    this.loggedAggregatorFailures.clear();
+    this.logger.info(
+      aggregator
+        ? 'SloService: live status aggregator configured'
+        : 'SloService: live status aggregator cleared — falling back to stub'
+    );
   }
 
   // ---------- CRUD ----------
@@ -400,7 +455,7 @@ export class SloService {
 
   // ---------- listing ----------
 
-  async list(filters?: SloListFilters): Promise<SloSummary[]> {
+  async list(filters?: SloListFilters, ctx?: SloStatusAggregationContext): Promise<SloSummary[]> {
     const all = await this.store.list(filters?.datasourceId);
 
     let filtered = all;
@@ -445,7 +500,7 @@ export class SloService {
 
     // Get statuses for all filtered SLOs
     const ids = filtered.map((d) => d.id);
-    const statuses = await this.getStatuses(ids);
+    const statuses = await this.getStatuses(ids, ctx);
     const statusMap = new Map(statuses.map((s) => [s.sloId, s]));
 
     // State filter applied last so we don't pay for status computation on filtered-out rows.
@@ -459,10 +514,13 @@ export class SloService {
     return filtered.map((d) => this.toSummary(d, statusMap.get(d.id) ?? this.noDataStatus(d)));
   }
 
-  async getPaginated(filters?: SloListFilters): Promise<PaginatedResponse<SloSummary>> {
+  async getPaginated(
+    filters?: SloListFilters,
+    ctx?: SloStatusAggregationContext
+  ): Promise<PaginatedResponse<SloSummary>> {
     const page = filters?.page ?? 1;
     const pageSize = Math.min(filters?.pageSize ?? 20, 100);
-    const all = await this.list(filters);
+    const all = await this.list(filters, ctx);
     const start = (page - 1) * pageSize;
     const end = start + pageSize;
     return {
@@ -476,30 +534,81 @@ export class SloService {
 
   // ---------- live status ----------
 
-  async getStatus(id: string): Promise<SloLiveStatus> {
-    const [s] = await this.getStatuses([id]);
+  async getStatus(id: string, ctx?: SloStatusAggregationContext): Promise<SloLiveStatus> {
+    const [s] = await this.getStatuses([id], ctx);
     return s;
   }
 
-  async getStatuses(ids: string[]): Promise<SloLiveStatus[]> {
+  /**
+   * Batch status lookup. When a status-aggregation context is provided AND an
+   * aggregator is configured, cache misses go to the live aggregator.
+   * Aggregator failures are trapped — the listing page must not 500 when the
+   * ruler is unreachable. Failed lookups fall through to the stub so at
+   * minimum we return the disabled/no-data skeleton the UI can render.
+   *
+   * Call order is preserved: `out[i]` corresponds to `ids[i]`.
+   */
+  async getStatuses(ids: string[], ctx?: SloStatusAggregationContext): Promise<SloLiveStatus[]> {
     const now = Date.now();
-    const out: SloLiveStatus[] = [];
+    const result = new Map<string, SloLiveStatus>();
     const uncached: string[] = [];
     for (const id of ids) {
       const entry = this.statusCache.get(id);
-      if (entry && entry.expiresAt > now) out.push(entry.status);
-      else uncached.push(id);
+      if (entry && entry.expiresAt > now) {
+        result.set(id, entry.status);
+      } else {
+        uncached.push(id);
+      }
     }
-    if (uncached.length === 0) return out;
+    if (uncached.length === 0) {
+      return ids.map((id) => result.get(id) ?? this.missingStatus(id));
+    }
 
     const docs = await Promise.all(uncached.map((id) => this.store.get(id)));
+    const presentDocs: SloDocument[] = [];
+    const missing: string[] = [];
     for (let i = 0; i < uncached.length; i++) {
       const doc = docs[i];
-      const status = doc ? this.computeStatus(doc) : this.missingStatus(uncached[i]);
-      this.statusCache.set(uncached[i], { status, expiresAt: now + STATUS_CACHE_TTL_MS });
-      out.push(status);
+      if (doc) presentDocs.push(doc);
+      else missing.push(uncached[i]);
     }
-    return out;
+    for (const id of missing) result.set(id, this.missingStatus(id));
+
+    if (presentDocs.length > 0) {
+      let statuses: SloLiveStatus[] | null = null;
+      if (this.aggregator && ctx) {
+        try {
+          statuses = await this.aggregator.aggregate(presentDocs, ctx);
+        } catch (err) {
+          // Catastrophic aggregator failure — fall through to stub. One warn
+          // per distinct failure message (not per-SLO) to avoid log spam.
+          this.warnAggregatorFailure('__batch__', err);
+          statuses = null;
+        }
+      }
+      for (let i = 0; i < presentDocs.length; i++) {
+        const doc = presentDocs[i];
+        const status = statuses ? statuses[i] : this.computeStatus(doc);
+        result.set(doc.id, status);
+      }
+    }
+
+    for (const id of uncached) {
+      const status = result.get(id);
+      if (status) this.statusCache.set(id, { status, expiresAt: now + STATUS_CACHE_TTL_MS });
+    }
+
+    return ids.map((id) => result.get(id) ?? this.missingStatus(id));
+  }
+
+  private warnAggregatorFailure(sloId: string, err: unknown): void {
+    const msg = err instanceof Error ? err.message : String(err);
+    const key = `${sloId}:${msg}`;
+    if (this.loggedAggregatorFailures.has(key)) return;
+    this.loggedAggregatorFailures.add(key);
+    this.logger.warn(
+      `SloService: aggregator rejected (slo=${sloId}): ${msg}. Falling back to stub status.`
+    );
   }
 
   /**

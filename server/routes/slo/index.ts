@@ -12,7 +12,10 @@
 import { schema } from '@osd/config-schema';
 import type { IRouter, Logger, RequestHandlerContext } from '../../../../../src/core/server';
 import { OBSERVABILITY_BASE } from '../../../common/constants/shared';
-import type { SloDeployContext } from '../../../common/slo/slo_service';
+import type {
+  SloDeployContext,
+  SloStatusAggregationContext,
+} from '../../../common/slo/slo_service';
 import { SloService } from '../../../common/slo/slo_service';
 import type { AlertingOSClient, Datasource } from '../../../common/types/alerting/types';
 import type { InMemoryDatasourceService } from '../../services/alerting/datasource_service';
@@ -285,6 +288,39 @@ async function buildDeployContext(
   };
 }
 
+/**
+ * Build a per-request context for the live-status aggregator. Uses the same
+ * OSD scoped client as the deploy context + the alerting datasource service
+ * to resolve `directQueryName` per SLO.
+ *
+ * Returns undefined when the alerting datasource service isn't available
+ * (e.g. offline dev) — SloService falls through to the stub.
+ *
+ * TODO(W3.1 follow-up): pull real workspaceId from OSD request scope once
+ * plumbed. Today we use the alerting default workspace ('default').
+ */
+function buildStatusContext(
+  ctx: SloHandlerContext,
+  datasourceService: InMemoryDatasourceService | undefined
+): SloStatusAggregationContext | undefined {
+  if (!datasourceService) return undefined;
+  const client = ctx.core.opensearch.client.asCurrentUser;
+  return {
+    client,
+    workspaceId: 'default',
+    resolveDatasource: async (datasourceId: string) => {
+      const ds = await datasourceService.get(datasourceId);
+      if (!ds) return undefined;
+      // If this datasource is MDS-scoped, prefer that client — but we only
+      // have one client per request here, so for P0 we just return the
+      // datasource with whatever scoped client the handler started with.
+      // This is equivalent to how read-path /api/alerting/unified/rules
+      // works today (single scoped client per request).
+      return ds as Datasource;
+    },
+  };
+}
+
 export function registerSloRoutes(
   router: IRouter,
   sloService: SloService,
@@ -312,7 +348,7 @@ export function registerSloRoutes(
         }),
       },
     },
-    async (_ctx, req, res) => {
+    async (ctx, req, res) => {
       const q = req.query;
       const filters = {
         page: q.page ? parseInt(q.page, 10) : undefined,
@@ -334,7 +370,8 @@ export function registerSloRoutes(
         mode: q.mode ? (q.mode.split(',') as Array<'active' | 'shadow'>) : undefined,
         search: q.search,
       };
-      const result = await handleListSLOs(sloService, filters, logger);
+      const statusCtx = buildStatusContext(ctx as SloHandlerContext, datasourceService);
+      const result = await handleListSLOs(sloService, filters, logger, statusCtx);
       if (result.status >= 400) {
         return res.customError({
           statusCode: result.status,
@@ -385,8 +422,9 @@ export function registerSloRoutes(
       path: `${SLO_BASE}/statuses`,
       validate: { body: schema.object({ ids: schema.arrayOf(schema.string()) }) },
     },
-    async (_ctx, req, res) => {
-      const result = await handleGetSLOStatuses(sloService, req.body.ids, logger);
+    async (ctx, req, res) => {
+      const statusCtx = buildStatusContext(ctx as SloHandlerContext, datasourceService);
+      const result = await handleGetSLOStatuses(sloService, req.body.ids, logger, statusCtx);
       if (result.status === 200) return res.ok({ body: result.body });
       return res.customError({
         statusCode: result.status,
@@ -400,8 +438,9 @@ export function registerSloRoutes(
       path: `${SLO_BASE}/{id}`,
       validate: { params: schema.object({ id: schema.string() }) },
     },
-    async (_ctx, req, res) => {
-      const result = await handleGetSLO(sloService, req.params.id, logger);
+    async (ctx, req, res) => {
+      const statusCtx = buildStatusContext(ctx as SloHandlerContext, datasourceService);
+      const result = await handleGetSLO(sloService, req.params.id, logger, statusCtx);
       if (result.status === 200) return res.ok({ body: result.body });
       return res.customError({
         statusCode: result.status,

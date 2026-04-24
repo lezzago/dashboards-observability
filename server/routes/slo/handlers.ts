@@ -13,6 +13,7 @@ import {
   SloDeployContext,
   SloNotFoundError,
   SloRulerError,
+  SloStatusAggregationContext,
   SloValidationError,
   SloVersionConflictError,
   SloService,
@@ -61,10 +62,11 @@ function toSloError(e: unknown, logger?: Logger): HandlerResult {
 export async function handleListSLOs(
   svc: SloService,
   filters: SloListFilters,
-  logger?: Logger
+  logger?: Logger,
+  statusCtx?: SloStatusAggregationContext
 ): Promise<HandlerResult> {
   try {
-    const result = await svc.getPaginated(filters);
+    const result = await svc.getPaginated(filters, statusCtx);
     return { status: 200, body: result };
   } catch (e) {
     return toSloError(e, logger);
@@ -89,12 +91,13 @@ export async function handleCreateSLO(
 export async function handleGetSLO(
   svc: SloService,
   id: string,
-  logger?: Logger
+  logger?: Logger,
+  statusCtx?: SloStatusAggregationContext
 ): Promise<HandlerResult> {
   try {
     const doc = await svc.get(id);
     if (!doc) return { status: 404, body: { error: 'SLO not found' } };
-    const liveStatus = await svc.getStatus(id);
+    const liveStatus = await svc.getStatus(id, statusCtx);
     return { status: 200, body: { ...doc, liveStatus } };
   } catch (e) {
     return toSloError(e, logger);
@@ -178,13 +181,14 @@ export async function handlePreviewSLORules(
 export async function handleGetSLOStatuses(
   svc: SloService,
   ids: string[],
-  logger?: Logger
+  logger?: Logger,
+  statusCtx?: SloStatusAggregationContext
 ): Promise<HandlerResult> {
   try {
     if (!ids || ids.length === 0) {
       return { status: 400, body: { error: 'ids parameter is required' } };
     }
-    const statuses = await svc.getStatuses(ids);
+    const statuses = await svc.getStatuses(ids, statusCtx);
     return { status: 200, body: { statuses } };
   } catch (e) {
     return toSloError(e, logger);
