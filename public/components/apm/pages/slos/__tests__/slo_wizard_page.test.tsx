@@ -294,4 +294,71 @@ describe('SloWizardPage — Wave 2 additions', () => {
       totalQuery: 'sum(rate(total[5m]))',
     });
   });
+
+  // #S12 — per-field validator errors on labels/annotations must surface
+  // inline under the offending textarea, not just as a generic toast.
+  it('surfaces a per-label validator error inline on the Labels row', async () => {
+    const apiClient: Partial<SloApiClient> = {
+      preview: jest.fn().mockResolvedValue({
+        groupName: 'g',
+        interval: 30,
+        rules: [],
+        yaml: '',
+      }),
+      create: jest.fn(),
+    };
+    renderWizard(apiClient);
+    fillMinimumRequiredFields();
+    fireEvent.change(screen.getByTestId('slos-wizard-labels'), {
+      target: { value: 'env=550e8400-e29b-41d4-a716-446655440000' },
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('slos-wizard-submit'));
+    });
+    await act(async () => {
+      jest.runOnlyPendingTimers();
+    });
+
+    const labelsRow = screen.getByTestId('slos-wizard-labels-row');
+    await waitFor(() => {
+      expect(labelsRow.textContent).toMatch(/Label values must not be UUIDs/);
+    });
+    // The offending label key is preserved in the message so the user knows
+    // which row in the textarea triggered the rejection.
+    expect(labelsRow.textContent).toMatch(/env:/);
+    // The generic submit was gated — apiClient.create must not have fired.
+    expect(apiClient.create).not.toHaveBeenCalled();
+  });
+
+  it('surfaces the annotation size-cap validator error inline on the Annotations row', async () => {
+    const apiClient: Partial<SloApiClient> = {
+      preview: jest.fn().mockResolvedValue({
+        groupName: 'g',
+        interval: 30,
+        rules: [],
+        yaml: '',
+      }),
+      create: jest.fn(),
+    };
+    renderWizard(apiClient);
+    fillMinimumRequiredFields();
+    // 4 KiB cap — 5 KiB of x's trips the validator.
+    fireEvent.change(screen.getByTestId('slos-wizard-annotations'), {
+      target: { value: `runbook=${'x'.repeat(5120)}` },
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('slos-wizard-submit'));
+    });
+    await act(async () => {
+      jest.runOnlyPendingTimers();
+    });
+
+    const annotationsRow = screen.getByTestId('slos-wizard-annotations-row');
+    await waitFor(() => {
+      expect(annotationsRow.textContent).toMatch(/Annotations exceed/);
+    });
+    expect(apiClient.create).not.toHaveBeenCalled();
+  });
 });

@@ -235,6 +235,17 @@ const updateBody = schema.object({
   spec: schema.object({}, { unknowns: 'allow' }),
 });
 
+// Preview accepts an incomplete spec so the wizard can render the rule YAML
+// as the user fills the form. The service's `validateSloSpec` still rejects
+// truly-broken specs and the handler returns a 400 with field-keyed errors —
+// we just don't want the OSD route-level schema to reject before the service
+// even sees the spec (fixes #S8: empty `owner.teams` / missing
+// `budgetWarningThresholds` blew up the preview panel).
+const previewBody = schema.object({
+  id: schema.maybe(schema.string()),
+  spec: schema.object({}, { unknowns: 'allow' }),
+});
+
 // ============================================================================
 // Registration
 // ============================================================================
@@ -466,7 +477,7 @@ export function registerSloRoutes(
   });
 
   router.post(
-    { path: `${SLO_BASE}/preview`, validate: { body: createBody } },
+    { path: `${SLO_BASE}/preview`, validate: { body: previewBody } },
     async (_ctx, req, res) => {
       const result = await handlePreviewSLORules(sloService, req.body, logger);
       if (result.status === 200) return res.ok({ body: result.body });

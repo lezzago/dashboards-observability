@@ -309,7 +309,7 @@ export const SloWizardPage: React.FC<SloWizardPageProps> = ({
 
               <EuiSpacer size="m" />
 
-              <LabelsAnnotationsPanel state={state} dispatch={dispatch} />
+              <LabelsAnnotationsPanel state={state} errors={errors} dispatch={dispatch} />
 
               <EuiSpacer size="m" />
 
@@ -588,39 +588,67 @@ const WindowPanel: React.FC<{
 
 const LabelsAnnotationsPanel: React.FC<{
   state: FormState;
+  errors: Record<string, string>;
   dispatch: React.Dispatch<import('./wizard_state').Action>;
-}> = ({ state, dispatch }) => (
-  <EuiPanel>
-    <EuiText size="m">
-      <h4>Labels &amp; annotations (optional)</h4>
-    </EuiText>
-    <EuiText size="xs" color="subdued">
-      One per line as <code>key=value</code>. Labels propagate to rules as{' '}
-      <code>slo_label_&lt;key&gt;</code>. Annotations stay on the document.
-    </EuiText>
-    <EuiSpacer size="s" />
-    <EuiFormRow label="Labels">
-      <EuiTextArea
-        rows={3}
-        value={state.labelsRaw}
-        onChange={(e) => dispatch({ kind: 'setField', field: 'labelsRaw', value: e.target.value })}
-        data-test-subj="slos-wizard-labels"
-        placeholder={'compliance=pci\nregion=us-west-2'}
-      />
-    </EuiFormRow>
-    <EuiFormRow label="Annotations">
-      <EuiTextArea
-        rows={2}
-        value={state.annotationsRaw}
-        onChange={(e) =>
-          dispatch({ kind: 'setField', field: 'annotationsRaw', value: e.target.value })
-        }
-        data-test-subj="slos-wizard-annotations"
-        placeholder="runbook=https://wiki/slo/..."
-      />
-    </EuiFormRow>
-  </EuiPanel>
-);
+}> = ({ state, errors, dispatch }) => {
+  // Per-label errors are keyed as `spec.labels["<name>"]`; per-annotation size
+  // errors land on the scalar `spec.annotations` key. Collect each group so we
+  // can mark the corresponding textarea invalid and render the offending
+  // messages inline (#S12).
+  const labelErrors = Object.entries(errors)
+    .filter(([k]) => k.startsWith('spec.labels'))
+    .map(([k, msg]) => {
+      const match = /^spec\.labels\["(.+)"\]$/.exec(k);
+      return match ? `${match[1]}: ${msg}` : msg;
+    });
+  const annotationError = errors['spec.annotations'];
+  return (
+    <EuiPanel>
+      <EuiText size="m">
+        <h4>Labels &amp; annotations (optional)</h4>
+      </EuiText>
+      <EuiText size="xs" color="subdued">
+        One per line as <code>key=value</code>. Labels propagate to rules as{' '}
+        <code>slo_label_&lt;key&gt;</code>. Annotations stay on the document.
+      </EuiText>
+      <EuiSpacer size="s" />
+      <EuiFormRow
+        label="Labels"
+        isInvalid={labelErrors.length > 0}
+        error={labelErrors}
+        data-test-subj="slos-wizard-labels-row"
+      >
+        <EuiTextArea
+          rows={3}
+          value={state.labelsRaw}
+          isInvalid={labelErrors.length > 0}
+          onChange={(e) =>
+            dispatch({ kind: 'setField', field: 'labelsRaw', value: e.target.value })
+          }
+          data-test-subj="slos-wizard-labels"
+          placeholder={'compliance=pci\nregion=us-west-2'}
+        />
+      </EuiFormRow>
+      <EuiFormRow
+        label="Annotations"
+        isInvalid={!!annotationError}
+        error={annotationError}
+        data-test-subj="slos-wizard-annotations-row"
+      >
+        <EuiTextArea
+          rows={2}
+          value={state.annotationsRaw}
+          isInvalid={!!annotationError}
+          onChange={(e) =>
+            dispatch({ kind: 'setField', field: 'annotationsRaw', value: e.target.value })
+          }
+          data-test-subj="slos-wizard-annotations"
+          placeholder="runbook=https://wiki/slo/..."
+        />
+      </EuiFormRow>
+    </EuiPanel>
+  );
+};
 
 function rulerErrorTitle(envelope: SloRulerErrorEnvelope): string {
   switch (envelope.code) {
