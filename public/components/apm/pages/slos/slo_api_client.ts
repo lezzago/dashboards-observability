@@ -24,6 +24,58 @@ import type {
 
 const SLO_BASE = `${OBSERVABILITY_BASE}/v1/slos`;
 
+/**
+ * Ruler dual-write envelope mirrored from the server's SloRulerError mapping
+ * (see server/routes/slo/handlers.ts:toSloError). The wizard renders
+ * `rawBody` verbatim so the user sees Cortex's own diagnostic (e.g.
+ * "invalid PromQL: parse error at char 42"), not a generic create-failed
+ * toast. `code` lets the wizard branch on coarse failure mode.
+ */
+export type SloRulerErrorCode =
+  | 'RULER_VALIDATION_FAILED'
+  | 'RULER_AUTH_FAILED'
+  | 'RULER_UNREACHABLE';
+
+export interface SloRulerErrorEnvelope {
+  error: string;
+  code: SloRulerErrorCode;
+  httpStatus: number;
+  rawBody: string;
+}
+
+/**
+ * Extracts the ruler envelope from an OSD http error, if one is present.
+ *
+ * OSD's router wraps `res.customError({ body: { message, attributes } })`
+ * into an `IHttpFetchError` whose `.body` is `{ message, attributes }`.
+ * Our SLO route places the full ruler envelope into `attributes`, so the
+ * client walks `err.body.attributes` rather than `err.body` directly.
+ *
+ * Returns null for non-ruler failures (plain validation, network, etc.) —
+ * callers fall back to the generic error message in that case.
+ */
+export function extractRulerErrorEnvelope(err: unknown): SloRulerErrorEnvelope | null {
+  if (!err || typeof err !== 'object') return null;
+  const body = (err as { body?: unknown }).body;
+  if (!body || typeof body !== 'object') return null;
+  const attrs = (body as { attributes?: unknown }).attributes;
+  if (!attrs || typeof attrs !== 'object') return null;
+  const a = attrs as Partial<SloRulerErrorEnvelope>;
+  if (
+    a.code === 'RULER_VALIDATION_FAILED' ||
+    a.code === 'RULER_AUTH_FAILED' ||
+    a.code === 'RULER_UNREACHABLE'
+  ) {
+    return {
+      error: typeof a.error === 'string' ? a.error : 'Ruler dual-write failed',
+      code: a.code,
+      httpStatus: typeof a.httpStatus === 'number' ? a.httpStatus : 0,
+      rawBody: typeof a.rawBody === 'string' ? a.rawBody : '',
+    };
+  }
+  return null;
+}
+
 /** Convert filter array/boolean fields to the string form the server expects. */
 function serializeFilters(filters: SloListFilters): Record<string, string | number | boolean> {
   const query: Record<string, string | number | boolean> = {};
