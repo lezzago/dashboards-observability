@@ -30,7 +30,17 @@ export class InMemoryDatasourceService implements DatasourceService {
   }
 
   async get(id: string): Promise<Datasource | null> {
-    return this.datasources.get(id) ?? null;
+    const direct = this.datasources.get(id);
+    if (direct) return direct;
+    // Discovered Prometheus connections are keyed under auto-generated
+    // `ds-N` IDs, but callers (e.g. the SLO wizard's free-text input) often
+    // pass the user-facing identifier — the SQL-plugin `connectionId`
+    // captured as `directQueryName`, or the display `name`. Match those as a
+    // fallback so a copy-paste from /api/alerting/datasources resolves.
+    for (const ds of this.datasources.values()) {
+      if (ds.directQueryName === id || ds.name === id) return ds;
+    }
+    return null;
   }
 
   async create(input: Omit<Datasource, 'id'>): Promise<Datasource> {

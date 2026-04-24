@@ -16,7 +16,7 @@ import type {
   SloDeployContext,
   SloStatusAggregationContext,
 } from '../../../common/slo/slo_service';
-import { SloService } from '../../../common/slo/slo_service';
+import { SloService, SloValidationError } from '../../../common/slo/slo_service';
 import type { AlertingOSClient, Datasource } from '../../../common/types/alerting/types';
 import type { InMemoryDatasourceService } from '../../services/alerting/datasource_service';
 import type { RulerClient } from '../../services/slo/ruler_client';
@@ -241,10 +241,18 @@ const updateBody = schema.object({
 
 /**
  * Build the per-request SloDeployContext the service needs to dual-write to
- * the ruler on create/update/delete. Returns `undefined` (no ruler call) when:
- *   - the ruler client isn't configured (legacy / offline dev),
- *   - the datasource service hasn't discovered `datasourceId` yet,
- *   - the datasource has no `directQueryName` (not a DirectQuery Prometheus).
+ * the ruler on create/update/delete.
+ *
+ * Returns `undefined` (no ruler call, but the SO still writes) ONLY when the
+ * caller genuinely didn't ask for a ruler write — i.e. the plugin is running
+ * without a ruler client or datasource service (tests, offline dev), or the
+ * request carried no `datasourceId` at all.
+ *
+ * If the caller did supply a `datasourceId` but we can't resolve it — the
+ * datasource isn't discovered, or it isn't a DirectQuery Prometheus — throws
+ * `SloValidationError`. This prevents the prior failure mode where a
+ * typo'd datasource ID produced a silent no-op: the SO saved, the UI
+ * reported "N rules provisioned", but Cortex never received the rule group.
  *
  * TODO(W1.5): derive `workspaceId` from OSD's workspace scope once the SLO
  * spec carries a workspace reference. For now the datasource ID doubles as a
@@ -263,14 +271,20 @@ async function buildDeployContext(
 
   const ds = await datasourceService.get(datasourceId);
   if (!ds) {
-    logger.debug(`SLO deploy context unavailable: datasource "${datasourceId}" not known`);
-    return undefined;
+    logger.warn(
+      `SLO ruler dual-write aborted: datasource "${datasourceId}" is not a known alerting datasource`
+    );
+    throw new SloValidationError({
+      'spec.datasourceId': `Datasource "${datasourceId}" is not registered. Pick one from /api/alerting/datasources.`,
+    });
   }
   if (!ds.directQueryName) {
-    logger.debug(
-      `SLO deploy context unavailable: datasource "${datasourceId}" has no directQueryName`
+    logger.warn(
+      `SLO ruler dual-write aborted: datasource "${datasourceId}" (${ds.name}) has no directQueryName — not a DirectQuery Prometheus connection`
     );
-    return undefined;
+    throw new SloValidationError({
+      'spec.datasourceId': `Datasource "${ds.name}" is not a DirectQuery Prometheus connection; SLO rules can only be deployed to Prometheus-backed datasources.`,
+    });
   }
 
   // Local-cluster fallback (no MDS) — the alerting routes use the same pattern.
@@ -286,6 +300,44 @@ async function buildDeployContext(
     // TODO: pull real workspaceId from OSD request scope once plumbed.
     workspaceId: datasourceId,
   };
+}
+
+/**
+ * Wrap `buildDeployContext` so the route adapter can distinguish "no deploy
+ * intended" (undefined → continue, SO-only write) from "deploy requested but
+ * the datasource was unresolvable" (validation error → 400 with field-keyed
+ * message the wizard can render inline at `spec.datasourceId`).
+ */
+async function tryBuildDeployContext(
+  ctx: SloHandlerContext,
+  datasourceId: string | undefined,
+  rulerClient: RulerClient | undefined,
+  datasourceService: InMemoryDatasourceService | undefined,
+  logger: Logger
+): Promise<
+  | { deploy: SloDeployContext | undefined; errorResponse?: undefined }
+  | { deploy?: undefined; errorResponse: { status: number; body: Record<string, unknown> } }
+> {
+  try {
+    const deploy = await buildDeployContext(
+      ctx,
+      datasourceId,
+      rulerClient,
+      datasourceService,
+      logger
+    );
+    return { deploy };
+  } catch (e) {
+    if (e instanceof SloValidationError) {
+      return {
+        errorResponse: {
+          status: 400,
+          body: { error: 'Validation failed', errors: e.errors },
+        },
+      };
+    }
+    throw e;
+  }
 }
 
 /**
@@ -384,14 +436,25 @@ export function registerSloRoutes(
 
   router.post({ path: SLO_BASE, validate: { body: createBody } }, async (ctx, req, res) => {
     // TODO: once request auth context is wired, pull from req.auth.
-    const deploy = await buildDeployContext(
+    const built = await tryBuildDeployContext(
       ctx as SloHandlerContext,
       req.body?.spec?.datasourceId,
       rulerClient,
       datasourceService,
       logger
     );
-    const result = await handleCreateSLO(sloService, req.body, 'osd-user', logger, deploy);
+    if (built.errorResponse) {
+      return res.customError({
+        statusCode: built.errorResponse.status,
+        body: {
+          message: String(
+            (built.errorResponse.body as { error?: string }).error ?? 'Create failed'
+          ),
+          attributes: built.errorResponse.body,
+        },
+      });
+    }
+    const result = await handleCreateSLO(sloService, req.body, 'osd-user', logger, built.deploy);
     if (result.status === 201) return res.ok({ body: result.body });
     return res.customError({
       statusCode: result.status,
@@ -461,20 +524,31 @@ export function registerSloRoutes(
       // The update body may not carry datasourceId (partial spec); fetch the
       // existing doc to resolve the datasource for the deploy context.
       const existing = await sloService.get(req.params.id);
-      const deploy = await buildDeployContext(
+      const built = await tryBuildDeployContext(
         ctx as SloHandlerContext,
         existing?.spec.datasourceId,
         rulerClient,
         datasourceService,
         logger
       );
+      if (built.errorResponse) {
+        return res.customError({
+          statusCode: built.errorResponse.status,
+          body: {
+            message: String(
+              (built.errorResponse.body as { error?: string }).error ?? 'Update failed'
+            ),
+            attributes: built.errorResponse.body,
+          },
+        });
+      }
       const result = await handleUpdateSLO(
         sloService,
         req.params.id,
         req.body,
         'osd-user',
         logger,
-        deploy
+        built.deploy
       );
       if (result.status === 200) return res.ok({ body: result.body });
       return res.customError({
@@ -494,13 +568,17 @@ export function registerSloRoutes(
     },
     async (ctx, req, res) => {
       const existing = await sloService.get(req.params.id);
-      const deploy = await buildDeployContext(
+      // Delete tolerates an unresolvable datasource: a stale SO with a
+      // bad datasourceId must still be deletable. The ruler DELETE is a
+      // best-effort compensation, not a gating precondition.
+      const built = await tryBuildDeployContext(
         ctx as SloHandlerContext,
         existing?.spec.datasourceId,
         rulerClient,
         datasourceService,
         logger
       );
+      const deploy = built.errorResponse ? undefined : built.deploy;
       const result = await handleDeleteSLO(sloService, req.params.id, logger, deploy);
       if (result.status === 200) return res.ok({ body: result.body });
       return res.customError({
@@ -517,14 +595,31 @@ export function registerSloRoutes(
     },
     async (ctx, req, res) => {
       const existing = await sloService.get(req.params.id);
-      const deploy = await buildDeployContext(
+      const built = await tryBuildDeployContext(
         ctx as SloHandlerContext,
         existing?.spec.datasourceId,
         rulerClient,
         datasourceService,
         logger
       );
-      const result = await handleEnableSLO(sloService, req.params.id, 'osd-user', logger, deploy);
+      if (built.errorResponse) {
+        return res.customError({
+          statusCode: built.errorResponse.status,
+          body: {
+            message: String(
+              (built.errorResponse.body as { error?: string }).error ?? 'Enable failed'
+            ),
+            attributes: built.errorResponse.body,
+          },
+        });
+      }
+      const result = await handleEnableSLO(
+        sloService,
+        req.params.id,
+        'osd-user',
+        logger,
+        built.deploy
+      );
       if (result.status === 200) return res.ok({ body: result.body });
       return res.customError({
         statusCode: result.status,
@@ -540,14 +635,31 @@ export function registerSloRoutes(
     },
     async (ctx, req, res) => {
       const existing = await sloService.get(req.params.id);
-      const deploy = await buildDeployContext(
+      const built = await tryBuildDeployContext(
         ctx as SloHandlerContext,
         existing?.spec.datasourceId,
         rulerClient,
         datasourceService,
         logger
       );
-      const result = await handleDisableSLO(sloService, req.params.id, 'osd-user', logger, deploy);
+      if (built.errorResponse) {
+        return res.customError({
+          statusCode: built.errorResponse.status,
+          body: {
+            message: String(
+              (built.errorResponse.body as { error?: string }).error ?? 'Disable failed'
+            ),
+            attributes: built.errorResponse.body,
+          },
+        });
+      }
+      const result = await handleDisableSLO(
+        sloService,
+        req.params.id,
+        'osd-user',
+        logger,
+        built.deploy
+      );
       if (result.status === 200) return res.ok({ body: result.body });
       return res.customError({
         statusCode: result.status,
