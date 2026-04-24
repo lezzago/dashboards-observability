@@ -10,8 +10,8 @@
  *   1. Per-objective selector      — surfaced only when > 1 objective
  *   2. Error-budget panel          — attainment / budget remaining / time-to-exhaustion
  *   3. Burn-rate panel             — MWMBR tier matrix (short × long windows)
- *   4. Error-ratio time series     — 5m ratio vs the error-budget threshold
- *   5. Budget burndown             — cumulative error ratio over the SLO window vs budget
+ *   4. Error-budget-remaining      — rolling-window area chart with warning threshold (W4.1)
+ *   5. Burn rate by tier           — one line per MWMBR tier with threshold markLine (W4.1)
  *   6. Latency overlay (latency SLIs only) — p50/p90/p99 vs the objective bound
  *   7. Request volume              — context for correlating burn to traffic
  *
@@ -37,22 +37,18 @@ import { TimeRange } from '../../common/types/service_types';
 import type { Objective, SloDocument, SloLiveStatus } from '../../../../../common/slo/slo_types';
 import { SloBurnRatePanel } from './slo_burn_rate_panel';
 import { SloBudgetPanel } from './slo_budget_panel';
+import { SloBudgetRemainingChart } from './slo_budget_remaining_chart';
+import { SloBurnRateChart } from './slo_burn_rate_chart';
 import {
   buildErrorRatioQuery,
   buildLatencyPercentileQuery,
   buildRequestRateQuery,
-  buildWindowErrorRatioQuery,
 } from './slo_query_builders';
 
 export interface SloVisualizationsProps {
   slo: SloDocument & { liveStatus: SloLiveStatus };
   timeRange: TimeRange;
   refreshTrigger: number;
-}
-
-function formatRatio(value: number): string {
-  if (!Number.isFinite(value)) return '—';
-  return `${(value * 100).toFixed(2)}%`;
 }
 
 function formatSeconds(value: number): string {
@@ -95,10 +91,6 @@ export const SloVisualizations: React.FC<SloVisualizationsProps> = ({
     [slo, activeObjective]
   );
   const requestRateQuery = useMemo(() => buildRequestRateQuery(slo), [slo]);
-  const windowErrorRatioQuery = useMemo(
-    () => (activeObjective ? buildWindowErrorRatioQuery(slo, activeObjective) : null),
-    [slo, activeObjective]
-  );
 
   const p50Query = useMemo(() => buildLatencyPercentileQuery(slo, 0.5), [slo]);
   const p90Query = useMemo(() => buildLatencyPercentileQuery(slo, 0.9), [slo]);
@@ -151,9 +143,6 @@ export const SloVisualizations: React.FC<SloVisualizationsProps> = ({
       </EuiCallOut>
     );
   }
-
-  const errorBudget = 1 - activeObjective.target;
-  const threshold = errorBudget; // Crossing the budget line on the 5m ratio = SLI health breach.
 
   return (
     <>
@@ -213,79 +202,32 @@ export const SloVisualizations: React.FC<SloVisualizationsProps> = ({
 
       <EuiSpacer size="m" />
 
-      {/* 4. Error-ratio time series. Budget line (threshold) is drawn via a
-              subtle callout below the chart since the chart component doesn't
-              currently expose horizontal guide lines. */}
-      <EuiPanel>
-        <EuiText size="m">
-          <h4>Error ratio (5m)</h4>
-        </EuiText>
-        <EuiText size="xs" color="subdued">
-          {isLatency
-            ? 'Fraction of requests exceeding the latency bound. Staying below the budget line means the SLO is in good shape at the short-burn scale.'
-            : 'Fraction of bad events over total. Staying below the budget line means the SLO is in good shape at the short-burn scale.'}
-        </EuiText>
-        <EuiSpacer size="xs" />
-        <EuiText size="xs" color="subdued">
-          <span
-            style={{
-              display: 'inline-block',
-              width: 8,
-              height: 2,
-              background: euiThemeVars.euiColorDangerText,
-              verticalAlign: 'middle',
-              marginRight: 4,
-            }}
-          />
-          budget threshold <strong>{formatRatio(threshold)}</strong>
-        </EuiText>
-        <EuiSpacer size="s" />
-        <PromQLLineChart
-          promqlQuery={errorRatioQuery}
-          timeRange={timeRange}
-          prometheusConnectionId={prometheusConnectionId}
-          chartType="area"
-          height={240}
-          refreshTrigger={refreshTrigger}
-          formatValue={formatRatio}
-          seriesLabel={activeObjective.name}
-          color={euiThemeVars.euiColorDangerText}
-          showLegend={false}
-        />
-      </EuiPanel>
+      {/* 4. Error-budget-remaining over the rolling window — the "am I safe,
+              and how close to breach?" chart SREs read first. Replaces the
+              point-in-time error-ratio chart that used to sit here. */}
+      <SloBudgetRemainingChart
+        slo={slo}
+        objective={activeObjective}
+        prometheusConnectionId={prometheusConnectionId}
+        timeRange={timeRange}
+        refreshTrigger={refreshTrigger}
+      />
 
       <EuiSpacer size="m" />
 
-      {/* 5. Budget burndown — cumulative error ratio at the SLO window scale. */}
-      {windowErrorRatioQuery && (
-        <>
-          <EuiPanel>
-            <EuiText size="m">
-              <h4>Budget burndown</h4>
-            </EuiText>
-            <EuiText size="xs" color="subdued">
-              Error ratio over the full SLO window. When this line crosses the budget threshold (
-              {formatRatio(threshold)}), the SLO has exceeded its allowed unreliability budget.
-            </EuiText>
-            <EuiSpacer size="s" />
-            <PromQLLineChart
-              promqlQuery={windowErrorRatioQuery}
-              timeRange={timeRange}
-              prometheusConnectionId={prometheusConnectionId}
-              chartType="line"
-              height={200}
-              refreshTrigger={refreshTrigger}
-              formatValue={formatRatio}
-              seriesLabel={`window ${
-                slo.spec.window.type === 'rolling' ? slo.spec.window.duration : ''
-              }`}
-              color={euiThemeVars.euiColorWarningText}
-              showLegend={false}
-            />
-          </EuiPanel>
-          <EuiSpacer size="m" />
-        </>
-      )}
+      {/* 5. Burn-rate-per-tier time series — the second chart SREs read:
+              "are any of my burn-rate alarms about to page me?". The
+              burn-rate alerts panel above it (SloBurnRatePanel) is the
+              point-in-time matrix; this chart is the trajectory. */}
+      <SloBurnRateChart
+        slo={slo}
+        objective={activeObjective}
+        prometheusConnectionId={prometheusConnectionId}
+        timeRange={timeRange}
+        refreshTrigger={refreshTrigger}
+      />
+
+      <EuiSpacer size="m" />
 
       {/* 6. Latency percentile overlay — latency SLIs only. Ships p50, p90, p99
               together so tail-latency regressions are visible against the

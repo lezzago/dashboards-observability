@@ -8,7 +8,6 @@ import {
   EuiBadge,
   EuiButton,
   EuiButtonEmpty,
-  EuiCodeBlock,
   EuiConfirmModal,
   EuiDescriptionList,
   EuiEmptyPrompt,
@@ -30,6 +29,7 @@ import { HeaderControlledComponentsWrapper } from '../../../../plugin_helpers/pl
 import { TimeRangePicker } from '../../shared/components/time_filter';
 import { TimeRange } from '../../common/types/service_types';
 import { SloVisualizations } from './slo_visualizations';
+import { SloMetadataPanel } from './slo_metadata_panel';
 import type { SloApiClient } from './slo_api_client';
 import type {
   SloDocument,
@@ -163,7 +163,6 @@ export const SloDetailPage: React.FC<SloDetailPageProps> = ({
 
   if (!doc) return null;
 
-  const prov = doc.status.provisioning.backend === 'prometheus' ? doc.status.provisioning : null;
   const sli = doc.spec.sli.type === 'single' ? doc.spec.sli : null;
 
   const headerActions = [
@@ -326,34 +325,7 @@ export const SloDetailPage: React.FC<SloDetailPageProps> = ({
 
             <EuiSpacer size="m" />
 
-            <EuiPanel>
-              <EuiText size="m">
-                <h4>Provisioning</h4>
-              </EuiText>
-              <EuiSpacer size="s" />
-              {prov ? (
-                <>
-                  <EuiDescriptionList
-                    compressed
-                    type="column"
-                    listItems={[
-                      { title: 'Rule group', description: prov.ruleGroupName },
-                      { title: 'Namespace', description: prov.rulerNamespace },
-                      {
-                        title: 'Rule count',
-                        description: String(prov.generatedRuleNames.length),
-                      },
-                    ]}
-                  />
-                  <EuiSpacer size="s" />
-                  <EuiCodeBlock paddingSize="s" language="text" isCopyable overflowHeight={200}>
-                    {prov.generatedRuleNames.join('\n')}
-                  </EuiCodeBlock>
-                </>
-              ) : (
-                <EuiText size="s">Non-Prometheus provisioning</EuiText>
-              )}
-            </EuiPanel>
+            <SloMetadataPanel slo={doc} />
           </EuiPageContentBody>
         </EuiPageContent>
 
