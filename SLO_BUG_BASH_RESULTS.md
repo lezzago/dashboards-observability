@@ -220,7 +220,7 @@ Same root cause as #S12 (step 1): the validator fires and populates `errors['spe
 ### #S12c — Target validator rejects >99.999% instead of clamping to 6 sig figs
 
 **Decision:** Option A — 5-nine hard cap retained; validator is a deliberate guardrail against 6-nine misconfiguration. Test plan S12.3 was the drift; resolved without code changes.
-**Resolved by:** <commit-sha-of-this-commit> (docs-only)
+**Resolved by:** 16a3cf31 (docs-only)
 
 **Severity**: P2 (polish — validator behavior differs from plan, but it's a valid guardrail)
 **Triage owner**: Sanjay
