@@ -11,7 +11,7 @@ actionable bug entries.
 | 2 | Listing filters     | PASS   | slo-bugbash-S2-pass.png; all filter combinations tested | Chen              | Service+Team filters work; URL round-trip works; shadow mode badge visible; clear-all restores 3 rows |
 | 3 | Status transitions  | PASS    | slo-bugbash-S3-flagd-listing.png | Sanjay + Jay      | Tested via flagd paymentFailure=75% flip — live-burn (Strategy D). `scenario-s345-wizard-smoke` row transitioned no_data → breached within ~10 min; "over budget" rendered on the error-budget leaderboard and in the catalog row. |
 | 4 | Budget chart        | PASS    | slo-bugbash-S4-flagd-detail.png | Chen (review: Jay)| Tested via flagd paymentFailure=75% flip — live-burn (Strategy D). Budget-remaining chart slopes to 0% and crosses the 50% warning threshold; "Budget exhausted" callout visible. Attainment 0%, time-to-exhaustion 23h 43m, all 4 burn-rate tier cards show "firing". |
-| 5 | Burn-rate chart     | partial | slo-bugbash-S5-flagd-burnrate.png | Chen (review: Jay)| Tested via flagd paymentFailure=75% flip — live-burn (Strategy D). Burn-rate-by-tier chart surges past all 4 tier thresholds (Page·Quick ~50x at t+20m); UI shows all 4 tiers firing. Alertmanager received `SLO_Warning_50pct` + `SLO_Warning_20pct` for this SLO (2 active) but 0 `SLO_BurnRate_*` — burn-rate alert expressions join 5m AND 1h recording rules which carry different `slo_window` labels, so the vector `and` matches no series. New Finding: #S5-burnrate-label-mismatch. |
+| 5 | Burn-rate chart     | PASS    | slo-bugbash-S5-firing-detail.png | Chen (review: Jay)| Re-validated post-fix: generator emits `and ignoring(slo_window)`; synthetic SLO (`vector(0.5)` error-ratio) produced `SLO_BurnRate_PageQuick` in Cortex `state: firing` and Alertmanager `state: active` within `for: 2m`. UI mirrors Cortex: all 4 burn-rate tiers render "firing" with short/long rates at 50%. See Finding #S5-burnrate-label-mismatch (**Resolved**). |
 | 6 | Metadata panel      | PASS   | slo-bugbash-S6-pass.png (full page); all 8 metadata sections verified | Chen              | Labels (3 rows), Annotations (1 row), Burn-rate tiers (4 rows), Budget-warning (2 rows), Advanced accordion (collapsed initially), Supplemental alarms (5 badges correct states), Exclusion windows (1 row with cron/reason/deferred), Provisioning (15 rules, namespace, rule names list) |
 | 7 | Multi-objective     | PASS   | slo-bugbash-S10-retest-multi-200.png (wizard detail post-create, 26 rules, 2 objectives); Cortex verified 26 rules (13/objective) | Chen + Sanjay     | Wizard multi-objective path re-validated post-fix 2026-04-24 (see Finding #S10-wizard closure). Wizard POST returns HTTP 200, detail page renders 2 objectives, Cortex confirms 7 recording + 4 burn-rate + 2 budget-warning = 13 rules per objective × 2 = 26. |
 | 8 | Custom PromQL       | PASS   | slo-bugbash-S8-wizard-post-fix.png; wizard preview shows 13 rules with custom expr verbatim in rule YAML | Chen (review: Jay)| Wizard UI re-validated post-fix (0db3a036). Custom PromQL template → raw error-ratio mode → custom expression `sum(rate(envoy_cluster_upstream_rq_retry[5m])) / sum(rate(envoy_cluster_upstream_rq[5m]))` appears verbatim in all 7 SLI recording rules (5m/30m/1h/2h/6h/1d/3d windows). Preview shows 13 rules total (7 recording + 4 burn-rate alerts + 2 budget warnings). |
@@ -31,18 +31,16 @@ dev server down, datasource missing, live traffic stopped).
 Entries below are what the next working session should pick up. Anything
 not listed here is either PASS, closed, or out of scope.
 
-1. **S5 — burn-rate alerts don't reach Alertmanager.** Live-burn flagd flip
-   confirmed the chart and UI "firing" badges render correctly (S5 `partial`),
-   but the generated `SLO_BurnRate_*` alert expressions stay inactive because
-   they join short- and long-window recording rules with a PromQL `and`, and
-   those rules carry different `slo_window` label values (5m vs 1h, 30m vs 6h,
-   etc.). The `and` requires all labels match, so the vector join returns empty
-   and the alert never enters pending. Budget-warning alerts share a single
-   `slo_window` and fire correctly. See Finding #S5-burnrate-label-mismatch.
+_None._ S5 resolved this session (see Finding #S5-burnrate-label-mismatch
+**Resolved** block); all prior open items either PASS or closed.
 
 **Closed / not reproducible:**
-- #DELETE-no-cortex-cleanup — main-thread repro shows delete DOES tear
-  down Cortex rule groups within ~3s. See note on that Finding.
+- #DELETE-no-cortex-cleanup — re-verified this session for Custom PromQL:
+  wizard-created SLO → UI Delete → ruler namespace `slo-generated-ds-3`
+  empty within ~3s (T+3s/T+10s/T+30s polls all `no rule groups found`).
+  Last session's false positive was caused by querying the wrong
+  namespace (`slo-generated-ObservabilityStack_Prometheus`) — the
+  plugin actually uses `slo-generated-<datasourceId>`.
 - #S10-wizard — main-thread retest 2026-04-24 ran both reproducer paths
   (multi-objective + Advanced burn-rate tier 14.4 → 20) and both POST
   HTTP 200. Root cause of Kai's false positive: her fetch monkeypatch
@@ -648,6 +646,18 @@ The remote-write push should succeed, populating the 7 recording rule series wit
 ---
 
 ### #S5-burnrate-label-mismatch — `SLO_BurnRate_*` alert expressions never fire due to `slo_window` label mismatch in PromQL `and`
+
+**Resolved** (2026-04-25, commit `554c66da`): Fixed via Option A in
+`common/slo/slo_promql_generator.ts:350-357` (`generateBurnRateAlerts`) —
+changed the short/long vector join from bare `and` to
+`and ignoring(slo_window)`. Added unit-test guard
+`common/slo/__tests__/slo_promql_generator.test.ts` asserting each MWMBR
+tier expr contains `and ignoring(slo_window)` and that the two
+recording-rule label sets differ only in `slo_window`. Live-verified
+against observability-stack: a synthetic SLO with `vector(0.5)`
+error-ratio produced `SLO_BurnRate_PageQuick` in Cortex `state: firing`
+and Alertmanager `state: active` within the tier's `for: 2m` delay
+(screenshot: `slo-bugbash-S5-firing-detail.png`).
 
 **Severity**: P1 (alerts silently don't fire on real burn)
 **Triage owner**: Sanjay
