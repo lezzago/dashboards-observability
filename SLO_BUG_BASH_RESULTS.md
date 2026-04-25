@@ -9,9 +9,9 @@ actionable bug entries.
 |---|---------------------|--------|-------------------------------------------|-------------------|-------|
 | 1 | Ruler dual-write    | PASS   | slo-bugbash-S1-post-fix-created.png; Cortex curl shows 13 rules | Sanjay            | Re-validated after fix 995615bd; 13 rules confirmed in Cortex `/api/v1/rules` after create |
 | 2 | Listing filters     | PASS   | slo-bugbash-S2-pass.png; all filter combinations tested | Chen              | Service+Team filters work; URL round-trip works; shadow mode badge visible; clear-all restores 3 rows |
-| 3 | Status transitions  | BLOCKED | slo-bugbash-S345-wizard-filled.png | Sanjay + Jay      | Strategy B backfill BLOCKED by Cortex out-of-order sample rejection (recording rules continuously update series, cannot backfill historical timestamps). Protobuf encoding fixed but approach not viable. Strategy D (flagd flip) BLOCKED by API iterator bug (#S7-post-fix) preventing custom PromQL SLO creation. Requires wizard fix or manual Cortex rule creation bypass. |
-| 4 | Budget chart        | BLOCKED | slo-bugbash-S345-wizard-filled.png | Chen (review: Jay)| Same blocker as S3. Cannot create live-burn SLO via API or inject synthetic data into active recording rule series. |
-| 5 | Burn-rate chart     | BLOCKED | slo-bugbash-S345-wizard-filled.png | Chen (review: Jay)| Same blocker as S3. Requires either wizard fix for custom PromQL POST or alternative seeding strategy. |
+| 3 | Status transitions  | BLOCKED | slo-bugbash-S345-wizard-filled.png | Sanjay + Jay      | Strategy B (synthetic Cortex backfill) not viable: samples push with newer timestamps than the actively-evaluating recording rule, Cortex rejects out-of-order. Strategy D (flagd flip) not run end-to-end this session; a direct-API Custom PromQL create attempted as a shortcut hit an iterator error. Next session: verify wizard Custom PromQL create works on this branch, then run flagd flip against a wizard-created SLO. See Finding #S345-backfill-blocked. |
+| 4 | Budget chart        | BLOCKED | slo-bugbash-S345-wizard-filled.png | Chen (review: Jay)| Same blocker as S3 (see row above). |
+| 5 | Burn-rate chart     | BLOCKED | slo-bugbash-S345-wizard-filled.png | Chen (review: Jay)| Same blocker as S3 (see row above). |
 | 6 | Metadata panel      | PASS   | slo-bugbash-S6-pass.png (full page); all 8 metadata sections verified | Chen              | Labels (3 rows), Annotations (1 row), Burn-rate tiers (4 rows), Budget-warning (2 rows), Advanced accordion (collapsed initially), Supplemental alarms (5 badges correct states), Exclusion windows (1 row with cron/reason/deferred), Provisioning (15 rules, namespace, rule names list) |
 | 7 | Multi-objective     | PASS   | slo-bugbash-S10-retest-multi-200.png (wizard detail post-create, 26 rules, 2 objectives); Cortex verified 26 rules (13/objective) | Chen + Sanjay     | Wizard multi-objective path re-validated post-fix 2026-04-24 (see Finding #S10-wizard closure). Wizard POST returns HTTP 200, detail page renders 2 objectives, Cortex confirms 7 recording + 4 burn-rate + 2 budget-warning = 13 rules per objective × 2 = 26. |
 | 8 | Custom PromQL       | PASS   | slo-bugbash-S8-wizard-post-fix.png; wizard preview shows 13 rules with custom expr verbatim in rule YAML | Chen (review: Jay)| Wizard UI re-validated post-fix (0db3a036). Custom PromQL template → raw error-ratio mode → custom expression `sum(rate(envoy_cluster_upstream_rq_retry[5m])) / sum(rate(envoy_cluster_upstream_rq[5m]))` appears verbatim in all 7 SLI recording rules (5m/30m/1h/2h/6h/1d/3d windows). Preview shows 13 rules total (7 recording + 4 burn-rate alerts + 2 budget warnings). |
@@ -31,20 +31,19 @@ dev server down, datasource missing, live traffic stopped).
 Entries below are what the next working session should pick up. Anything
 not listed here is either PASS, closed, or out of scope.
 
-1. **#S12c** — Target validator rejects >99.999% instead of clamping to 6
-   sig figs. Not a bug — a product decision: raise `MAX_TARGET` in
-   `common/slo/slo_validators.ts` to `0.999999`, or keep the 5-nine cap and
-   update the test plan to match. See Finding #S12c.
-
-2. **S3 / S4 / S5** — Live-burn scenarios remain BLOCKED by wizard
-   payload-builder bug (#S7-post-fix) preventing custom PromQL SLO creation
-   via API. Strategy B (synthetic backfill) not viable: Cortex rejects
-   out-of-order samples when recording rules are actively evaluating the
-   target series. Strategy D (flagd flip) attempted but custom PromQL SLO
-   create hits iterator error. Protobuf encoding issue resolved (see Finding
-   #S345-backfill-blocked closure) but approach fundamentally blocked by
-   Cortex semantics. Requires wizard fix or alternative seeding bypassing the
-   API create path.
+1. **S3 / S4 / S5** — Live-burn scenarios remain BLOCKED. Strategy B
+   (synthetic Cortex backfill) fails: samples land against actively-
+   evaluating recording rules with newer timestamps, so Cortex rejects
+   out-of-order. Strategy D (flagd flip to `paymentFailure=75%`) not yet
+   completed end-to-end in this session; the single attempt hit a direct-
+   API iterator error on Custom PromQL create (not the wizard path —
+   wizard Custom PromQL create is untested post-S1-fix and S8 only
+   validated preview, not create). Protobuf encoding in the backfill
+   script itself is resolved (see Finding #S345-backfill-blocked). Next
+   session: (a) verify whether the wizard Custom PromQL create path
+   works on this branch, (b) if yes, run flagd flip end-to-end against a
+   wizard-created SLO; if no, file a new Finding for the Custom PromQL
+   direct-API iterator bug.
 
 **Closed / not reproducible:**
 - #DELETE-no-cortex-cleanup — main-thread repro shows delete DOES tear
@@ -626,7 +625,7 @@ Likely files:
 
 **Resolved — protobuf encoding fixed, but approach fundamentally blocked by Cortex out-of-order sample rejection**
 
-**Severity**: P2 (operational — blocks Strategy B fast path; flagd flip fallback also blocked by API bug #S7-post-fix)
+**Severity**: P2 (operational — blocks Strategy B fast path)
 **Triage owner**: Kai (testing infrastructure)
 
 **Reproduction**:
@@ -639,7 +638,7 @@ Likely files:
 **Observed**:
 - **Phase 1 (original issue)**: Cortex rejected all 7 series with HTTP 400: `proto: wrong wireType = 0 for field Value`. The protobuf `encode_sample` function had field 1 (value, double) and field 2 (timestamp, int64) reversed.
 - **Phase 2 (after fix)**: Corrected `/tmp/cortex_backfill_s345.py` to match Prometheus `remote.proto` v1 spec (field 1 = value/double/wire type 1, field 2 = timestamp/varint/wire type 0). Test push to single series succeeded with 200 response but data was immediately rejected with `out of order sample` error because the SLO's recording rules are continuously evaluating and inserting samples with current timestamps. Cannot push historical timestamps into a series that has newer data.
-- **Phase 3 (fallback attempt)**: Attempted Strategy D (flagd flip `paymentFailure=75%` to generate live 5xx traffic), but creating the custom PromQL SLO via API hits the iterator bug documented in Finding #S7-post-fix: `Cannot destructure property 'Symbol(Symbol.iterator)' of 'undefined'`. Wizard path not viable for custom PromQL (template cards don't load in the time budget).
+- **Phase 3 (fallback attempt)**: Attempted Strategy D (flagd flip `paymentFailure=75%` to generate live 5xx traffic). Creating the custom PromQL SLO via **direct API** (bypassing the wizard) hit `Cannot destructure property 'Symbol(Symbol.iterator)' of 'undefined'` — a separate bug in the direct-API Custom PromQL create path, not the wizard POST path. The wizard path was not attempted in this session's time budget. Note: this is NOT the closed #S7-post-fix finding (which was about the wizard POST no-op, closed as not-reproducible); it's a direct-API-only failure mode that should be opened as a new Finding if reproducible in a focused session.
 
 **Expected**:
 The remote-write push should succeed, populating the 7 recording rule series with high error-ratio values so the status aggregator/charts/alerts can be validated within ~20 minutes (Strategy B).
@@ -647,9 +646,6 @@ The remote-write push should succeed, populating the 7 recording rule series wit
 **Resolution**:
 - Protobuf encoding fix: swapped field ordering in `encode_sample()` so `value_field` (field 1, wire type 1) comes before `ts_field` (field 2, wire type 0). This matches the Prometheus `remote.proto` v1 definition. Fix confirmed via test push returning 200 (no wire type errors).
 - Strategy B (backfill) is fundamentally not viable for testing active SLO recording rules because Cortex rejects out-of-order samples. This approach only works if the recording rules are paused or if data is pushed before rule evaluation starts.
-- Strategy D (flagd flip) blocked by separate API bug (#S7-post-fix) preventing custom PromQL SLO creation.
-- S3/S4/S5 remain BLOCKED pending resolution of the wizard payload-builder bug that prevents custom PromQL SLOs from being created.
+- S3/S4/S5 next session: try wizard Custom PromQL create (S8 validated preview only, not create) then flagd flip against that SLO.
 
-**Cleanup performed**: Flagd config `/Users/ashisagr/Documents/workspace/observability-stack/docker-compose/opentelemetry-demo/src/flagd/demo.flagd.json` edited to set `paymentFailure.defaultVariant="75%"`. No SLO created (API call failed). Ruler namespace clean (verified `curl http://localhost:9090/api/v1/rules/slo-generated-ds-3` returns `no rule groups found`).
-
-**Impact**: Over time, Cortex accumulates stale rule groups from deleted SLOs. This wastes memory/CPU on rule evaluation and pollutes the ruler namespace. Not a blocker for GA (users can manually clean up via ruler API), but poor UX.
+**Cleanup performed**: Flagd config reverted to `paymentFailure.defaultVariant="off"` (main-thread reset of Agent 3's stray edit). No SLO created in this phase. Ruler namespace clean (verified `curl http://localhost:9090/api/v1/rules/slo-generated-ds-3` returns `no rule groups found`).
