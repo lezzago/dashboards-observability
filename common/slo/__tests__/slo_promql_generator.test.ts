@@ -201,6 +201,38 @@ describe('generateSloRuleGroup — availability, single objective', () => {
     const pageSlow = burnRates.find((r) => r.labels.slo_burn_rate_multiplier === '6')!;
     expect(pageSlow.expr).toContain('> 0.006');
   });
+
+  // Guards against #S5-burnrate-label-mismatch. Recording rules emit different
+  // `slo_window` label values for the short vs. long window (e.g. 5m vs 1h), so
+  // a bare `and` join produces an empty vector and the alert never fires. The
+  // fix is `and ignoring(slo_window)`. If this test fails, every MWMBR
+  // burn-rate alert is silently broken end-to-end.
+  it('joins short/long recording rules with `and ignoring(slo_window)` so vector match succeeds', () => {
+    const group = generateSloRuleGroup(baseSlo());
+    const burnRates = group.rules.filter(
+      (r) => r.type === 'alerting' && r.labels.slo_alarm_type === 'burn_rate'
+    );
+    // Design §6.4 — 4 MWMBR tiers (PageQuick, PageSlow, TicketQuick, TicketSlow).
+    expect(burnRates).toHaveLength(4);
+    for (const rule of burnRates) {
+      expect(rule.expr).toContain('and ignoring(slo_window)');
+      // No bare `and` that would hit slo_window on the right-hand side.
+      expect(rule.expr).not.toMatch(/\nand\n/);
+    }
+
+    // Semantic guard: for the join to succeed, the two recording-rule label
+    // sets the alert references must differ only in `slo_window`. If anything
+    // else diverges (e.g. a future label added only to one window),
+    // `ignoring(slo_window)` is no longer sufficient.
+    const recording = group.rules.filter((r) => r.type === 'recording');
+    const shortRec = recording.find((r) => r.labels.slo_window === '5m')!;
+    const longRec = recording.find((r) => r.labels.slo_window === '1h')!;
+    const stripWindow = (labels: Record<string, string>) => {
+      const { slo_window: _ignored, ...rest } = labels;
+      return rest;
+    };
+    expect(stripWindow(shortRec.labels)).toEqual(stripWindow(longRec.labels));
+  });
 });
 
 describe('generateSloRuleGroup — shadow mode', () => {

@@ -347,9 +347,13 @@ function generateBurnRateAlerts(
     const tierLabel = MWMBR_TIER_LABELS[i] ?? `Tier${i + 1}`;
     const name = `SLO_BurnRate_${tierLabel}_${slug}_${suffix}`;
 
+    // The short- and long-window recording rules carry different `slo_window`
+    // label values (e.g. 5m vs 1h), so a bare `and` produces an empty vector
+    // join. Ignore `slo_window` on the match so both sides intersect on the
+    // remaining SLO labels.
     const expr =
       `${shortRec}{slo_id="${sloId}"} > ${threshold}\n` +
-      `and\n` +
+      `and ignoring(slo_window)\n` +
       `${longRec}{slo_id="${sloId}"} > ${threshold}`;
 
     rules.push({
