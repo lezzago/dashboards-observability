@@ -136,3 +136,152 @@ describe('InMemoryDatasourceService.get', () => {
     expect(ds).toBeNull();
   });
 });
+
+describe('InMemoryDatasourceService.reconcile', () => {
+  // Repro for the ds-N cycling bug (adjacent finding in the #S5 session):
+  // the old discoverOsdDatasources did `delete-all + seed`, which bumped
+  // the auto-increment counter on every refresh. Any persisted SLO whose
+  // spec.datasourceId was "ds-3" was orphaned ~30s later because that
+  // logical connection was now "ds-6", then "ds-9", etc. Every delete or
+  // update after the first refresh silently skipped the ruler dual-write
+  // because the route's datasourceService.get("ds-3") resolved to null.
+  it('preserves ds-N id across repeated reconciles when the stable key is unchanged', async () => {
+    const svc = new InMemoryDatasourceService(noopLogger());
+    const discovered = [
+      { name: 'Local Cluster', type: 'opensearch' as const, url: 'local', enabled: true },
+      {
+        name: 'ObservabilityStack_Prometheus',
+        type: 'prometheus' as const,
+        url: 'so-abc',
+        enabled: true,
+        directQueryName: 'ObservabilityStack_Prometheus',
+      },
+    ];
+
+    await svc.reconcile(discovered);
+    const firstIds = (await svc.list()).map((d) => `${d.id}:${d.name}`).sort();
+
+    // Simulate the 30s refresh — same logical entries, new Array references.
+    await svc.reconcile(discovered.map((d) => ({ ...d })));
+    await svc.reconcile(discovered.map((d) => ({ ...d })));
+    const laterIds = (await svc.list()).map((d) => `${d.id}:${d.name}`).sort();
+
+    expect(laterIds).toEqual(firstIds);
+  });
+
+  it('keeps the id stable when name / url / enabled change but stable key (directQueryName) is the same', async () => {
+    const svc = new InMemoryDatasourceService(noopLogger());
+    await svc.reconcile([
+      {
+        name: 'Old Name',
+        type: 'prometheus' as const,
+        url: 'so-xyz',
+        enabled: true,
+        directQueryName: 'prod-prom',
+      },
+    ]);
+    const before = (await svc.list())[0];
+
+    await svc.reconcile([
+      {
+        name: 'Renamed',
+        type: 'prometheus' as const,
+        url: 'so-abc', // even the SO id can shift; stable key is directQueryName
+        enabled: false,
+        directQueryName: 'prod-prom',
+      },
+    ]);
+    const after = (await svc.list())[0];
+
+    expect(after.id).toBe(before.id);
+    expect(after.name).toBe('Renamed');
+    expect(after.enabled).toBe(false);
+  });
+
+  it('prunes discovery-owned entries that vanish from the SO set', async () => {
+    const svc = new InMemoryDatasourceService(noopLogger());
+    await svc.reconcile([
+      { name: 'Local Cluster', type: 'opensearch' as const, url: 'local', enabled: true },
+      {
+        name: 'Prom A',
+        type: 'prometheus' as const,
+        url: 'so-a',
+        enabled: true,
+        directQueryName: 'prom-a',
+      },
+      {
+        name: 'Prom B',
+        type: 'prometheus' as const,
+        url: 'so-b',
+        enabled: true,
+        directQueryName: 'prom-b',
+      },
+    ]);
+    expect(await svc.list()).toHaveLength(3);
+
+    // Prom B got deleted upstream.
+    await svc.reconcile([
+      { name: 'Local Cluster', type: 'opensearch' as const, url: 'local', enabled: true },
+      {
+        name: 'Prom A',
+        type: 'prometheus' as const,
+        url: 'so-a',
+        enabled: true,
+        directQueryName: 'prom-a',
+      },
+    ]);
+    const names = (await svc.list()).map((d) => d.name).sort();
+    expect(names).toEqual(['Local Cluster', 'Prom A']);
+  });
+
+  it('does not prune user-created entries (no directQueryName / mdsId / local sentinel)', async () => {
+    const svc = new InMemoryDatasourceService(noopLogger());
+    await svc.create({
+      name: 'Manually added',
+      type: 'prometheus',
+      url: 'http://user-prom:9090',
+      enabled: true,
+    });
+    await svc.reconcile([
+      { name: 'Local Cluster', type: 'opensearch' as const, url: 'local', enabled: true },
+    ]);
+
+    const names = (await svc.list()).map((d) => d.name).sort();
+    expect(names).toEqual(['Local Cluster', 'Manually added']);
+  });
+
+  it('adds a new entry without disturbing existing ids', async () => {
+    const svc = new InMemoryDatasourceService(noopLogger());
+    await svc.reconcile([
+      {
+        name: 'Prom A',
+        type: 'prometheus' as const,
+        url: 'so-a',
+        enabled: true,
+        directQueryName: 'prom-a',
+      },
+    ]);
+    const idA = (await svc.list())[0].id;
+
+    await svc.reconcile([
+      {
+        name: 'Prom A',
+        type: 'prometheus' as const,
+        url: 'so-a',
+        enabled: true,
+        directQueryName: 'prom-a',
+      },
+      {
+        name: 'Prom B',
+        type: 'prometheus' as const,
+        url: 'so-b',
+        enabled: true,
+        directQueryName: 'prom-b',
+      },
+    ]);
+    const byName = new Map((await svc.list()).map((d) => [d.name, d.id]));
+    expect(byName.get('Prom A')).toBe(idA);
+    expect(byName.get('Prom B')).toBeDefined();
+    expect(byName.get('Prom B')).not.toBe(idA);
+  });
+});

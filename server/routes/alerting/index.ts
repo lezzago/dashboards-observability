@@ -112,11 +112,6 @@ export function registerAlertingRoutes(
 
     inflight = (async () => {
       try {
-        // Clear everything; we'll rebuild the list from scratch below.
-        for (const ds of existing) {
-          await datasourceService.delete(ds.id);
-        }
-
         // Discover OSD-registered data sources + direct-query data connections.
         // - `data-source` = MDS OpenSearch clusters (attribute.endpoint is a URL).
         // - `data-connection` = direct-query connections (Prometheus, CloudWatch, etc);
@@ -186,13 +181,18 @@ export function registerAlertingRoutes(
             directQueryName: so.attributes.connectionId,
           }));
 
-        const discovered = [...osDiscovered, ...promDiscovered];
-        if (discovered.length > 0) {
-          datasourceService.seed(discovered);
-          logger?.info(
-            `alerting: Discovered ${osDiscovered.length} OpenSearch data source(s), ${promDiscovered.length} Prometheus connection(s)`
-          );
-        }
+        // Upsert by stable key so ds-N ids are preserved across refreshes.
+        // Previously this was delete-all + seed, which bumped the counter
+        // every 30 seconds and orphaned every persisted SLO's datasourceId.
+        const discovered = [
+          { name: 'Local Cluster', type: 'opensearch' as const, url: 'local', enabled: true },
+          ...osDiscovered,
+          ...promDiscovered,
+        ];
+        await datasourceService.reconcile(discovered);
+        logger?.info(
+          `alerting: Reconciled datasources — ${osDiscovered.length} OpenSearch data source(s), ${promDiscovered.length} Prometheus connection(s)`
+        );
         lastDiscoveryTs = Date.now();
       } catch (e) {
         logger?.debug(`alerting: Could not discover OSD data sources: ${e}`);
