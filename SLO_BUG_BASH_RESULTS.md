@@ -31,12 +31,7 @@ dev server down, datasource missing, live traffic stopped).
 Entries below are what the next working session should pick up. Anything
 not listed here is either PASS, closed, or out of scope.
 
-1. **#S12c** — Target validator rejects >99.999% instead of clamping to 6
-   sig figs. Not a bug — a product decision: raise `MAX_TARGET` in
-   `common/slo/slo_validators.ts` to `0.999999`, or keep the 5-nine cap and
-   update the test plan to match. See Finding #S12c.
-
-2. **S3 / S4 / S5** — Live-burn scenarios BLOCKED by backfill tooling, not
+1. **S3 / S4 / S5** — Live-burn scenarios BLOCKED by backfill tooling, not
    the plugin. #S1 fix (995615bd) landed; SLO + 14 rules provisioned in
    Cortex successfully. Strategy B backfill blocked by Python protobuf
    encoding bug (see Finding #S345-backfill-blocked). Fallback: flagd flip
@@ -223,6 +218,9 @@ Same root cause as #S12 (step 1): the validator fires and populates `errors['spe
 ---
 
 ### #S12c — Target validator rejects >99.999% instead of clamping to 6 sig figs
+
+**Decision:** Option A — 5-nine hard cap retained; validator is a deliberate guardrail against 6-nine misconfiguration. Test plan S12.3 was the drift; resolved without code changes.
+**Resolved by:** <commit-sha-of-this-commit> (docs-only)
 
 **Severity**: P2 (polish — validator behavior differs from plan, but it's a valid guardrail)
 **Triage owner**: Sanjay
