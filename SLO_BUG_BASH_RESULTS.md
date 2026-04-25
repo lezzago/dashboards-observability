@@ -9,9 +9,9 @@ actionable bug entries.
 |---|---------------------|--------|-------------------------------------------|-------------------|-------|
 | 1 | Ruler dual-write    | PASS   | slo-bugbash-S1-post-fix-created.png; Cortex curl shows 13 rules | Sanjay            | Re-validated after fix 995615bd; 13 rules confirmed in Cortex `/api/v1/rules` after create |
 | 2 | Listing filters     | PASS   | slo-bugbash-S2-pass.png; all filter combinations tested | Chen              | Service+Team filters work; URL round-trip works; shadow mode badge visible; clear-all restores 3 rows |
-| 3 | Status transitions  | BLOCKED | slo-bugbash-S345-wizard-filled.png (wizard state); SLO created via API (ID d38c538c-8910-42df-9b05-007ae0f92b9e), 14 rules in Cortex confirmed | Sanjay + Jay      | **Unblocked by #S1 fix (995615bd)**. Recording rules land in Cortex successfully. Strategy B synthetic backfill BLOCKED by protobuf encoding issues (see Finding #S345-backfill-blocked). Requires either: (1) fix Python remote-write script, (2) use promtool push, or (3) fall back to flagd flip (slow path, ~15m). SLO + rules exist; waiting for live-burn data injection to validate S3/S4/S5 end-to-end. |
-| 4 | Budget chart        | BLOCKED | slo-bugbash-S345-wizard-filled.png | Chen (review: Jay)| **Unblocked by #S1 fix (995615bd)**. SLO + recording rules provisioned. Strategy B backfill blocked (see #S345-backfill-blocked). Chart UI ready; needs live-burn data to test. |
-| 5 | Burn-rate chart     | BLOCKED | slo-bugbash-S345-wizard-filled.png | Chen (review: Jay)| **Unblocked by #S1 fix (995615bd)**. SLO + recording rules + burn-rate alert rules provisioned. Strategy B backfill blocked (see #S345-backfill-blocked). Alert rules ready; needs live-burn data to fire. |
+| 3 | Status transitions  | BLOCKED | slo-bugbash-S345-wizard-filled.png | Sanjay + Jay      | Strategy B backfill BLOCKED by Cortex out-of-order sample rejection (recording rules continuously update series, cannot backfill historical timestamps). Protobuf encoding fixed but approach not viable. Strategy D (flagd flip) BLOCKED by API iterator bug (#S7-post-fix) preventing custom PromQL SLO creation. Requires wizard fix or manual Cortex rule creation bypass. |
+| 4 | Budget chart        | BLOCKED | slo-bugbash-S345-wizard-filled.png | Chen (review: Jay)| Same blocker as S3. Cannot create live-burn SLO via API or inject synthetic data into active recording rule series. |
+| 5 | Burn-rate chart     | BLOCKED | slo-bugbash-S345-wizard-filled.png | Chen (review: Jay)| Same blocker as S3. Requires either wizard fix for custom PromQL POST or alternative seeding strategy. |
 | 6 | Metadata panel      | PASS   | slo-bugbash-S6-pass.png (full page); all 8 metadata sections verified | Chen              | Labels (3 rows), Annotations (1 row), Burn-rate tiers (4 rows), Budget-warning (2 rows), Advanced accordion (collapsed initially), Supplemental alarms (5 badges correct states), Exclusion windows (1 row with cron/reason/deferred), Provisioning (15 rules, namespace, rule names list) |
 | 7 | Multi-objective     | PASS   | slo-bugbash-S10-retest-multi-200.png (wizard detail post-create, 26 rules, 2 objectives); Cortex verified 26 rules (13/objective) | Chen + Sanjay     | Wizard multi-objective path re-validated post-fix 2026-04-24 (see Finding #S10-wizard closure). Wizard POST returns HTTP 200, detail page renders 2 objectives, Cortex confirms 7 recording + 4 burn-rate + 2 budget-warning = 13 rules per objective × 2 = 26. |
 | 8 | Custom PromQL       | PASS   | slo-bugbash-S8-wizard-post-fix.png; wizard preview shows 13 rules with custom expr verbatim in rule YAML | Chen (review: Jay)| Wizard UI re-validated post-fix (0db3a036). Custom PromQL template → raw error-ratio mode → custom expression `sum(rate(envoy_cluster_upstream_rq_retry[5m])) / sum(rate(envoy_cluster_upstream_rq[5m]))` appears verbatim in all 7 SLI recording rules (5m/30m/1h/2h/6h/1d/3d windows). Preview shows 13 rules total (7 recording + 4 burn-rate alerts + 2 budget warnings). |
@@ -26,17 +26,25 @@ dev server down, datasource missing, live traffic stopped).
 
 ---
 
-## Open items (as of 2026-04-24)
+## Open items (as of 2026-04-25)
 
 Entries below are what the next working session should pick up. Anything
 not listed here is either PASS, closed, or out of scope.
 
-1. **S3 / S4 / S5** — Live-burn scenarios BLOCKED by backfill tooling, not
-   the plugin. #S1 fix (995615bd) landed; SLO + 14 rules provisioned in
-   Cortex successfully. Strategy B backfill blocked by Python protobuf
-   encoding bug (see Finding #S345-backfill-blocked). Fallback: flagd flip
-   `paymentFailure=75%` (slow path, ~15 min). SLO ID `d38c538c-8910-42df-9b05-007ae0f92b9e`
-   left in place for re-run after backfill fix or flagd flip.
+1. **#S12c** — Target validator rejects >99.999% instead of clamping to 6
+   sig figs. Not a bug — a product decision: raise `MAX_TARGET` in
+   `common/slo/slo_validators.ts` to `0.999999`, or keep the 5-nine cap and
+   update the test plan to match. See Finding #S12c.
+
+2. **S3 / S4 / S5** — Live-burn scenarios remain BLOCKED by wizard
+   payload-builder bug (#S7-post-fix) preventing custom PromQL SLO creation
+   via API. Strategy B (synthetic backfill) not viable: Cortex rejects
+   out-of-order samples when recording rules are actively evaluating the
+   target series. Strategy D (flagd flip) attempted but custom PromQL SLO
+   create hits iterator error. Protobuf encoding issue resolved (see Finding
+   #S345-backfill-blocked closure) but approach fundamentally blocked by
+   Cortex semantics. Requires wizard fix or alternative seeding bypassing the
+   API create path.
 
 **Closed / not reproducible:**
 - #DELETE-no-cortex-cleanup — main-thread repro shows delete DOES tear
@@ -614,9 +622,11 @@ Likely files:
 
 ---
 
-### #S345-backfill-blocked — Synthetic Cortex backfill fails with protobuf encoding error
+### #S345-backfill-blocked — Synthetic Cortex backfill not viable for active recording rules
 
-**Severity**: P2 (operational — blocks Strategy B fast path, but flagd flip fallback exists)
+**Resolved — protobuf encoding fixed, but approach fundamentally blocked by Cortex out-of-order sample rejection**
+
+**Severity**: P2 (operational — blocks Strategy B fast path; flagd flip fallback also blocked by API bug #S7-post-fix)
 **Triage owner**: Kai (testing infrastructure)
 
 **Reproduction**:
@@ -624,38 +634,22 @@ Likely files:
 2. SLO created successfully with ID `d38c538c-8910-42df-9b05-007ae0f92b9e`.
 3. Cortex ruler confirms 14 rules provisioned (7 SLI recording rules for windows 5m/30m/1h/2h/6h/1d/3d, 4 burn-rate alerts, 1 attainment alert, 2 budget warnings).
 4. Attempt synthetic backfill via Python script pushing Prometheus remote-write protobuf to `http://localhost:9090/api/v1/push`.
-5. Script constructs `WriteRequest` with `TimeSeries` containing 81 samples (one every 15s for last 20 minutes) at value 0.8 (80% error ratio), labels matching the Cortex recording rule labels (`slo_id`, `slo_name`, `slo_objective`, `slo_owner_team`, `slo_service`, `slo_window`).
+5. Script constructs `WriteRequest` with `TimeSeries` containing 81 samples (one every 15s for last 20 minutes) at value 0.8 (80% error ratio), labels matching the Cortex recording rule labels.
 
 **Observed**:
-- Cortex rejects all 7 series with HTTP 400: `proto: wrong wireType = 0 for field Value`.
-- The protobuf encoding for `Sample.value` (field 2, type `double`, wire type 1 = 64-bit fixed) was incorrectly encoded with wire type 0 (varint).
-- Zero samples ingested; SLI recording rules remain unpopulated.
+- **Phase 1 (original issue)**: Cortex rejected all 7 series with HTTP 400: `proto: wrong wireType = 0 for field Value`. The protobuf `encode_sample` function had field 1 (value, double) and field 2 (timestamp, int64) reversed.
+- **Phase 2 (after fix)**: Corrected `/tmp/cortex_backfill_s345.py` to match Prometheus `remote.proto` v1 spec (field 1 = value/double/wire type 1, field 2 = timestamp/varint/wire type 0). Test push to single series succeeded with 200 response but data was immediately rejected with `out of order sample` error because the SLO's recording rules are continuously evaluating and inserting samples with current timestamps. Cannot push historical timestamps into a series that has newer data.
+- **Phase 3 (fallback attempt)**: Attempted Strategy D (flagd flip `paymentFailure=75%` to generate live 5xx traffic), but creating the custom PromQL SLO via API hits the iterator bug documented in Finding #S7-post-fix: `Cannot destructure property 'Symbol(Symbol.iterator)' of 'undefined'`. Wizard path not viable for custom PromQL (template cards don't load in the time budget).
 
 **Expected**:
 The remote-write push should succeed, populating the 7 recording rule series with high error-ratio values so the status aggregator/charts/alerts can be validated within ~20 minutes (Strategy B).
 
-**Hypothesis**:
-The hand-rolled protobuf encoder in `/tmp/cortex_backfill_s345.py` has a bug in `encode_sample`:
-- Field 1 (timestamp) is `int64`, wire type 0 (varint) ✓
-- Field 2 (value) is `double`, wire type 1 (64-bit fixed) — but the script encodes it incorrectly.
+**Resolution**:
+- Protobuf encoding fix: swapped field ordering in `encode_sample()` so `value_field` (field 1, wire type 1) comes before `ts_field` (field 2, wire type 0). This matches the Prometheus `remote.proto` v1 definition. Fix confirmed via test push returning 200 (no wire type errors).
+- Strategy B (backfill) is fundamentally not viable for testing active SLO recording rules because Cortex rejects out-of-order samples. This approach only works if the recording rules are paused or if data is pushed before rule evaluation starts.
+- Strategy D (flagd flip) blocked by separate API bug (#S7-post-fix) preventing custom PromQL SLO creation.
+- S3/S4/S5 remain BLOCKED pending resolution of the wizard payload-builder bug that prevents custom PromQL SLOs from being created.
 
-The actual Prometheus `remote.proto` definition (v1) is:
-```proto
-message Sample {
-  double value = 1;
-  int64 timestamp = 2;
-}
-```
-So field 1 is `value` (double, wire type 1), and field 2 is `timestamp` (int64, wire type 0). The script had them reversed.
-
-**Fix suggestion**:
-1. Correct the protobuf encoding in the Python script: swap field numbers and wire types for `value` and `timestamp`.
-2. Alternatively, use `promtool push` or the `prometheus` binary's built-in remote-write client.
-3. Alternatively, use `prometheus_client` library's `push_to_gateway` (requires Pushgateway) or `write_to_textfile` + Prometheus scrape.
-4. Fallback: use the flagd flip approach (set `paymentFailure=75%`, wait ~15m for 5xx rate to build, assert S3/S4/S5).
-
-**Cleanup performed**: SLO `scenario-s345-live-burn` (ID `d38c538c-8910-42df-9b05-007ae0f92b9e`) LEFT IN PLACE — it has zero live data, so it's in `no_data` state and won't fire alerts. Can be deleted later or reused once backfill is fixed.
-
-**Impact**: S3/S4/S5 remain BLOCKED pending either: (a) fix the Python script and re-run backfill, or (b) use the flagd flip (slow path, ~15m wait). The SLO + recording rules are correctly provisioned; only the live-burn data injection step failed.
+**Cleanup performed**: Flagd config `/Users/ashisagr/Documents/workspace/observability-stack/docker-compose/opentelemetry-demo/src/flagd/demo.flagd.json` edited to set `paymentFailure.defaultVariant="75%"`. No SLO created (API call failed). Ruler namespace clean (verified `curl http://localhost:9090/api/v1/rules/slo-generated-ds-3` returns `no rule groups found`).
 
 **Impact**: Over time, Cortex accumulates stale rule groups from deleted SLOs. This wastes memory/CPU on rule evaluation and pollutes the ruler namespace. Not a blocker for GA (users can manually clean up via ruler API), but poor UX.
