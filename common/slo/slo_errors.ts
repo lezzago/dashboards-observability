@@ -71,3 +71,22 @@ export class SloRulerError extends Error {
     this.name = 'SloRulerError';
   }
 }
+
+/**
+ * Thrown when `SloService.delete` is asked to tear down an SLO with a
+ * provisioned rule group but has no deploy context — typically because the
+ * SLO's `datasourceId` is no longer registered (datasource was removed or
+ * renamed). Delete is ruler-first, so we refuse to drop the SO here: that
+ * would leave a dangling rule group in Cortex still evaluating against the
+ * live cluster. The user has to restore the datasource (or the operator has
+ * to force a ruler-side cleanup) before the SLO can be removed.
+ */
+export class SloRulerTeardownRequiredError extends Error {
+  constructor(public readonly sloId: string, public readonly datasourceId: string) {
+    super(
+      `Cannot delete SLO "${sloId}": its datasource "${datasourceId}" is not registered, ` +
+        `so the rule group cannot be removed from Cortex. Re-register the datasource and retry.`
+    );
+    this.name = 'SloRulerTeardownRequiredError';
+  }
+}

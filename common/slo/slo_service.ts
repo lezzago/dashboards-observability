@@ -46,6 +46,7 @@ import { InMemorySloStore } from './slo_store';
 import {
   SloNotFoundError,
   SloRulerError,
+  SloRulerTeardownRequiredError,
   SloValidationError,
   SloVersionConflictError,
 } from './slo_errors';
@@ -64,7 +65,13 @@ import {
  */
 const STATUS_CACHE_TTL_MS = 60_000;
 
-export { SloNotFoundError, SloRulerError, SloValidationError, SloVersionConflictError };
+export {
+  SloNotFoundError,
+  SloRulerError,
+  SloRulerTeardownRequiredError,
+  SloValidationError,
+  SloVersionConflictError,
+};
 
 // ============================================================================
 // Ruler deployment context
@@ -344,9 +351,24 @@ export class SloService {
     const existing = await this.store.get(id);
     if (!existing) return { deleted: false, generatedRuleNames: [] };
 
-    // SO-first (memo §Dual-write atomicity §delete): a failed ruler delete
-    // must not resurrect an SO the user thinks is gone. Dangling rule
-    // groups are swept by the Wave 3 reconciler using `generatedRuleNames`.
+    const needsRulerTeardown =
+      existing.status.provisioning.backend === 'prometheus' &&
+      !!existing.status.provisioning.ruleGroupName;
+
+    // Ruler-first, SO-second. If the ruler delete fails (network, auth, Cortex
+    // 5xx), the SO stays so the user can retry — better than silently leaking
+    // a rule group that keeps evaluating dead alerts. The caller is required
+    // to supply `deploy` whenever the SLO has a rule group; the route adapter
+    // enforces this by surfacing an unresolvable-datasource error to the user.
+    if (needsRulerTeardown) {
+      if (!deploy) {
+        throw new SloRulerTeardownRequiredError(id, existing.spec.datasourceId);
+      }
+      const namespace = existing.status.provisioning.rulerNamespace || SLO_RULER_NAMESPACE;
+      const groupName = existing.status.provisioning.ruleGroupName;
+      await deploy.ruler.deleteRuleGroup(deploy.client, deploy.datasource, namespace, groupName);
+    }
+
     await this.store.delete(id);
     this.statusCache.delete(id);
 
@@ -354,27 +376,6 @@ export class SloService {
       existing.status.provisioning.backend === 'prometheus'
         ? existing.status.provisioning.generatedRuleNames
         : [];
-
-    if (deploy && existing.status.provisioning.backend === 'prometheus') {
-      const namespace = existing.status.provisioning.rulerNamespace || SLO_RULER_NAMESPACE;
-      const groupName = existing.status.provisioning.ruleGroupName;
-      if (groupName) {
-        try {
-          await deploy.ruler.deleteRuleGroup(
-            deploy.client,
-            deploy.datasource,
-            namespace,
-            groupName
-          );
-        } catch (err) {
-          this.logger.warn(
-            `Ruler delete failed for SLO ${id} (ns=${namespace} group=${groupName}): ${
-              err instanceof Error ? err.message : String(err)
-            }. SO was deleted; reconciler will sweep dangling group.`
-          );
-        }
-      }
-    }
 
     this.logger.info(`Deleted SLO: ${id}`);
     return { deleted: true, generatedRuleNames: names };

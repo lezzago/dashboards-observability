@@ -579,9 +579,11 @@ export function registerSloRoutes(
     },
     async (ctx, req, res) => {
       const existing = await sloService.get(req.params.id);
-      // Delete tolerates an unresolvable datasource: a stale SO with a
-      // bad datasourceId must still be deletable. The ruler DELETE is a
-      // best-effort compensation, not a gating precondition.
+      // Delete is ruler-first, SO-second — if there's a rule group to remove,
+      // we need a working deploy context (i.e. a resolvable datasource). An
+      // unresolvable datasource here surfaces to the user as a 409: dropping
+      // the SO while the rule group stays live in Cortex would leave dead
+      // alerts evaluating against the cluster.
       const built = await tryBuildDeployContext(
         ctx as SloHandlerContext,
         existing?.spec.datasourceId,
@@ -589,12 +591,25 @@ export function registerSloRoutes(
         datasourceService,
         logger
       );
-      const deploy = built.errorResponse ? undefined : built.deploy;
-      const result = await handleDeleteSLO(sloService, req.params.id, logger, deploy);
+      if (built.errorResponse) {
+        return res.customError({
+          statusCode: built.errorResponse.status,
+          body: {
+            message: String(
+              (built.errorResponse.body as { error?: string }).error ?? 'Delete failed'
+            ),
+            attributes: built.errorResponse.body,
+          },
+        });
+      }
+      const result = await handleDeleteSLO(sloService, req.params.id, logger, built.deploy);
       if (result.status === 200) return res.ok({ body: result.body });
       return res.customError({
         statusCode: result.status,
-        body: { message: String((result.body as { error?: string }).error ?? 'Delete failed') },
+        body: {
+          message: String((result.body as { error?: string }).error ?? 'Delete failed'),
+          attributes: result.body as Record<string, unknown>,
+        },
       });
     }
   );

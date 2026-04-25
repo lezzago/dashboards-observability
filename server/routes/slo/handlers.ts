@@ -13,6 +13,7 @@ import {
   SloDeployContext,
   SloNotFoundError,
   SloRulerError,
+  SloRulerTeardownRequiredError,
   SloStatusAggregationContext,
   SloValidationError,
   SloVersionConflictError,
@@ -53,6 +54,21 @@ function toSloError(e: unknown, logger?: Logger): HandlerResult {
         code: e.code,
         httpStatus: e.httpStatus,
         rawBody: e.rawBody,
+      },
+    };
+  }
+  if (e instanceof SloRulerTeardownRequiredError) {
+    if (logger) logger.warn(e.message);
+    // 409 Conflict — the client's request is valid, but the current state
+    // (unresolved datasource, live rule group) prevents completion. UI can
+    // point the user at fixing the datasource before retrying.
+    return {
+      status: 409,
+      body: {
+        error: e.message,
+        code: 'RULER_TEARDOWN_REQUIRED',
+        sloId: e.sloId,
+        datasourceId: e.datasourceId,
       },
     };
   }

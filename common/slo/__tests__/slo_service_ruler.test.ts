@@ -8,11 +8,14 @@
  *
  * Pins the dual-write contract from the memo:
  *   - create/update: ruler-first, then SO
- *   - delete: SO-first, then ruler
+ *   - delete: ruler-first, then SO
  *   - ruler failure on create → SO never written, error propagates
  *   - SO failure after ruler OK → one best-effort ruler delete (compensation)
  *   - compensation failure → logs warning, rethrows original SO error
- *   - delete: ruler failure does NOT resurrect SO, warning logged, returns ok
+ *   - delete: ruler failure propagates; SO stays so user can retry
+ *     (prevents a dangling rule group from silently evaluating dead alerts)
+ *   - delete without deploy on an SLO with a rule group throws
+ *     SloRulerTeardownRequiredError; route maps to 409
  *   - previewRules never touches ruler
  */
 
@@ -20,6 +23,7 @@ import {
   SloDeployContext,
   SloRulerClient,
   SloRulerError,
+  SloRulerTeardownRequiredError,
   SloService,
   sloRulerNamespaceFor,
 } from '../slo_service';
@@ -264,35 +268,56 @@ describe('SloService.update with deploy', () => {
 });
 
 describe('SloService.delete with deploy', () => {
-  it('calls store.delete BEFORE ruler.deleteRuleGroup', async () => {
+  it('calls ruler.deleteRuleGroup BEFORE store.delete', async () => {
+    // Ruler-first, SO-second: the SO is the only pointer back to the rule
+    // group's name; if we drop it first and the ruler call fails, the group
+    // lives on in Cortex forever, silently evaluating dead alerts. Ruler
+    // confirmation must precede the SO removal so failures keep the SO.
+    //
+    // The create-via-deploy path provisions the rule group (without this,
+    // needsRulerTeardown is false because ruleGroupName isn't populated).
     const { callLog, ruler, store, deploy } = makeDeps();
     const svc = new SloService(makeLogger(), store);
-    const doc = await svc.create({ spec: validSpec() }, 'alice'); // create w/o deploy
+    const doc = await svc.create({ spec: validSpec() }, 'alice', deploy);
     callLog.length = 0;
     ruler.upsertRuleGroup.mockClear();
     ruler.deleteRuleGroup.mockClear();
 
     await svc.delete(doc.id, deploy);
 
-    const storeIdx = callLog.findIndex((e) => e.op === 'store.delete');
     const rulerIdx = callLog.findIndex((e) => e.op === 'ruler.delete');
-    expect(storeIdx).toBeGreaterThanOrEqual(0);
-    expect(rulerIdx).toBeGreaterThan(storeIdx);
+    const storeIdx = callLog.findIndex((e) => e.op === 'store.delete');
+    expect(rulerIdx).toBeGreaterThanOrEqual(0);
+    expect(storeIdx).toBeGreaterThan(rulerIdx);
   });
 
-  it('returns { deleted:true } and warns (not throws) when ruler delete fails', async () => {
-    const logger = makeLogger();
+  it('propagates ruler failure and leaves the SO intact so the user can retry', async () => {
     const { ruler, store, deploy } = makeDeps();
-    const svc = new SloService(logger, store);
-    const doc = await svc.create({ spec: validSpec() }, 'alice');
+    const svc = new SloService(makeLogger(), store);
+    const doc = await svc.create({ spec: validSpec() }, 'alice', deploy);
     ruler.deleteRuleGroup.mockRejectedValueOnce(
       new SloRulerError('RULER_UNREACHABLE', 503, 'gateway timeout')
     );
 
-    const result = await svc.delete(doc.id, deploy);
-    expect(result.deleted).toBe(true);
-    expect(result.generatedRuleNames.length).toBeGreaterThan(0);
-    expect(logger.warnCalls.some((m) => m.includes('Ruler delete failed'))).toBe(true);
+    await expect(svc.delete(doc.id, deploy)).rejects.toBeInstanceOf(SloRulerError);
+
+    // SO must still be there: the ruler group is still live, so the user
+    // has a path to retry after Cortex recovers.
+    expect(await store.get(doc.id)).not.toBeNull();
+  });
+
+  it('throws SloRulerTeardownRequiredError when called without deploy on an SLO that has a rule group', async () => {
+    // Happens when a user's datasource was renamed/removed: the route can't
+    // build a deploy context, and the service refuses to drop the SO
+    // because that would orphan the rule group.
+    const { store, deploy } = makeDeps();
+    const svc = new SloService(makeLogger(), store);
+    const doc = await svc.create({ spec: validSpec() }, 'alice', deploy);
+
+    await expect(svc.delete(doc.id /* no deploy */)).rejects.toBeInstanceOf(
+      SloRulerTeardownRequiredError
+    );
+    expect(await store.get(doc.id)).not.toBeNull();
   });
 });
 
