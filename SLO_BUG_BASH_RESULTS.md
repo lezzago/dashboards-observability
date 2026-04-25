@@ -21,6 +21,7 @@ actionable bug entries.
 | 12| Validator guardrails| PASS   | slo-bugbash-S12.1-post-fix-uuid-error.png, slo-bugbash-S12.2-post-fix-annotation-error.png | Sanjay            | Re-validated after fix 0db3a036. S12.1 (UUID label error) PASS live via wizard — inline `env: Label values must not be UUIDs (cardinality guardrail)` now renders on the Labels `EuiFormRow`. S12.2 (4 KiB annotation cap) PASS live via wizard with native DOM setter workaround — inline error "Annotations exceed 4096-byte size cap" renders on the Annotations `EuiFormRow` after attempting Create with 5 KiB payload. Both validators block create and surface per-field errors inline. S12.3 remains out of scope (see Finding #S12c — spec decision, not bug). |
 | 13| Delete Cortex cleanup| FAIL   | slo-bugbash-S13-delete-modal.png, slo-bugbash-S13-fail-delete-error.png; curl confirms rule group still exists | Sanjay            | DELETE handler rejected with 400 "Datasource ds-4 is not registered" even though `GET /api/alerting/datasources` returns ds-4 in the list. SLO SO and Cortex rule group both survive (correct per delete-safety contract), but the delete is blocked by datasource resolution failure. See Finding #S13-datasource-not-registered. |
 | 14| Orphan-SLO recovery (regression guard)| PASS   | slo-bugbash-evidence/S14/delete-response.txt, slo-bugbash-evidence/S14/put-response.txt, slo-bugbash-S14-pass-listing-empty.png, slo-bugbash-S14-pass-post-cleanup.png | TBD               | Regression guard behaves exactly as plan predicts. DELETE and PUT against the SLO after its datasource churned (`ds-4` deleted, rediscovered as `ds-6`) both reject with HTTP 400 and a message explicitly naming the stale `ds-4`: `{"spec.datasourceId":"Datasource \"ds-4\" is not registered. Pick one from /api/alerting/datasources."}`. Admin-bypass cleanup (SO delete + manual Cortex `DELETE /api/v1/rules/slo-generated-ds-4/<group>`) succeeds. Post-S14 state: `ObservabilityStack_Prometheus` is now `ds-6` — S15 prompt must use that id. |
+| 15| Historical burn: 28d backfill | FAIL   | slo-bugbash-evidence/S15/step1-backfill-rejected.txt | Kai (review: Sanjay) | Backfill infrastructure blocked by Cortex ingestion limits. Remote-write push rejected with HTTP 400 "out of bounds" — 28-day-old timestamps exceed Cortex's default `creation_grace_period` (10 min). Cortex config at `/observability-stack/docker-compose/cortex/cortex.yaml` does not set `limits.creation_grace_period` or `limits.out_of_order_time_window`, both default to 10m. This matches the "backfill infrastructure failure" negative guard at plan line 807–809. See Finding #S15-backfill-blocked. No SLO created; no UI validation attempted. |
 
 Fill **Result** with one of: `PASS`, `FAIL`, `BLOCKED`. `BLOCKED` is for
 scenarios that couldn't start because a prerequisite broke (e.g. OSD
@@ -34,6 +35,8 @@ Entries below are what the next working session should pick up. Anything
 not listed here is either PASS, closed, or out of scope.
 
 **#S13-datasource-not-registered** — DELETE handler rejects with "Datasource ds-4 is not registered" even though ds-4 appears in `/api/alerting/datasources`. Blocks deletion of SLOs; requires admin bypass (saved-object + Cortex manual cleanup). See full Finding below.
+
+**#S15-backfill-blocked** — Cortex default `creation_grace_period` / `out_of_order_time_window` (10m each) reject 28-day backfill timestamps. S15 cannot be executed without extending these limits in `observability-stack/docker-compose/cortex/cortex.yaml` to `30d`. This is a test-infra limitation, not a plugin bug. If S15 validation is GA-critical, Cortex config must be updated and container restarted.
 
 **Closed / not reproducible:**
 - #DELETE-no-cortex-cleanup — re-verified this session for Custom PromQL:
@@ -814,3 +817,68 @@ If `buildDeployContext` returns `undefined`, the ruler DELETE is skipped but the
 Admin bypass via `DELETE /api/saved_objects/slo-definition/<id>` + manual Cortex cleanup `DELETE /api/v1/rules/slo-generated-ds-4/slo:scenario_s13_cleanup_group_d4cc0cb0`. This is the #SLO-orphan-recovery scenario documented earlier in this file (lines 712–741), but the root cause here is different: the datasource isn't genuinely missing — the lookup is failing spuriously.
 
 **Cleanup performed**: yes — admin bypass. `DELETE /api/saved_objects/slo-definition/9b532f91-c5a3-4204-bd11-80a917b6343d` + `DELETE /api/v1/rules/slo-generated-ds-4/slo:scenario_s13_cleanup_group_d4cc0cb0`. Verified post-cleanup: GET on the SLO id returns 404, and `curl /prometheus/api/v1/rules | jq '[.data.groups[].name | select(test("scenario_s13"))]'` returns `[]`.
+
+---
+
+### #S15-backfill-blocked — Cortex ingestion limits block 28-day historical backfill
+
+**Severity**: P2 (operational — blocks Strategy B backfill testing; does not affect production plugin functionality)
+**Triage owner**: Kai (testing infrastructure, review: Sanjay for possible Cortex config change)
+
+**Reproduction**:
+1. Attempt to push 28 days of historical samples via Cortex remote-write API using `.cypress/fixtures/backfill/cortex_backfill.py`:
+   ```bash
+   python3 .cypress/fixtures/backfill/cortex_backfill.py \
+     --cortex-url http://localhost:9090/api/v1/push \
+     --metric scenario_s15_synth_ratio \
+     --label slo_name=scenario-s15-historical \
+     --value 0.003 \
+     --start-sec $(( $(date +%s) - 28*86400 )) \
+     --end-sec $(( $(date +%s) - 120 )) \
+     --step-sec 60
+   ```
+2. Cortex rejects with HTTP 400.
+
+**Observed**:
+- Cortex returns: `ERROR: Cortex rejected push: HTTP 400 — maxFailure (quorum) on a given error family, addr=127.0.0.1:9095 state=ACTIVE zone=, rpc error: code = Code(400) desc = user=fake: err: out of bounds. timestamp=2026-03-28T17:19:12Z, series={__name__="scenario_s15_synth_ratio", slo_name="scenario-s15-historical"}`
+- The timestamp `2026-03-28` (28 days before current date `2026-04-25`) is rejected as "out of bounds."
+- No samples are ingested; Cortex query API returns empty results for the series.
+- Evidence file: `slo-bugbash-evidence/S15/step1-backfill-rejected.txt`
+
+**Expected** (per test plan S15):
+- The backfill helper should successfully push 28 days of samples (approximately 40,320 samples at 60s intervals).
+- After push, Cortex query API should return `count_over_time(scenario_s15_synth_ratio[30d]) ≈ 40320`.
+- An SLO created against this metric would then show 28-day attainment ≈ 99.7% (value=0.003 → 1 - 0.003 = 0.997) without waiting for real data accumulation.
+
+**Root cause**:
+Cortex's default ingestion limits reject samples with timestamps older than ~10 minutes from the current time. The observability-stack Cortex config (`/Users/ashisagr/Documents/workspace/observability-stack/docker-compose/cortex/cortex.yaml`) does not explicitly set:
+- `limits.creation_grace_period` (default: 10m)
+- `limits.out_of_order_time_window` (default: 10m)
+
+Both default to 10 minutes, which blocks the 28-day backfill window required by S15.
+
+**This is the "backfill infrastructure failure" negative guard** called out at test plan line 807–809:
+> **Negative guard**: if backfill stops working (e.g. Cortex WAL rotation corrupts), the sentinel sample at `now - 60s` is missing — the scenario surfaces that as a backfill infrastructure failure, not a plugin bug.
+
+**Fix options**:
+1. **Extend Cortex limits** (testing infra change, not plugin code): Add to `cortex.yaml`:
+   ```yaml
+   limits:
+     creation_grace_period: 30d
+     out_of_order_time_window: 30d
+   ```
+   Restart the `prometheus` container. This allows 28-day backfills for S15 testing.
+
+2. **Alternative S15 strategy** (if Cortex config changes are not viable): Replace the backfill step with a live-burn approach using flagd flip + extended wait (Strategy D), but this requires ~28 days of real time — not feasible for a bug bash.
+
+3. **Scope reduction**: Document S15 as "cannot be validated in current observability-stack configuration" and mark it as a known limitation of the local dev environment.
+
+**Hypothesis**:
+The scenario was designed with the assumption that the test environment's Cortex instance would be configured to accept historical data for SLO burn-rate testing. The current `observability-stack` setup prioritizes operational simplicity (default limits) over backfill testing capabilities.
+
+**Downstream impact**:
+- S15 cannot be executed as written against the current observability-stack.
+- No production functionality is affected — the plugin does not perform backfills; it only consumes data from recording rules that Cortex evaluates in real time.
+- If S15 validation is critical for GA, the test environment must be reconfigured (Option 1 above).
+
+**Cleanup performed**: No SLO was created; no Cortex rules provisioned. Evidence file saved under `slo-bugbash-evidence/S15/step1-backfill-rejected.txt`. No further cleanup needed.

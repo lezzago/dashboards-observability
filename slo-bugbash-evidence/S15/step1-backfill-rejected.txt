@@ -1,0 +1,25 @@
+Step 1: Push 28-day historical samples
+
+Command:
+python3 .cypress/fixtures/backfill/cortex_backfill.py \
+  --cortex-url http://localhost:9090/api/v1/push \
+  --metric scenario_s15_synth_ratio \
+  --label slo_name=scenario-s15-historical \
+  --value 0.003 \
+  --start-sec $(( $(date +%s) - 28*86400 )) \
+  --end-sec $(( $(date +%s) - 120 )) \
+  --step-sec 60
+
+Result: FAILED
+HTTP 400 from Cortex: "out of bounds. timestamp=2026-03-28T17:19:12Z"
+
+Root cause: Cortex default creation_grace_period is ~10 minutes. 
+Timestamps 28 days in the past are rejected as out-of-order/too-old.
+
+The observability-stack Cortex config (/Users/ashisagr/Documents/workspace/observability-stack/docker-compose/cortex/cortex.yaml) does not set:
+- limits.creation_grace_period
+- limits.out_of_order_time_window
+
+Both default to 10m, blocking the 28-day backfill scenario premise.
+
+This matches the "backfill infrastructure failure" negative guard at plan line 807–809.
