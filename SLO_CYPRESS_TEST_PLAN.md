@@ -30,6 +30,89 @@ Corollary rules:
 
 ---
 
+## How to run this plan in a fresh Claude session
+
+Paste this at the start of a new session, with the working directory
+set to the plugin root (`.../plugins/dashboards-observability`):
+
+> You are translating the v2 bug bash PASS scenarios (S1–S12) into
+> Cypress specs under `.cypress/integration/slo_test/`. Source of
+> truth: `SLO_CYPRESS_TEST_PLAN.md` — read end-to-end before writing
+> any spec, then work scenario-by-scenario in the order listed in
+> "Per-scenario spec blueprints".
+>
+> Prior bug-bash context lives in `SLO_BUG_BASH_RESULTS.md` (do NOT
+> re-run those scenarios unless asked — every row S1–S12 is already
+> PASS live on this branch). S13/S14/S15 are explicitly deferred per
+> the "Out of scope" section at the bottom of this plan.
+>
+> **Pre-flight before writing any spec** — run each of these and stop
+> if any fail:
+>
+>   1. Dev OSD up on 5602 (`curl -s http://localhost:5602/api/status |
+>      jq -r .status.overall.state` → `"green"`).
+>   2. observability-stack healthy (`docker compose -f
+>      /Users/ashisagr/Documents/workspace/observability-stack/docker-compose.yml
+>      ps | awk '$5 !~ /healthy|Up/'` → only the header).
+>   3. Cortex live-traffic sanity:
+>      ```
+>      curl -s -G http://localhost:9090/prometheus/api/v1/query \
+>        --data-urlencode 'query=sum(rate(envoy_http_downstream_rq_xx_total[1m]))' \
+>        | jq '.data.result[0].value[1]'
+>      ```
+>      → non-zero string.
+>   4. Datasource `ObservabilityStack_Prometheus` has both
+>      `prometheus.uri` and `prometheus.ruler.uri` set:
+>      ```
+>      curl -sk -u 'admin:My_password_123!@#' \
+>        'https://localhost:9200/_plugins/_query/_datasources/ObservabilityStack_Prometheus' \
+>        | jq '.properties | {query:."prometheus.uri", ruler:."prometheus.ruler.uri"}'
+>      ```
+>   5. Ruler namespace clean of prior scenario state:
+>      ```
+>      curl -s http://localhost:9090/prometheus/api/v1/rules \
+>        | jq '[.data.groups[].name | select(test("scenario_|^slo:cy_"))] | length'
+>      ```
+>      → `0`.
+>
+> If any pre-flight fails, stop and ask the user — stack fixes are the
+> user's call, not yours.
+>
+> **Work order**: build the shared infra first (it blocks every spec),
+> then one PR per scenario in the v2 run order. Within a scenario,
+> implement every `it(...)` in the blueprint — don't cherry-pick. The
+> fast/slow split is load-bearing: S1, S2, S6, S7, S8, S9, S10, S11,
+> S12 go to the PR gate; S3, S4, S5 go to nightly.
+>
+> **Ground rules (non-negotiable)**:
+>
+> - **No mocking**. `cy.intercept()` may only spy (observe), never
+>   replace a response. The backfill helper in
+>   `.cypress/fixtures/backfill/cortex_backfill.py` is the one
+>   authorized fake and is only for scenario S15 (currently deferred —
+>   don't use it in any spec yet).
+> - Every spec must leave the stack clean: SOs deleted, Cortex rule
+>   groups gone. Use `after()` + the catch-all sweeper from the harness
+>   section.
+> - Use `data-test-subj` for every selector. If one is missing, that's
+>   a component bug — stop and ask; don't work around with CSS or text
+>   matching.
+> - DCO sign-off on every commit (`git commit -s`). Don't use
+>   `--no-verify`.
+>
+> **Scope this session**: translate the 12 PASS scenarios (S1–S12).
+> S13/S14/S15 are deferred — the "Out of scope" section at the bottom
+> of this plan names each of their blockers and what would unblock
+> them. When any of those blockers clear, return here and flip that
+> entry into a spec blueprint plus a row in the scenario table.
+>
+> When you finish a scenario's spec, run it once green locally
+> (`yarn cypress:run-without-security --spec
+> .cypress/integration/slo_test/<file>`) before committing. Commit one
+> scenario per PR so reviewers can triage failures to a single spec.
+
+---
+
 ## Shared infrastructure to build first (blocks every spec)
 
 Check these into the plugin before any spec:
