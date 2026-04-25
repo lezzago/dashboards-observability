@@ -9,20 +9,53 @@ actionable bug entries.
 |---|---------------------|--------|-------------------------------------------|-------------------|-------|
 | 1 | Ruler dual-write    | PASS   | slo-bugbash-S1-post-fix-created.png; Cortex curl shows 13 rules | Sanjay            | Re-validated after fix 995615bd; 13 rules confirmed in Cortex `/api/v1/rules` after create |
 | 2 | Listing filters     | PASS   | slo-bugbash-S2-pass.png; all filter combinations tested | Chen              | Service+Team filters work; URL round-trip works; shadow mode badge visible; clear-all restores 3 rows |
-| 3 | Status transitions  | BLOCKED | slo-bugbash-S3-blocked.png, slo-bugbash-S4-blocked.png; listing shows no_data state | Sanjay + Jay      | **Unblocked by #S1 fix (995615bd)** — recording rules now land in Cortex, so the live-status aggregator has data to read. Scenario NOT re-run in this session (long live-burn sequence ~15m with a flagd flip); pending a manual re-run against the new branch. |
-| 4 | Budget chart        | BLOCKED | slo-bugbash-S345-detail-blocked.png; detail page shows "Budget exhausted" but no live chart data | Chen (review: Jay)| **Unblocked by #S1 fix (995615bd)**. Chart prerequisite now satisfied — the `slo:sli_error:ratio_rate_*` recording rules that S4's chart reads are being written. Pending a manual re-run to confirm chart behavior end-to-end. |
-| 5 | Burn-rate chart     | BLOCKED | slo-bugbash-S345-detail-blocked.png; burn-rate alerts show 6.312% but not from live recording rules | Chen (review: Jay)| **Unblocked by #S1 fix (995615bd)**. Recording rules are now in Cortex; burn-rate tier computation now has the correct series to read. Pending a manual re-run (shares the S3/S4 live flagd-flip sequence). |
+| 3 | Status transitions  | BLOCKED | slo-bugbash-S345-wizard-filled.png (wizard state); SLO created via API (ID d38c538c-8910-42df-9b05-007ae0f92b9e), 14 rules in Cortex confirmed | Sanjay + Jay      | **Unblocked by #S1 fix (995615bd)**. Recording rules land in Cortex successfully. Strategy B synthetic backfill BLOCKED by protobuf encoding issues (see Finding #S345-backfill-blocked). Requires either: (1) fix Python remote-write script, (2) use promtool push, or (3) fall back to flagd flip (slow path, ~15m). SLO + rules exist; waiting for live-burn data injection to validate S3/S4/S5 end-to-end. |
+| 4 | Budget chart        | BLOCKED | slo-bugbash-S345-wizard-filled.png | Chen (review: Jay)| **Unblocked by #S1 fix (995615bd)**. SLO + recording rules provisioned. Strategy B backfill blocked (see #S345-backfill-blocked). Chart UI ready; needs live-burn data to test. |
+| 5 | Burn-rate chart     | BLOCKED | slo-bugbash-S345-wizard-filled.png | Chen (review: Jay)| **Unblocked by #S1 fix (995615bd)**. SLO + recording rules + burn-rate alert rules provisioned. Strategy B backfill blocked (see #S345-backfill-blocked). Alert rules ready; needs live-burn data to fire. |
 | 6 | Metadata panel      | PASS   | slo-bugbash-S6-pass.png (full page); all 8 metadata sections verified | Chen              | Labels (3 rows), Annotations (1 row), Burn-rate tiers (4 rows), Budget-warning (2 rows), Advanced accordion (collapsed initially), Supplemental alarms (5 badges correct states), Exclusion windows (1 row with cron/reason/deferred), Provisioning (15 rules, namespace, rule names list) |
-| 7 | Multi-objective     | PASS   | slo-bugbash-S7-*.png; wizard shows 26 rules, objective selector toggles charts | Chen + Sanjay     | Wizard preview: 26 rules ✓; Objective selector visible ✓; Switching objectives updates target (99% → 99.9%), budget (1% → 0.1%), and all 4 burn-rate thresholds ✓; Cortex verification: unblocked by #S1 fix (995615bd) — ruler dual-write now writes the full set; rule-count assertion against Cortex is now valid to run. |
-| 8 | Custom PromQL       | PASS   | live curl to `/api/observability/v1/slos/preview` returns 200 with 9-rule group; raw expression appears verbatim in 7/9 rules | Chen (review: Jay)| Re-validated after fix 0db3a036. Preview accepts partial specs now; raw-mode custom PromQL (substituted envoy retry ratio for kafka — kafka metric isn't live in this stack) flows end-to-end. Field-level validator errors still return 400 with `errors` map for incomplete specs (service-side `validateSloSpec` is the gate). |
+| 7 | Multi-objective     | PASS   | slo-bugbash-S10-retest-multi-200.png (wizard detail post-create, 26 rules, 2 objectives); Cortex verified 26 rules (13/objective) | Chen + Sanjay     | Wizard multi-objective path re-validated post-fix 2026-04-24 (see Finding #S10-wizard closure). Wizard POST returns HTTP 200, detail page renders 2 objectives, Cortex confirms 7 recording + 4 burn-rate + 2 budget-warning = 13 rules per objective × 2 = 26. |
+| 8 | Custom PromQL       | PASS   | slo-bugbash-S8-wizard-post-fix.png; wizard preview shows 13 rules with custom expr verbatim in rule YAML | Chen (review: Jay)| Wizard UI re-validated post-fix (0db3a036). Custom PromQL template → raw error-ratio mode → custom expression `sum(rate(envoy_cluster_upstream_rq_retry[5m])) / sum(rate(envoy_cluster_upstream_rq[5m]))` appears verbatim in all 7 SLI recording rules (5m/30m/1h/2h/6h/1d/3d windows). Preview shows 13 rules total (7 recording + 4 burn-rate alerts + 2 budget warnings). |
 | 9 | Approximation warn  | PASS   | slo-bugbash-S9-pass.png; UI callout visible with window=14d | Sanjay            | Window approximation yellow callout appears with 14d window; message correct: "Windows greater than 3d use the 3d recording rule as an approximation in P0. Attainment alerts will carry slo_window_approximated="true"."; Cortex rule label check unblocked by #S1 fix (995615bd). |
-| 10| Advanced editors    | PASS   | slo-bugbash-S10-pass.png; UI round-trip verified | Maya + Chen       | Burn-rate tiers: Page·Quick shows 20.0x multiplier ✓; Budget-warning: 3 rows (warning 50%, critical 20%, info 75%) ✓; Supplemental alarms: SLI health enabled ✓; Cortex rule expr check unblocked by #S1 fix (995615bd). |
+| 10| Advanced editors    | PASS   | slo-bugbash-S10-retest-burn-200.png (wizard detail post-create, 13 rules, Page·Quick "20x burn • critical"); Cortex rule label `slo_burn_rate_multiplier: "20"` | Maya + Chen       | Wizard Advanced burn-rate edit path re-validated post-fix 2026-04-24 (see Finding #S10-wizard closure). Wizard POST with first-tier multiplier 14.4 → 20 returns HTTP 200; Cortex rule group `slo:scenario_s10_repro_burn2_group_*` carries `slo_burn_rate_multiplier: "20"` on the first tier. |
 | 11| Exclusion windows   | PASS   | slo-bugbash-S11-pass.png; both windows persist after hard-refresh | Chen              | Created SLO with 2 exclusion windows: (1) cron "0 2 * * 0" 2h UTC "maintenance" deferred, (2) one-off 2026-05-01T00:00:00Z → 2026-05-01T02:00:00Z deferred. Both rows visible in Advanced → Exclusion windows table. Hard-refreshed browser (navigate with reload), re-opened detail page → both windows still present ✓. Persistence verified. Cortex rule check not performed (not relevant for saved-object-only feature; ruler write blocked by #S1 anyway). |
-| 12| Validator guardrails| PASS   | slo-bugbash-S12.1-post-fix-uuid-error.png; wizard unit tests cover both textareas | Sanjay            | Re-validated after fix 0db3a036. S12.1 (UUID label error) PASS live via wizard — inline `env: Label values must not be UUIDs (cardinality guardrail)` now renders on the Labels `EuiFormRow`. S12.2 (4 KiB annotation cap) PASS via jest (`surfaces the annotation size-cap validator error inline on the Annotations row`) — live-browser run blocked on a Playwright text-input limitation with 5 KiB payloads, not a plugin defect. S12.3 remains out of scope (see Finding #S12c — spec decision, not bug). |
+| 12| Validator guardrails| PASS   | slo-bugbash-S12.1-post-fix-uuid-error.png, slo-bugbash-S12.2-post-fix-annotation-error.png | Sanjay            | Re-validated after fix 0db3a036. S12.1 (UUID label error) PASS live via wizard — inline `env: Label values must not be UUIDs (cardinality guardrail)` now renders on the Labels `EuiFormRow`. S12.2 (4 KiB annotation cap) PASS live via wizard with native DOM setter workaround — inline error "Annotations exceed 4096-byte size cap" renders on the Annotations `EuiFormRow` after attempting Create with 5 KiB payload. Both validators block create and surface per-field errors inline. S12.3 remains out of scope (see Finding #S12c — spec decision, not bug). |
 
 Fill **Result** with one of: `PASS`, `FAIL`, `BLOCKED`. `BLOCKED` is for
 scenarios that couldn't start because a prerequisite broke (e.g. OSD
 dev server down, datasource missing, live traffic stopped).
+
+---
+
+## Open items (as of 2026-04-24)
+
+Entries below are what the next working session should pick up. Anything
+not listed here is either PASS, closed, or out of scope.
+
+1. **#S12c** — Target validator rejects >99.999% instead of clamping to 6
+   sig figs. Not a bug — a product decision: raise `MAX_TARGET` in
+   `common/slo/slo_validators.ts` to `0.999999`, or keep the 5-nine cap and
+   update the test plan to match. See Finding #S12c.
+
+2. **S3 / S4 / S5** — Live-burn scenarios BLOCKED by backfill tooling, not
+   the plugin. #S1 fix (995615bd) landed; SLO + 14 rules provisioned in
+   Cortex successfully. Strategy B backfill blocked by Python protobuf
+   encoding bug (see Finding #S345-backfill-blocked). Fallback: flagd flip
+   `paymentFailure=75%` (slow path, ~15 min). SLO ID `d38c538c-8910-42df-9b05-007ae0f92b9e`
+   left in place for re-run after backfill fix or flagd flip.
+
+**Closed / not reproducible:**
+- #DELETE-no-cortex-cleanup — main-thread repro shows delete DOES tear
+  down Cortex rule groups within ~3s. See note on that Finding.
+- #S10-wizard — main-thread retest 2026-04-24 ran both reproducer paths
+  (multi-objective + Advanced burn-rate tier 14.4 → 20) and both POST
+  HTTP 200. Root cause of Kai's false positive: her fetch monkeypatch
+  filtered on `typeof url === 'string'` but OSD's HttpStart calls
+  `window.fetch(request)` with a `Request` object, so her interceptor
+  silently missed every SLO POST. See Finding #S10-wizard closure.
+
+**Already resolved in this branch:** #S1 (by 995615bd), #S8 / #S12 / #S12b
+(by 0db3a036), #S7-post-fix + #S10-wizard (not reproducible, Kai
+interceptor harness limitation — see closures).
 
 ---
 
@@ -160,8 +193,8 @@ Likely fix location: `public/components/slo/wizard/create_slo_wizard.tsx` or the
 validator error (`Annotations exceed 4096-byte size cap`) now renders
 inline on the Annotations `EuiFormRow`. Covered by
 `slo_wizard_page.test.tsx` — `surfaces the annotation size-cap validator
-error inline on the Annotations row`. Live-browser run on a 5 KiB payload
-was blocked by a Playwright text-input limitation, not a plugin defect.
+error inline on the Annotations row`. **Live-browser validation PASS** —
+used native DOM setter workaround (`Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(el, payload)`) to bypass React 18's controlled-input quirk; inline error message appears correctly after Create click with 5 KiB payload. Screenshot: `slo-bugbash-S12.2-post-fix-annotation-error.png`.
 
 **Severity**: P1 (ships with mitigation — validator blocks the create call, but users don't know *why*)
 **Triage owner**: Sanjay
@@ -380,3 +413,251 @@ Likely files:
 - `common/slo/slo_validators.ts` — spec normalization (may need to inject defaults for optional fields before validation)
 
 **Cleanup performed**: no — the SLO was never created (preview failed before Create was clicked); no Cortex state affected. Browser left on the wizard page with the custom PromQL filled in (for triage screenshots).
+
+---
+
+### #S7-post-fix — Multi-objective SLO create fails with undefined iterator error (RESOLVED — wizard payload-builder bug, not server regression)
+
+**Severity**: P1 (wizard-only bug; workaround: direct API with correct schema)
+**Triage owner**: Sanjay (wizard payload builder)
+
+**Reproduction (original, via wizard)**:
+1. Open wizard at `http://localhost:5602/w/CHkxVF/app/observability-apm-slo#/slos/create`.
+2. Select "Custom PromQL" template.
+3. Fill required fields: datasource `ObservabilityStack_Prometheus`, name `scenario-s7-multi`, service `envoy`, team `sre`.
+4. Switch to "Raw error-ratio" mode.
+5. Enter custom PromQL: `sum(rate(envoy_cluster_upstream_rq_retry[5m])) / sum(rate(envoy_cluster_upstream_rq[5m]))`.
+6. Change first objective name to `availability-99`, target to `99%`.
+7. Click "Add objective".
+8. Set second objective name to `availability-999`, target to `99.9%`.
+9. Wizard preview shows "26 rules" correctly.
+10. Click "Create SLO".
+
+**Observed (wizard path)**:
+- The wizard's Create button click does NOT trigger a POST to `/api/observability/v1/slos` (verified via fetch interceptor).
+- No HTTP request is made at all; no error toast appears; the page remains on the wizard.
+- Browser snapshot: `slo-bugbash-S7-wizard-26rules.png` (wizard state before Create).
+
+**Direct API test (retest 2026-04-24)**:
+When a correctly-shaped POST body is submitted with `sli.definition.backend="prometheus"`, `sli.definition.type="custom"`, `sli.definition.calcMethod="events"`, and `sli.definition.customExpr.mode="raw"`, the create handler returns **HTTP 200** and provisions 26 Cortex rules successfully.
+
+```bash
+$ curl -s -X POST "http://localhost:5602/w/CHkxVF/api/observability/v1/slos" \
+  -H 'Content-Type: application/json' -H 'osd-xsrf: true' \
+  --data '{"spec":{"datasourceId":"ds-3","name":"scenario-s7-multi",...,"sli":{"type":"single","definition":{"backend":"prometheus","type":"custom","calcMethod":"events","customExpr":{"mode":"raw","errorRatioQuery":"sum(rate(envoy_cluster_upstream_rq_retry[5m])) / sum(rate(envoy_cluster_upstream_rq[5m]))"}}},"objectives":[{"name":"availability-99","target":0.99},{"name":"availability-999","target":0.999}],...}}'
+
+b39376a4-e96c-4c7e-a88d-f61c09219682
+# (HTTP 200, SLO created)
+
+$ curl -s http://localhost:9090/api/v1/rules | awk '/scenario_s7_multi/,/^[a-z_]+:/' | grep -E -- "- (record|alert):" | wc -l
+26
+```
+
+**Expected** (per test plan S7):
+- SLO is created successfully.
+- Cortex `/api/v1/rules` returns 26 rules (13 per objective: 7 recording + 4 burn-rate alerts + 2 budget warnings).
+- Detail page shows objective selector; switching between objectives updates the charts/metadata.
+
+**Root cause**:
+The earlier #S7-post-fix Finding incorrectly claimed "multi-objective SLOs cannot be created via UI or API." The retest proves:
+1. The **server handler works correctly** when given a valid payload.
+2. The **wizard does not POST at all** when multi-objective SLOs are configured — a separate client-side bug (wizard payload builder or validation gate).
+3. The earlier curl example that hit the iterator error used `sli.metric.customPromql` (not in the schema) instead of `sli.definition.customExpr` — that malformed shape triggers the iterator error for ANY SLO (single or multi), not just multi-objective.
+
+**Hypothesis (wizard bug)**:
+The wizard's form state → POST body transformation (`useCreateSloMutation` or equivalent) either:
+1. Fails to construct `sli.definition` for custom PromQL templates, leaving it `undefined`, OR
+2. Has a client-side validation gate that blocks the POST when `objectives.length > 1` without showing an error.
+
+Likely files:
+- `public/components/slo/wizard/use_create_slo_mutation.ts` (or wherever the POST is triggered) — payload construction
+- `public/components/slo/wizard/create_slo_wizard.tsx` — validation gate that blocks multi-objective
+
+**Cleanup performed**: yes — SLO `scenario-s7-multi` (ID `b39376a4-e96c-4c7e-a88d-f61c09219682`) deleted via API; Cortex rules manually removed via DELETE to `/api/v1/rules/slo-generated-ds-3/slo:scenario_s7_multi_group_0f13c695`.
+
+**Workaround**: Use direct API with correct schema shape. Multi-objective SLOs work end-to-end when the POST body is correctly formed.
+
+---
+
+### #S10-wizard — Wizard Create button does not POST when Advanced burn-rate changes or multi-objective present
+
+**NOT REPRODUCIBLE — main-thread retest 2026-04-24**: Both reproducer
+paths executed against branch `slos` at HEAD `b17dbb4b` via Playwright
+MCP. Path (a) multi-objective HTTP Availability SLO `scenario-s10-repro-multi2`
+with 99% + 99.9% objectives → wizard POST returns HTTP 200, redirect to
+detail page, 26 Cortex rules provisioned (13/objective). Path (b) single
+objective with first burn-rate tier multiplier edited 14.4 → 20 →
+wizard POST returns HTTP 200, redirect to detail page, 13 Cortex rules
+with `slo_burn_rate_multiplier: "20"` on Page·Quick tier. Response
+bodies captured with a `Request`-aware fetch interceptor
+(see closure note).
+
+Root cause of Kai's false positive: her interceptor filtered on
+`typeof url === 'string'` before touching the response, but OSD's
+`HttpFetchService` at `src/core/public/http/fetch.ts:185` invokes
+`window.fetch(request)` with a `Request` object — so `url` was the
+Request instance and her `url.includes(...)` guard never fired for SLO
+POSTs. Every SLO create went through the un-patched path and her
+`window.__capturedSloCreateBody` stayed `null` by construction, not
+because the wizard swallowed the submit. S1/S8/S12/S12b's POSTs
+"worked" for her because those scenarios checked the list/detail page
+after the fact rather than relying on the interceptor signal.
+
+Closing this finding as a harness bug, not a plugin bug. S7 and S10
+summary-table rows updated to reflect: both wizard paths PASS
+end-to-end against `observability-stack` Cortex on this branch.
+
+Retest evidence: `slo-bugbash-S10-retest-multi-200.png`,
+`slo-bugbash-S10-retest-burn-200.png`.
+
+---
+
+**Severity**: P1 (wizard-only; workaround: direct API)
+**Triage owner**: Sanjay (wizard submit handler)
+
+**Reproduction**:
+1. Open wizard at `http://localhost:5602/w/CHkxVF/app/observability-apm-slo#/slos/create`.
+2. Select "HTTP Availability" template.
+3. Fill required fields: datasource `ds-3`, name `scenario-s10-test`, service `envoy`, team `sre`, dimension `service=envoy`, target `99%`.
+4. Expand "Advanced" section.
+5. Change the first burn-rate tier's Multiplier from `14.4` to `20`.
+6. Click "Create SLO".
+
+**Observed**:
+- The Create button is clicked (visual press state), but no POST request is made to `/api/observability/v1/slos` (verified via injected fetch interceptor: `window.__capturedSloCreateBody` remains `null`).
+- No error toast, no console error, no validation message.
+- The page remains on the wizard at `#/slos/create/http-availability`.
+- Same behavior reproduced with multi-objective SLOs (S7 reproduction steps).
+
+**Expected**:
+- Clicking "Create SLO" should POST the payload to `/api/observability/v1/slos`, receive HTTP 200 or 400 with errors, and either redirect to the detail page or show inline validation errors.
+
+**Evidence**:
+Injected a fetch interceptor before clicking Create:
+```js
+window.__capturedSloCreateBody = null;
+const originalFetch = window.fetch;
+window.fetch = function(...args) {
+  const [url, options] = args;
+  if (url && url.includes('/api/observability/v1/slos') && options && options.method === 'POST' && !url.includes('preview')) {
+    window.__capturedSloCreateBody = options.body;
+  }
+  return originalFetch.apply(this, args);
+};
+```
+After clicking Create, `window.__capturedSloCreateBody` was still `null` — no POST was attempted.
+
+**Hypothesis**:
+The wizard's "Create SLO" button click handler has a validation gate or form-state check that silently aborts the POST when:
+- Advanced burn-rate tier values differ from defaults, OR
+- `objectives.length > 1` (multi-objective), OR
+- A client-side validation error exists but isn't surfaced to the user.
+
+Likely files:
+- `public/components/slo/wizard/create_slo_wizard.tsx` — `onSubmit` handler or `useCreateSloMutation` call site
+- `public/components/slo/wizard/use_create_slo_mutation.ts` — mutation hook that constructs the POST body
+
+**Cleanup performed**: N/A — no SLO was created; no server-side state affected.
+
+**Workaround**: Use direct API POST with correct schema. The server handler works correctly; the bug is wizard-only.
+
+---
+
+### #DELETE-no-cortex-cleanup — SLO delete does not remove Cortex rule groups
+
+**Main-thread note (2026-04-24)**: Independent repro against the `slos` branch shows
+the DELETE handler DOES clean up Cortex. Test: POST create with datasourceId `ds-3`,
+`GET /prometheus/api/v1/rules` confirms the rule group, `DELETE /api/observability/v1/slos/<id>`
+returns 200, `GET /prometheus/api/v1/rules` + `GET /api/v1/rules/slo-generated-ds-3`
+both show the rule group is gone within ~3s. Likely explanation for Kai's
+observation: Cortex single-binary has a short propagation delay between the
+ruler admin DELETE and the `/api/v1/rules` query endpoint (in-memory ring); the
+"stale" rules she saw likely cleared a few seconds later. This Finding should
+be **closed as not-reproducible** unless someone re-observes with timestamps.
+
+**Severity**: P2 (operational — leaves stale rules in Cortex after SLO deletion)
+**Triage owner**: Sanjay
+
+**Reproduction**:
+1. Create an SLO via wizard or API (e.g., `scenario-s10-direct` with ID `d91d23bc-5fb2-4d6e-a019-e0e0b4b34148`).
+2. Verify Cortex has the rule group: `curl -s http://localhost:9090/api/v1/rules | grep scenario_s10` returns 24+ matches.
+3. Delete the SLO via UI (detail page → Delete button → confirm modal) or API (`DELETE /api/observability/v1/slos/<id>`).
+4. Check Cortex: `curl -s http://localhost:9090/api/v1/rules | grep scenario_s10` still returns 24+ matches.
+
+**Observed**:
+- The SLO saved object is deleted from OpenSearch (confirmed: GET to `/api/observability/v1/slos/<id>` returns 404).
+- The DELETE response includes `"deleted": true` and lists all `generatedRuleNames` (13 for single-objective, 26 for multi-objective).
+- But the Cortex rule group remains: `curl -s http://localhost:9090/api/v1/rules | grep -A 5 "slo:scenario_s10_direct_group"` shows all 13 rules still provisioned.
+- Manual cleanup required: `curl -X DELETE "http://localhost:9090/api/v1/rules/slo-generated-ds-3/slo:scenario_s10_direct_group_<hash>"`.
+
+**Expected**:
+The delete handler should call ruler DELETE for the associated rule group(s) before or after deleting the saved object.
+
+**Evidence**:
+After S10 SLO delete (API response claimed success):
+```bash
+$ curl -s http://localhost:9090/api/v1/rules | grep "slo:scenario_s10_direct_group" | head -n 1
+    - name: slo:scenario_s10_direct_group_3b836e30
+```
+Manual DELETE required to clean up:
+```bash
+$ curl -X DELETE "http://localhost:9090/api/v1/rules/slo-generated-ds-3/slo:scenario_s10_direct_group_3b836e30"
+{"status":"success"}
+```
+
+**Hypothesis**:
+The delete route handler at `server/routes/slo/index.ts` (or `common/slo/slo_service.ts`) deletes the saved object but does NOT call `rulerClient.deleteRuleGroup(...)` for the provisioned Cortex rule groups. The `generatedRuleNames` field in the delete response suggests the handler *knows* which rules to clean up but doesn't execute the ruler DELETE.
+
+Likely files:
+- `server/routes/slo/index.ts` — DELETE handler (missing ruler cleanup call)
+- `common/slo/slo_service.ts` — `deleteSlo` method (should call `deploy.ruler.deleteRuleGroup`)
+
+**Cleanup performed**: Manual — deleted stale Cortex rule groups for `scenario_s10_direct` and `scenario_s7_multi` via direct ruler API calls.
+
+---
+
+### #S345-backfill-blocked — Synthetic Cortex backfill fails with protobuf encoding error
+
+**Severity**: P2 (operational — blocks Strategy B fast path, but flagd flip fallback exists)
+**Triage owner**: Kai (testing infrastructure)
+
+**Reproduction**:
+1. Create SLO `scenario-s345-live-burn` via API (Custom PromQL, raw error-ratio mode, envoy 5xx / total).
+2. SLO created successfully with ID `d38c538c-8910-42df-9b05-007ae0f92b9e`.
+3. Cortex ruler confirms 14 rules provisioned (7 SLI recording rules for windows 5m/30m/1h/2h/6h/1d/3d, 4 burn-rate alerts, 1 attainment alert, 2 budget warnings).
+4. Attempt synthetic backfill via Python script pushing Prometheus remote-write protobuf to `http://localhost:9090/api/v1/push`.
+5. Script constructs `WriteRequest` with `TimeSeries` containing 81 samples (one every 15s for last 20 minutes) at value 0.8 (80% error ratio), labels matching the Cortex recording rule labels (`slo_id`, `slo_name`, `slo_objective`, `slo_owner_team`, `slo_service`, `slo_window`).
+
+**Observed**:
+- Cortex rejects all 7 series with HTTP 400: `proto: wrong wireType = 0 for field Value`.
+- The protobuf encoding for `Sample.value` (field 2, type `double`, wire type 1 = 64-bit fixed) was incorrectly encoded with wire type 0 (varint).
+- Zero samples ingested; SLI recording rules remain unpopulated.
+
+**Expected**:
+The remote-write push should succeed, populating the 7 recording rule series with high error-ratio values so the status aggregator/charts/alerts can be validated within ~20 minutes (Strategy B).
+
+**Hypothesis**:
+The hand-rolled protobuf encoder in `/tmp/cortex_backfill_s345.py` has a bug in `encode_sample`:
+- Field 1 (timestamp) is `int64`, wire type 0 (varint) ✓
+- Field 2 (value) is `double`, wire type 1 (64-bit fixed) — but the script encodes it incorrectly.
+
+The actual Prometheus `remote.proto` definition (v1) is:
+```proto
+message Sample {
+  double value = 1;
+  int64 timestamp = 2;
+}
+```
+So field 1 is `value` (double, wire type 1), and field 2 is `timestamp` (int64, wire type 0). The script had them reversed.
+
+**Fix suggestion**:
+1. Correct the protobuf encoding in the Python script: swap field numbers and wire types for `value` and `timestamp`.
+2. Alternatively, use `promtool push` or the `prometheus` binary's built-in remote-write client.
+3. Alternatively, use `prometheus_client` library's `push_to_gateway` (requires Pushgateway) or `write_to_textfile` + Prometheus scrape.
+4. Fallback: use the flagd flip approach (set `paymentFailure=75%`, wait ~15m for 5xx rate to build, assert S3/S4/S5).
+
+**Cleanup performed**: SLO `scenario-s345-live-burn` (ID `d38c538c-8910-42df-9b05-007ae0f92b9e`) LEFT IN PLACE — it has zero live data, so it's in `no_data` state and won't fire alerts. Can be deleted later or reused once backfill is fixed.
+
+**Impact**: S3/S4/S5 remain BLOCKED pending either: (a) fix the Python script and re-run backfill, or (b) use the flagd flip (slow path, ~15m wait). The SLO + recording rules are correctly provisioned; only the live-burn data injection step failed.
+
+**Impact**: Over time, Cortex accumulates stale rule groups from deleted SLOs. This wastes memory/CPU on rule evaluation and pollutes the ruler namespace. Not a blocker for GA (users can manually clean up via ruler API), but poor UX.
