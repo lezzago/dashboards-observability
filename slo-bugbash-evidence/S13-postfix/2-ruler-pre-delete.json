@@ -1,0 +1,171 @@
+{
+  "data": {
+    "groups": [
+      {
+        "file": "slo-generated-ds-4",
+        "name": "slo:scenario_s13_cleanup_live_group_5f1a0d7b",
+        "interval": "1m",
+        "rules": [
+          {
+            "record": "slo:sli_error:ratio_rate_5m:scenario_s13_cleanup_live_availability_9_6b7d64c4",
+            "expr": "1 - (\n  sum(rate(envoy_cluster_upstream_rq_total{envoy_cluster_name=\"otel-collector\"}[5m]))\n  /\n  sum(rate(envoy_cluster_upstream_rq_total{envoy_cluster_name=\"otel-collector\"}[5m]))\n)",
+            "labels": {
+              "slo_window": "5m",
+              "slo_name": "scenario-s13-cleanup-live",
+              "slo_id": "ce8072f4-9e84-493e-bc25-6bff771fa223",
+              "slo_owner_team": "sre",
+              "slo_service": "test-service",
+              "slo_objective": "availability-99"
+            }
+          },
+          {
+            "record": "slo:sli_error:ratio_rate_30m:scenario_s13_cleanup_live_availability_9_6b7d64c4",
+            "expr": "1 - (\n  sum(rate(envoy_cluster_upstream_rq_total{envoy_cluster_name=\"otel-collector\"}[30m]))\n  /\n  sum(rate(envoy_cluster_upstream_rq_total{envoy_cluster_name=\"otel-collector\"}[30m]))\n)",
+            "labels": {
+              "slo_window": "30m",
+              "slo_name": "scenario-s13-cleanup-live",
+              "slo_id": "ce8072f4-9e84-493e-bc25-6bff771fa223",
+              "slo_owner_team": "sre",
+              "slo_service": "test-service",
+              "slo_objective": "availability-99"
+            }
+          },
+          {
+            "record": "slo:sli_error:ratio_rate_1h:scenario_s13_cleanup_live_availability_9_6b7d64c4",
+            "expr": "1 - (\n  sum(rate(envoy_cluster_upstream_rq_total{envoy_cluster_name=\"otel-collector\"}[1h]))\n  /\n  sum(rate(envoy_cluster_upstream_rq_total{envoy_cluster_name=\"otel-collector\"}[1h]))\n)",
+            "labels": {
+              "slo_window": "1h",
+              "slo_name": "scenario-s13-cleanup-live",
+              "slo_id": "ce8072f4-9e84-493e-bc25-6bff771fa223",
+              "slo_owner_team": "sre",
+              "slo_service": "test-service",
+              "slo_objective": "availability-99"
+            }
+          },
+          {
+            "record": "slo:sli_error:ratio_rate_2h:scenario_s13_cleanup_live_availability_9_6b7d64c4",
+            "expr": "1 - (\n  sum(rate(envoy_cluster_upstream_rq_total{envoy_cluster_name=\"otel-collector\"}[2h]))\n  /\n  sum(rate(envoy_cluster_upstream_rq_total{envoy_cluster_name=\"otel-collector\"}[2h]))\n)",
+            "labels": {
+              "slo_window": "2h",
+              "slo_name": "scenario-s13-cleanup-live",
+              "slo_id": "ce8072f4-9e84-493e-bc25-6bff771fa223",
+              "slo_owner_team": "sre",
+              "slo_service": "test-service",
+              "slo_objective": "availability-99"
+            }
+          },
+          {
+            "record": "slo:sli_error:ratio_rate_6h:scenario_s13_cleanup_live_availability_9_6b7d64c4",
+            "expr": "1 - (\n  sum(rate(envoy_cluster_upstream_rq_total{envoy_cluster_name=\"otel-collector\"}[6h]))\n  /\n  sum(rate(envoy_cluster_upstream_rq_total{envoy_cluster_name=\"otel-collector\"}[6h]))\n)",
+            "labels": {
+              "slo_window": "6h",
+              "slo_name": "scenario-s13-cleanup-live",
+              "slo_id": "ce8072f4-9e84-493e-bc25-6bff771fa223",
+              "slo_owner_team": "sre",
+              "slo_service": "test-service",
+              "slo_objective": "availability-99"
+            }
+          },
+          {
+            "record": "slo:sli_error:ratio_rate_1d:scenario_s13_cleanup_live_availability_9_6b7d64c4",
+            "expr": "1 - (\n  sum(rate(envoy_cluster_upstream_rq_total{envoy_cluster_name=\"otel-collector\"}[1d]))\n  /\n  sum(rate(envoy_cluster_upstream_rq_total{envoy_cluster_name=\"otel-collector\"}[1d]))\n)",
+            "labels": {
+              "slo_window": "1d",
+              "slo_name": "scenario-s13-cleanup-live",
+              "slo_id": "ce8072f4-9e84-493e-bc25-6bff771fa223",
+              "slo_owner_team": "sre",
+              "slo_service": "test-service",
+              "slo_objective": "availability-99"
+            }
+          },
+          {
+            "record": "slo:sli_error:ratio_rate_3d:scenario_s13_cleanup_live_availability_9_6b7d64c4",
+            "expr": "1 - (\n  sum(rate(envoy_cluster_upstream_rq_total{envoy_cluster_name=\"otel-collector\"}[3d]))\n  /\n  sum(rate(envoy_cluster_upstream_rq_total{envoy_cluster_name=\"otel-collector\"}[3d]))\n)",
+            "labels": {
+              "slo_window": "3d",
+              "slo_name": "scenario-s13-cleanup-live",
+              "slo_id": "ce8072f4-9e84-493e-bc25-6bff771fa223",
+              "slo_owner_team": "sre",
+              "slo_service": "test-service",
+              "slo_objective": "availability-99"
+            }
+          },
+          {
+            "alert": "SLO_BurnRate_PageQuick_scenario_s13_cleanup_live_availability_9_6b7d64c4",
+            "for": "5m",
+            "annotations": {
+              "summary": "SLO burn rate critical — 14.4x budget consumption (5m/1h)",
+              "description": "Error budget for scenario-s13-cleanup-live (availability-99) is being consumed at 14.4x the allowed rate. Both the 5m and 1h error ratios exceed 0.144."
+            },
+            "expr": "slo:sli_error:ratio_rate_5m:scenario_s13_cleanup_live_availability_9_6b7d64c4{slo_id=\"ce8072f4-9e84-493e-bc25-6bff771fa223\"} > 0.144\nand ignoring(slo_window)\nslo:sli_error:ratio_rate_1h:scenario_s13_cleanup_live_availability_9_6b7d64c4{slo_id=\"ce8072f4-9e84-493e-bc25-6bff771fa223\"} > 0.144",
+            "labels": {
+              "slo_window": "5m/1h",
+              "slo_name": "scenario-s13-cleanup-live",
+              "slo_severity": "critical",
+              "slo_id": "ce8072f4-9e84-493e-bc25-6bff771fa223",
+              "slo_owner_team": "sre",
+              "slo_alarm_type": "burn_rate",
+              "slo_burn_rate_multiplier": "14.4",
+              "slo_service": "test-service",
+              "slo_objective": "availability-99"
+            }
+          },
+          {
+            "alert": "SLO_SLIHealth_scenario_s13_cleanup_live_availability_9_6b7d64c4",
+            "for": "5m",
+            "annotations": {
+              "summary": "SLI health degraded — error ratio exceeds error budget for scenario-s13-cleanup-live (availability-99)"
+            },
+            "expr": "slo:sli_error:ratio_rate_5m:scenario_s13_cleanup_live_availability_9_6b7d64c4{slo_id=\"ce8072f4-9e84-493e-bc25-6bff771fa223\"} > 0.01",
+            "labels": {
+              "slo_window": "5m",
+              "slo_name": "scenario-s13-cleanup-live",
+              "slo_severity": "warning",
+              "slo_id": "ce8072f4-9e84-493e-bc25-6bff771fa223",
+              "slo_owner_team": "sre",
+              "slo_alarm_type": "sli_health",
+              "slo_service": "test-service",
+              "slo_objective": "availability-99"
+            }
+          },
+          {
+            "alert": "SLO_Attainment_scenario_s13_cleanup_live_availability_9_6b7d64c4",
+            "for": "5m",
+            "annotations": {
+              "summary": "SLO attainment breached — scenario-s13-cleanup-live (availability-99) below target over 30d"
+            },
+            "expr": "slo:sli_error:ratio_rate_3d:scenario_s13_cleanup_live_availability_9_6b7d64c4{slo_id=\"ce8072f4-9e84-493e-bc25-6bff771fa223\"} > 0.01",
+            "labels": {
+              "slo_window": "3d",
+              "slo_name": "scenario-s13-cleanup-live",
+              "slo_severity": "critical",
+              "slo_id": "ce8072f4-9e84-493e-bc25-6bff771fa223",
+              "slo_owner_team": "sre",
+              "slo_window_approximated": "true",
+              "slo_alarm_type": "attainment",
+              "slo_service": "test-service",
+              "slo_objective": "availability-99"
+            }
+          },
+          {
+            "alert": "SLO_NoData_scenario_s13_cleanup_live_availability_9_6b7d64c4",
+            "for": "15m",
+            "annotations": {
+              "summary": "SLI returned no data for 15m — scenario-s13-cleanup-live (availability-99)"
+            },
+            "expr": "absent_over_time(envoy_cluster_upstream_rq_total{envoy_cluster_name=\"otel-collector\"}[15m])",
+            "labels": {
+              "slo_name": "scenario-s13-cleanup-live",
+              "slo_severity": "warning",
+              "slo_id": "ce8072f4-9e84-493e-bc25-6bff771fa223",
+              "slo_owner_team": "sre",
+              "slo_alarm_type": "no_data",
+              "slo_service": "test-service",
+              "slo_objective": "availability-99"
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

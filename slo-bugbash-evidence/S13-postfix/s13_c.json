@@ -1,0 +1,40 @@
+{
+  "spec": {
+    "datasourceId": "ds-4",
+    "name": "scenario-s13-cleanup-live",
+    "description": "S13 live repro for fix",
+    "enabled": true,
+    "mode": "active",
+    "service": "test-service",
+    "owner": { "teams": ["sre"] },
+    "sli": {
+      "type": "single",
+      "definition": {
+        "backend": "prometheus",
+        "type": "availability",
+        "calcMethod": "events",
+        "metric": "envoy_cluster_upstream_rq_total"
+      },
+      "dimensions": [{ "name": "envoy_cluster_name", "value": "otel-collector" }]
+    },
+    "objectives": [{ "name": "availability-99", "target": 0.99 }],
+    "budgetWarningThresholds": [],
+    "window": { "type": "rolling", "duration": "30d" },
+    "alerting": {
+      "strategy": "mwmbr",
+      "burnRates": [
+        { "shortWindow": "5m", "longWindow": "1h", "burnRateMultiplier": 14.4, "severity": "critical", "createAlarm": true, "forDuration": "5m" }
+      ]
+    },
+    "alarms": {
+      "sliHealth": { "enabled": true },
+      "attainmentBreach": { "enabled": true },
+      "budgetWarning": { "enabled": true },
+      "noData": { "enabled": true, "forDuration": "15m" },
+      "resolved": { "enabled": true }
+    },
+    "exclusionWindows": [],
+    "labels": {},
+    "annotations": {}
+  }
+}

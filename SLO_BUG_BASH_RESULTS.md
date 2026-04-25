@@ -19,7 +19,7 @@ actionable bug entries.
 | 10| Advanced editors    | PASS   | slo-bugbash-S10-retest-burn-200.png (wizard detail post-create, 13 rules, Page·Quick "20x burn • critical"); Cortex rule label `slo_burn_rate_multiplier: "20"` | Maya + Chen       | Wizard Advanced burn-rate edit path re-validated post-fix 2026-04-24 (see Finding #S10-wizard closure). Wizard POST with first-tier multiplier 14.4 → 20 returns HTTP 200; Cortex rule group `slo:scenario_s10_repro_burn2_group_*` carries `slo_burn_rate_multiplier: "20"` on the first tier. |
 | 11| Exclusion windows   | PASS   | slo-bugbash-S11-pass.png; both windows persist after hard-refresh | Chen              | Created SLO with 2 exclusion windows: (1) cron "0 2 * * 0" 2h UTC "maintenance" deferred, (2) one-off 2026-05-01T00:00:00Z → 2026-05-01T02:00:00Z deferred. Both rows visible in Advanced → Exclusion windows table. Hard-refreshed browser (navigate with reload), re-opened detail page → both windows still present ✓. Persistence verified. Cortex rule check not performed (not relevant for saved-object-only feature; ruler write blocked by #S1 anyway). |
 | 12| Validator guardrails| PASS   | slo-bugbash-S12.1-post-fix-uuid-error.png, slo-bugbash-S12.2-post-fix-annotation-error.png | Sanjay            | Re-validated after fix 0db3a036. S12.1 (UUID label error) PASS live via wizard — inline `env: Label values must not be UUIDs (cardinality guardrail)` now renders on the Labels `EuiFormRow`. S12.2 (4 KiB annotation cap) PASS live via wizard with native DOM setter workaround — inline error "Annotations exceed 4096-byte size cap" renders on the Annotations `EuiFormRow` after attempting Create with 5 KiB payload. Both validators block create and surface per-field errors inline. S12.3 remains out of scope (see Finding #S12c — spec decision, not bug). |
-| 13| Delete Cortex cleanup| FAIL   | slo-bugbash-S13-delete-modal.png, slo-bugbash-S13-fail-delete-error.png; curl confirms rule group still exists | Sanjay            | DELETE handler rejected with 400 "Datasource ds-4 is not registered" even though `GET /api/alerting/datasources` returns ds-4 in the list. SLO SO and Cortex rule group both survive (correct per delete-safety contract), but the delete is blocked by datasource resolution failure. See Finding #S13-datasource-not-registered. |
+| 13| Delete Cortex cleanup| PASS   | slo-bugbash-evidence/S13-postfix/ (create/delete/ruler-poll/get-after-delete) | Sanjay            | Resolved by 1e13153f. POST → DELETE round-trip on `scenario-s13-cleanup-live` returns HTTP 200 `{deleted:true}` with 11 generatedRuleNames; Cortex ruler shows 0 matching groups within 1s; GET /slos/<id> returns 404. Cold-start regression covered by `server/routes/slo/__tests__/delete_registry_lookup.test.ts` (present-ds resolves, genuinely-missing-ds preserves SO). See Finding #S13-datasource-not-registered (**Resolved**). |
 | 14| Orphan-SLO recovery (regression guard)| PASS   | slo-bugbash-evidence/S14/delete-response.txt, slo-bugbash-evidence/S14/put-response.txt, slo-bugbash-S14-pass-listing-empty.png, slo-bugbash-S14-pass-post-cleanup.png | TBD               | Regression guard behaves exactly as plan predicts. DELETE and PUT against the SLO after its datasource churned (`ds-4` deleted, rediscovered as `ds-6`) both reject with HTTP 400 and a message explicitly naming the stale `ds-4`: `{"spec.datasourceId":"Datasource \"ds-4\" is not registered. Pick one from /api/alerting/datasources."}`. Admin-bypass cleanup (SO delete + manual Cortex `DELETE /api/v1/rules/slo-generated-ds-4/<group>`) succeeds. Post-S14 state: `ObservabilityStack_Prometheus` is now `ds-6` — S15 prompt must use that id. |
 | 15| Historical burn: 28d backfill | FAIL   | slo-bugbash-evidence/S15/step1-backfill-rejected.txt | Kai (review: Sanjay) | Backfill infrastructure blocked by Cortex ingestion limits. Remote-write push rejected with HTTP 400 "out of bounds" — 28-day-old timestamps exceed Cortex's default `creation_grace_period` (10 min). Cortex config at `/observability-stack/docker-compose/cortex/cortex.yaml` does not set `limits.creation_grace_period` or `limits.out_of_order_time_window`, both default to 10m. This matches the "backfill infrastructure failure" negative guard at plan line 807–809. See Finding #S15-backfill-blocked. No SLO created; no UI validation attempted. |
 
@@ -34,11 +34,24 @@ dev server down, datasource missing, live traffic stopped).
 Entries below are what the next working session should pick up. Anything
 not listed here is either PASS, closed, or out of scope.
 
-**#S13-datasource-not-registered** — DELETE handler rejects with "Datasource ds-4 is not registered" even though ds-4 appears in `/api/alerting/datasources`. Blocks deletion of SLOs; requires admin bypass (saved-object + Cortex manual cleanup). See full Finding below.
-
 **#S15-backfill-blocked** — Cortex default `creation_grace_period` / `out_of_order_time_window` (10m each) reject 28-day backfill timestamps. S15 cannot be executed without extending these limits in `observability-stack/docker-compose/cortex/cortex.yaml` to `30d`. This is a test-infra limitation, not a plugin bug. If S15 validation is GA-critical, Cortex config must be updated and container restarted.
 
 **Closed / not reproducible:**
+- #S13-datasource-not-registered — resolved by 1e13153f. Root cause: the
+  in-memory datasource registry was hydrated lazily by the alerting route's
+  `discoverOsdDatasources`; SLO routes never triggered it, so on a cold
+  process a DELETE (or UPDATE / CREATE) arriving before
+  `/api/alerting/datasources` saw an empty map and rejected with
+  "Datasource ds-N is not registered" even though the datasource existed
+  in the OSD saved-object store. Fix extracts discovery into a shared
+  `DatasourceDiscoveryService` passed to both alerting and SLO routes.
+  `tryBuildDeployContext` and `buildStatusContext` call `ensure()` before
+  every registry lookup, so the state the SLO routes see matches what
+  `/api/alerting/datasources` would show. Delete-safety contract from
+  b44fdf32 is preserved — a genuine miss still returns HTTP 400 with the
+  `spec.datasourceId` message, SO survives, ruler group untouched.
+  Regression covered by
+  `server/routes/slo/__tests__/delete_registry_lookup.test.ts`.
 - #DELETE-no-cortex-cleanup — re-verified this session for Custom PromQL:
   wizard-created SLO → UI Delete → ruler namespace `slo-generated-ds-3`
   empty within ~3s (T+3s/T+10s/T+30s polls all `no rule groups found`).
@@ -746,6 +759,23 @@ Low in normal operation (datasources rarely churn), but it's the exact path a us
 ---
 
 ### #S13-datasource-not-registered — DELETE handler fails with "Datasource not registered" even when datasource is present
+
+> **Resolved by 1e13153f (2026-04-25)**. The in-memory datasource registry
+> was populated lazily by `discoverOsdDatasources` inside the alerting
+> route; SLO routes never triggered that hydration, so on a cold process
+> a DELETE that arrived before `/api/alerting/datasources` saw an empty
+> map and rejected with "Datasource ds-N is not registered" even though
+> the datasource existed in the OSD saved-object store. Discovery is now
+> a shared `DatasourceDiscoveryService` invoked from both alerting and
+> SLO routes; `tryBuildDeployContext` calls `ensure()` before every
+> registry lookup. Warm-path live test
+> (`slo-bugbash-evidence/S13-postfix/`): POST → DELETE round-trip on
+> `scenario-s13-cleanup-live` returns HTTP 200 with 11 generatedRuleNames,
+> Cortex clears the group within 1s, GET /slos/<id> returns 404. Cold-path
+> covered by `server/routes/slo/__tests__/delete_registry_lookup.test.ts`
+> (present-ds resolves + tears down ruler + removes SO; genuinely-missing
+> ds returns 400, SO + ruler group preserved per the b44fdf32 safety
+> contract).
 
 **Severity**: P1 (blocks deletion of SLOs after datasource discovery refresh or server restart)
 **Triage owner**: Sanjay
