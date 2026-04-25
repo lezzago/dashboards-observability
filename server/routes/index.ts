@@ -33,6 +33,7 @@ import {
   MultiBackendAlertService,
   HttpOpenSearchBackend,
   DirectQueryPrometheusBackend,
+  DatasourceDiscoveryService,
 } from '../services/alerting';
 import { PrometheusMetadataService } from '../services/alerting/prometheus_metadata_service';
 import { registerSloRoutes } from './slo';
@@ -99,20 +100,38 @@ export function setupRoutes({
     logger
   );
 
+  // Shared registry hydration. Used by both alerting routes (for browse /
+  // manage) and SLO CRUD routes (so DELETE/UPDATE/CREATE don't spuriously
+  // reject a datasourceId because the registry hasn't been populated yet).
+  const datasourceDiscoveryService = new DatasourceDiscoveryService(
+    alertingDatasourceService,
+    logger
+  );
+
   registerAlertingRoutes(
     router,
     alertingDatasourceService,
     alertingAlertService,
+    datasourceDiscoveryService,
     logger,
     metadataService
   );
 
   if (sloService) {
     // Real ruler writes go through the same DirectQuery proxy the read path
-    // already uses. The alerting datasource service is reused for datasource
-    // lookup (directQueryName, mdsId) — it's already seeded on the first
-    // /api/alerting/* call via `discoverOsdDatasources`.
+    // already uses. Pass the shared discovery service so SLO routes hydrate
+    // the datasource registry from OSD saved objects before any lookup —
+    // otherwise a DELETE arriving before the first /api/alerting/* call
+    // would see an empty map and reject with "Datasource ds-N is not
+    // registered" even though the datasource exists.
     const rulerClient = new DirectQueryRulerClient(logger);
-    registerSloRoutes(router, sloService, logger, rulerClient, alertingDatasourceService);
+    registerSloRoutes(
+      router,
+      sloService,
+      logger,
+      rulerClient,
+      alertingDatasourceService,
+      datasourceDiscoveryService
+    );
   }
 }

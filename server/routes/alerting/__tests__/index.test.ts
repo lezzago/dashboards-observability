@@ -4,6 +4,7 @@
  */
 
 import { registerAlertingRoutes } from '../index';
+import { DatasourceDiscoveryService } from '../../../services/alerting/datasource_discovery';
 import type { Datasource } from '../../../../common/types/alerting/types';
 
 // ---- Mocks ----
@@ -26,22 +27,26 @@ const mockLogger = { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: 
 function createDatasourceService() {
   const store = new Map<string, Datasource>();
   let counter = 0;
+  const assign = (input: Omit<Datasource, 'id'>) => {
+    const id = `ds-${++counter}`;
+    const ds = { id, ...input } as Datasource;
+    store.set(id, ds);
+    return ds;
+  };
   return {
     list: jest.fn(async () => Array.from(store.values())),
     get: jest.fn(async (id: string) => store.get(id) ?? null),
-    create: jest.fn(async (input: Omit<Datasource, 'id'>) => {
-      const id = `ds-${++counter}`;
-      const ds = { id, ...input } as Datasource;
-      store.set(id, ds);
-      return ds;
-    }),
+    create: jest.fn(async (input: Omit<Datasource, 'id'>) => assign(input)),
     update: jest.fn(),
     delete: jest.fn(async (id: string) => store.delete(id)),
     seed: jest.fn((items: Array<Omit<Datasource, 'id'>>) => {
-      for (const item of items) {
-        const id = `ds-${++counter}`;
-        store.set(id, { id, ...item } as Datasource);
-      }
+      for (const item of items) assign(item);
+    }),
+    reconcile: jest.fn(async (items: Array<Omit<Datasource, 'id'>>) => {
+      // Approximation of InMemoryDatasourceService.reconcile: upsert every
+      // incoming entry into the store so downstream state assertions can see
+      // it without depending on the real stable-key dedup.
+      for (const item of items) assign(item);
     }),
     testConnection: jest.fn(),
     setPrometheusBackend: jest.fn(),
@@ -104,10 +109,12 @@ function getListDatasourcesHandler(): RouteHandler {
 describe('registerAlertingRoutes', () => {
   it('registers routes on all HTTP methods', () => {
     const dsSvc = createDatasourceService();
+    const discoverySvc = new DatasourceDiscoveryService(dsSvc as never, mockLogger as never);
     registerAlertingRoutes(
       mockRouter as never,
       dsSvc as never,
       mockAlertService as never,
+      discoverySvc,
       mockLogger
     );
     expect(mockRouter.get).toHaveBeenCalled();
@@ -122,10 +129,12 @@ describe('registerAlertingRoutes', () => {
     mockRouter.put.mockClear();
     mockRouter.delete.mockClear();
     const dsSvc = createDatasourceService();
+    const discoverySvc = new DatasourceDiscoveryService(dsSvc as never, mockLogger as never);
     registerAlertingRoutes(
       mockRouter as never,
       dsSvc as never,
       mockAlertService as never,
+      discoverySvc,
       mockLogger
     );
     const getPaths = mockRouter.get.mock.calls.map(([c]: [RouteConfig]) => c.path);
@@ -145,10 +154,12 @@ describe('datasource discovery', () => {
     mockRouter.put.mockClear();
     mockRouter.delete.mockClear();
     dsSvc = createDatasourceService();
+    const discoverySvc = new DatasourceDiscoveryService(dsSvc as never, mockLogger as never);
     registerAlertingRoutes(
       mockRouter as never,
       dsSvc as never,
       mockAlertService as never,
+      discoverySvc,
       mockLogger
     );
   });
@@ -187,7 +198,7 @@ describe('datasource discovery', () => {
     expect(allSeeded.find((d) => d.name === 'Local Cluster')).toBeUndefined();
   });
 
-  it('appends remote MDS after local seed', async () => {
+  it('seeds local then reconciles remote MDS', async () => {
     const localMds: SavedObject = {
       id: 'so-local',
       type: 'data-source',
@@ -203,12 +214,13 @@ describe('datasource discovery', () => {
     const res = { ok: jest.fn(<T>(x: T) => x) };
     await getListDatasourcesHandler()(ctx, {}, res);
 
-    // First seed: local entry
+    // Seed call carries the local MDS with its user-given name.
     expect(dsSvc.seed.mock.calls[0][0]).toEqual(
       expect.arrayContaining([expect.objectContaining({ name: 'Local', mdsId: 'so-local' })])
     );
-    // Second seed: remote entry
-    expect(dsSvc.seed.mock.calls[1][0]).toEqual(
+    // Remote MDS arrives via `reconcile`, not `seed`, so the stable-key index
+    // can preserve ds-N ids across discovery refreshes.
+    expect(dsSvc.reconcile.mock.calls[0][0]).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ name: 'RemoteCluster', mdsId: 'so-remote' }),
       ])
@@ -240,10 +252,12 @@ describe('datasource discovery', () => {
     const res = { ok: jest.fn(<T>(x: T) => x) };
     await getListDatasourcesHandler()(ctx, {}, res);
 
-    const allSeeded: Array<Partial<Datasource>> = dsSvc.seed.mock.calls.flatMap(
+    // Prometheus data-connections land in the registry via `reconcile` so
+    // their ds-N id survives subsequent discovery refreshes.
+    const reconciled: Array<Partial<Datasource>> = dsSvc.reconcile.mock.calls.flatMap(
       ([items]: [Array<Partial<Datasource>>]) => items
     );
-    expect(allSeeded).toEqual(
+    expect(reconciled).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           name: 'my-prom',

@@ -7,7 +7,7 @@
  * OSD route adapter — wires framework-agnostic handlers to OSD's IRouter.
  */
 import { schema } from '@osd/config-schema';
-import { IRouter, RequestHandlerContext, SavedObject } from '../../../../../src/core/server';
+import { IRouter, RequestHandlerContext } from '../../../../../src/core/server';
 import type {
   AlertingOSClient,
   Datasource,
@@ -16,6 +16,7 @@ import type {
 } from '../../../common/types/alerting';
 import { MultiBackendAlertService } from '../../services/alerting';
 import type { InMemoryDatasourceService } from '../../services/alerting/datasource_service';
+import type { DatasourceDiscoveryService } from '../../services/alerting/datasource_discovery';
 
 /**
  * Shape of the OSD request-handler context we rely on. `dataSource` is
@@ -29,16 +30,6 @@ type AlertingHandlerContext = RequestHandlerContext & {
     };
   };
 };
-
-interface DataSourceSOAttributes {
-  title?: string;
-  endpoint?: string;
-}
-
-interface DataConnectionSOAttributes {
-  connectionId?: string;
-  type?: string;
-}
 
 import {
   handleListDatasources,
@@ -90,118 +81,11 @@ export function registerAlertingRoutes(
   router: IRouter,
   datasourceService: InMemoryDatasourceService,
   alertService: MultiBackendAlertService,
+  discoveryService: DatasourceDiscoveryService,
   logger?: Logger,
   metadataService?: PrometheusMetadataService
 ) {
-  /**
-   * Discover OSD-registered data sources and rebuild the datasource list.
-   * Gated by a 30-second TTL to avoid wiping/re-seeding on every request.
-   * Concurrent calls within TTL share the same in-flight promise.
-   */
-  let lastDiscoveryTs = 0;
-  const DISCOVERY_TTL_MS = 30_000;
-  let inflight: Promise<void> | null = null;
-
-  async function discoverOsdDatasources(ctx: AlertingHandlerContext) {
-    const existing = await datasourceService.list();
-    if (Date.now() - lastDiscoveryTs < DISCOVERY_TTL_MS && existing.length > 0) return;
-    if (inflight) {
-      await inflight;
-      return;
-    }
-
-    inflight = (async () => {
-      try {
-        // Discover OSD-registered data sources + direct-query data connections.
-        // - `data-source` = MDS OpenSearch clusters (attribute.endpoint is a URL).
-        // - `data-connection` = direct-query connections (Prometheus, CloudWatch, etc);
-        //   attribute.connectionId is the SQL-plugin connection name used for
-        //   /_plugins/_directquery/_resources/{connectionId}/... routing.
-        const soClient = ctx.core.savedObjects.client;
-        const [osResult, dcResult] = await Promise.all([
-          soClient.find<DataSourceSOAttributes>({ type: 'data-source', perPage: 100 }),
-          soClient.find<DataConnectionSOAttributes>({ type: 'data-connection', perPage: 100 }),
-        ]);
-
-        const localPatterns = /localhost|127\.0\.0\.1|0\.0\.0\.0|::1|opensearch:9200|opensearch-cluster-master|opensearch-master/i;
-        // Partition OS data-source saved objects into "points at local cluster"
-        // vs "remote". If the user has created an MDS entry that targets the
-        // local cluster, we want THEIR name/entry to surface in the UI instead
-        // of the hardcoded "Local Cluster" seed — avoids showing two rows for
-        // the same physical cluster.
-        const osSavedObjects = osResult.saved_objects || [];
-        const osLocal = osSavedObjects.filter((so) =>
-          localPatterns.test(so.attributes?.endpoint || '')
-        );
-        const osRemote = osSavedObjects.filter(
-          (so) => !localPatterns.test(so.attributes?.endpoint || '')
-        );
-
-        // Seed a representation for the local cluster:
-        //   - If the user registered one or more MDS data sources pointing at
-        //     the local cluster, surface all of them with their user-given
-        //     names (drop the hardcoded "Local Cluster").
-        //   - Otherwise, seed the default "Local Cluster" entry.
-        if (osLocal.length > 0) {
-          datasourceService.seed(
-            osLocal.map((so: SavedObject<DataSourceSOAttributes>) => ({
-              name: so.attributes.title || so.id,
-              type: 'opensearch' as const,
-              url: so.id,
-              enabled: true,
-              mdsId: so.id,
-            }))
-          );
-        } else {
-          datasourceService.seed([
-            { name: 'Local Cluster', type: 'opensearch' as const, url: 'local', enabled: true },
-          ]);
-        }
-
-        const osDiscovered = osRemote.map((so: SavedObject<DataSourceSOAttributes>) => ({
-          name: so.attributes.title || so.id,
-          type: 'opensearch' as const,
-          url: so.id,
-          enabled: true,
-          mdsId: so.id,
-        }));
-
-        const promDiscovered = (dcResult.saved_objects || [])
-          .filter((so: SavedObject<DataConnectionSOAttributes>) => {
-            const t = so.attributes?.type;
-            return t === 'Prometheus' || t === 'Amazon Managed Prometheus';
-          })
-          .map((so: SavedObject<DataConnectionSOAttributes>) => ({
-            name: so.attributes.connectionId || so.id,
-            type: 'prometheus' as const,
-            url: so.id,
-            enabled: true,
-            // SQL-plugin connection name used by DirectQueryPrometheusBackend
-            // to route requests through /_plugins/_directquery/_resources/<name>/...
-            directQueryName: so.attributes.connectionId,
-          }));
-
-        // Upsert by stable key so ds-N ids are preserved across refreshes.
-        // Previously this was delete-all + seed, which bumped the counter
-        // every 30 seconds and orphaned every persisted SLO's datasourceId.
-        const discovered = [
-          { name: 'Local Cluster', type: 'opensearch' as const, url: 'local', enabled: true },
-          ...osDiscovered,
-          ...promDiscovered,
-        ];
-        await datasourceService.reconcile(discovered);
-        logger?.info(
-          `alerting: Reconciled datasources — ${osDiscovered.length} OpenSearch data source(s), ${promDiscovered.length} Prometheus connection(s)`
-        );
-        lastDiscoveryTs = Date.now();
-      } catch (e) {
-        logger?.debug(`alerting: Could not discover OSD data sources: ${e}`);
-      } finally {
-        inflight = null;
-      }
-    })();
-    await inflight;
-  }
+  const discoverOsdDatasources = (ctx: AlertingHandlerContext) => discoveryService.ensure(ctx);
 
   /**
    * Get the right OpenSearch client for a datasource.

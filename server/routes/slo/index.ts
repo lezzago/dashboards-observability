@@ -19,6 +19,7 @@ import type {
 import { SloService, SloValidationError } from '../../../common/slo/slo_service';
 import type { AlertingOSClient, Datasource } from '../../../common/types/alerting/types';
 import type { InMemoryDatasourceService } from '../../services/alerting/datasource_service';
+import type { DatasourceDiscoveryService } from '../../services/alerting/datasource_discovery';
 import type { RulerClient } from '../../services/slo/ruler_client';
 import {
   handleCreateSLO,
@@ -276,9 +277,20 @@ async function buildDeployContext(
   datasourceId: string | undefined,
   rulerClient: RulerClient | undefined,
   datasourceService: InMemoryDatasourceService | undefined,
+  discoveryService: DatasourceDiscoveryService | undefined,
   logger: Logger
 ): Promise<SloDeployContext | undefined> {
   if (!rulerClient || !datasourceService || !datasourceId) return undefined;
+
+  // Hydrate the datasource registry from OSD saved objects before the lookup.
+  // The alerting routes populate the registry lazily on their first call; SLO
+  // routes can arrive first on cold start (e.g., the user lands on the SLO
+  // detail page directly after a restart). Without this the lookup would
+  // spuriously report "not registered" even though the datasource exists in
+  // the OSD saved-object store.
+  if (discoveryService) {
+    await discoveryService.ensure(ctx);
+  }
 
   const ds = await datasourceService.get(datasourceId);
   if (!ds) {
@@ -324,6 +336,7 @@ async function tryBuildDeployContext(
   datasourceId: string | undefined,
   rulerClient: RulerClient | undefined,
   datasourceService: InMemoryDatasourceService | undefined,
+  discoveryService: DatasourceDiscoveryService | undefined,
   logger: Logger
 ): Promise<
   | { deploy: SloDeployContext | undefined; errorResponse?: undefined }
@@ -335,6 +348,7 @@ async function tryBuildDeployContext(
       datasourceId,
       rulerClient,
       datasourceService,
+      discoveryService,
       logger
     );
     return { deploy };
@@ -364,7 +378,8 @@ async function tryBuildDeployContext(
  */
 function buildStatusContext(
   ctx: SloHandlerContext,
-  datasourceService: InMemoryDatasourceService | undefined
+  datasourceService: InMemoryDatasourceService | undefined,
+  discoveryService: DatasourceDiscoveryService | undefined
 ): SloStatusAggregationContext | undefined {
   if (!datasourceService) return undefined;
   const client = ctx.core.opensearch.client.asCurrentUser;
@@ -372,6 +387,9 @@ function buildStatusContext(
     client,
     workspaceId: 'default',
     resolveDatasource: async (datasourceId: string) => {
+      if (discoveryService) {
+        await discoveryService.ensure(ctx);
+      }
       const ds = await datasourceService.get(datasourceId);
       if (!ds) return undefined;
       // If this datasource is MDS-scoped, prefer that client — but we only
@@ -389,7 +407,8 @@ export function registerSloRoutes(
   sloService: SloService,
   logger: Logger,
   rulerClient?: RulerClient,
-  datasourceService?: InMemoryDatasourceService
+  datasourceService?: InMemoryDatasourceService,
+  discoveryService?: DatasourceDiscoveryService
 ) {
   router.get(
     {
@@ -433,7 +452,11 @@ export function registerSloRoutes(
         mode: q.mode ? (q.mode.split(',') as Array<'active' | 'shadow'>) : undefined,
         search: q.search,
       };
-      const statusCtx = buildStatusContext(ctx as SloHandlerContext, datasourceService);
+      const statusCtx = buildStatusContext(
+        ctx as SloHandlerContext,
+        datasourceService,
+        discoveryService
+      );
       const result = await handleListSLOs(sloService, filters, logger, statusCtx);
       if (result.status >= 400) {
         return res.customError({
@@ -452,6 +475,7 @@ export function registerSloRoutes(
       req.body?.spec?.datasourceId,
       rulerClient,
       datasourceService,
+      discoveryService,
       logger
     );
     if (built.errorResponse) {
@@ -497,7 +521,11 @@ export function registerSloRoutes(
       validate: { body: schema.object({ ids: schema.arrayOf(schema.string()) }) },
     },
     async (ctx, req, res) => {
-      const statusCtx = buildStatusContext(ctx as SloHandlerContext, datasourceService);
+      const statusCtx = buildStatusContext(
+        ctx as SloHandlerContext,
+        datasourceService,
+        discoveryService
+      );
       const result = await handleGetSLOStatuses(sloService, req.body.ids, logger, statusCtx);
       if (result.status === 200) return res.ok({ body: result.body });
       return res.customError({
@@ -513,7 +541,11 @@ export function registerSloRoutes(
       validate: { params: schema.object({ id: schema.string() }) },
     },
     async (ctx, req, res) => {
-      const statusCtx = buildStatusContext(ctx as SloHandlerContext, datasourceService);
+      const statusCtx = buildStatusContext(
+        ctx as SloHandlerContext,
+        datasourceService,
+        discoveryService
+      );
       const result = await handleGetSLO(sloService, req.params.id, logger, statusCtx);
       if (result.status === 200) return res.ok({ body: result.body });
       return res.customError({
@@ -540,6 +572,7 @@ export function registerSloRoutes(
         existing?.spec.datasourceId,
         rulerClient,
         datasourceService,
+        discoveryService,
         logger
       );
       if (built.errorResponse) {
@@ -589,6 +622,7 @@ export function registerSloRoutes(
         existing?.spec.datasourceId,
         rulerClient,
         datasourceService,
+        discoveryService,
         logger
       );
       if (built.errorResponse) {
@@ -626,6 +660,7 @@ export function registerSloRoutes(
         existing?.spec.datasourceId,
         rulerClient,
         datasourceService,
+        discoveryService,
         logger
       );
       if (built.errorResponse) {
@@ -666,6 +701,7 @@ export function registerSloRoutes(
         existing?.spec.datasourceId,
         rulerClient,
         datasourceService,
+        discoveryService,
         logger
       );
       if (built.errorResponse) {

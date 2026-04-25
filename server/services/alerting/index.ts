@@ -11,6 +11,7 @@
 export { PLUGIN_ID, PLUGIN_NAME } from './constants';
 
 export { InMemoryDatasourceService } from './datasource_service';
+export { DatasourceDiscoveryService } from './datasource_discovery';
 export { MultiBackendAlertService } from './alert_service';
 export { HttpOpenSearchBackend } from './opensearch_backend';
 export { DirectQueryPrometheusBackend } from './directquery_prometheus_backend';
