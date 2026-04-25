@@ -19,6 +19,7 @@ actionable bug entries.
 | 10| Advanced editors    | PASS   | slo-bugbash-S10-retest-burn-200.png (wizard detail post-create, 13 rules, Page·Quick "20x burn • critical"); Cortex rule label `slo_burn_rate_multiplier: "20"` | Maya + Chen       | Wizard Advanced burn-rate edit path re-validated post-fix 2026-04-24 (see Finding #S10-wizard closure). Wizard POST with first-tier multiplier 14.4 → 20 returns HTTP 200; Cortex rule group `slo:scenario_s10_repro_burn2_group_*` carries `slo_burn_rate_multiplier: "20"` on the first tier. |
 | 11| Exclusion windows   | PASS   | slo-bugbash-S11-pass.png; both windows persist after hard-refresh | Chen              | Created SLO with 2 exclusion windows: (1) cron "0 2 * * 0" 2h UTC "maintenance" deferred, (2) one-off 2026-05-01T00:00:00Z → 2026-05-01T02:00:00Z deferred. Both rows visible in Advanced → Exclusion windows table. Hard-refreshed browser (navigate with reload), re-opened detail page → both windows still present ✓. Persistence verified. Cortex rule check not performed (not relevant for saved-object-only feature; ruler write blocked by #S1 anyway). |
 | 12| Validator guardrails| PASS   | slo-bugbash-S12.1-post-fix-uuid-error.png, slo-bugbash-S12.2-post-fix-annotation-error.png | Sanjay            | Re-validated after fix 0db3a036. S12.1 (UUID label error) PASS live via wizard — inline `env: Label values must not be UUIDs (cardinality guardrail)` now renders on the Labels `EuiFormRow`. S12.2 (4 KiB annotation cap) PASS live via wizard with native DOM setter workaround — inline error "Annotations exceed 4096-byte size cap" renders on the Annotations `EuiFormRow` after attempting Create with 5 KiB payload. Both validators block create and surface per-field errors inline. S12.3 remains out of scope (see Finding #S12c — spec decision, not bug). |
+| 13| Delete Cortex cleanup| FAIL   | slo-bugbash-S13-delete-modal.png, slo-bugbash-S13-fail-delete-error.png; curl confirms rule group still exists | Sanjay            | DELETE handler rejected with 400 "Datasource ds-4 is not registered" even though `GET /api/alerting/datasources` returns ds-4 in the list. SLO SO and Cortex rule group both survive (correct per delete-safety contract), but the delete is blocked by datasource resolution failure. See Finding #S13-datasource-not-registered. |
 
 Fill **Result** with one of: `PASS`, `FAIL`, `BLOCKED`. `BLOCKED` is for
 scenarios that couldn't start because a prerequisite broke (e.g. OSD
@@ -31,8 +32,7 @@ dev server down, datasource missing, live traffic stopped).
 Entries below are what the next working session should pick up. Anything
 not listed here is either PASS, closed, or out of scope.
 
-_None._ S5 resolved this session (see Finding #S5-burnrate-label-mismatch
-**Resolved** block); all prior open items either PASS or closed.
+**#S13-datasource-not-registered** — DELETE handler rejects with "Datasource ds-4 is not registered" even though ds-4 appears in `/api/alerting/datasources`. Blocks deletion of SLOs; requires admin bypass (saved-object + Cortex manual cleanup). See full Finding below.
 
 **Closed / not reproducible:**
 - #DELETE-no-cortex-cleanup — re-verified this session for Custom PromQL:
@@ -738,3 +738,78 @@ The first option is narrower and solves the 80% case (user repointing an SLO to 
 Low in normal operation (datasources rarely churn), but it's the exact path a user hits if they delete a datasource in the UI and then recreate it with the same name — which the re-register flow in the alerting routes encourages. Annoying but not data-loss.
 
 **Cleanup performed**: tested SLO manually cleaned up via `DELETE /api/saved_objects/slo-definition/...` + Cortex admin DELETE; ruler namespace clean.
+
+---
+
+### #S13-datasource-not-registered — DELETE handler fails with "Datasource not registered" even when datasource is present
+
+**Severity**: P1 (blocks deletion of SLOs after datasource discovery refresh or server restart)
+**Triage owner**: Sanjay
+
+**Reproduction**:
+1. Create SLO `scenario-s13-cleanup` via API with `datasourceId: "ds-4"` (ObservabilityStack_Prometheus). SLO created successfully with ID `9b532f91-c5a3-4204-bd11-80a917b6343d`, Cortex rule group `slo:scenario_s13_cleanup_group_d4cc0cb0` provisioned under namespace `slo-generated-ds-4`.
+2. Navigate to detail page `http://localhost:5602/app/observability-apm-slo#/slos/9b532f91-c5a3-4204-bd11-80a917b6343d`.
+3. Click Delete button, confirm modal.
+4. DELETE call returns HTTP 400 with body:
+   ```json
+   {
+     "statusCode": 400,
+     "error": "Bad Request",
+     "message": "Validation failed",
+     "attributes": {
+       "error": "Validation failed",
+       "errors": {
+         "spec.datasourceId": "Datasource \"ds-4\" is not registered. Pick one from /api/alerting/datasources."
+       }
+     }
+   }
+   ```
+5. Verify datasource IS registered: `curl http://localhost:5602/api/alerting/datasources | jq '.datasources[] | select(.id == "ds-4")'` returns the full datasource object with name `ObservabilityStack_Prometheus`.
+
+**Observed**:
+- UI shows toast "Delete failed — Failed to fetch" (misleading; the fetch succeeded but returned 400).
+- The DELETE handler rejects the request with "Datasource ds-4 is not registered" even though `ds-4` appears in the `/api/alerting/datasources` list.
+- SLO saved object survives (correct per commit 9d3e8a0a's delete-safety contract).
+- Cortex rule group survives: `curl http://localhost:9090/prometheus/api/v1/rules | jq '.data.groups[] | select(.name | test("scenario_s13"))' | wc -l` returns `1`.
+- Screenshots: `slo-bugbash-S13-delete-modal.png`, `slo-bugbash-S13-fail-delete-error.png`.
+
+**Expected** (per test plan S13):
+- DELETE succeeds, returns HTTP 200.
+- Cortex rule group `slo:scenario_s13_cleanup_group_d4cc0cb0` is removed from namespace `slo-generated-ds-4` within ~10 seconds.
+- SLO saved object is removed; subsequent GET returns 404.
+
+**Hypothesis**:
+The DELETE handler's `buildDeployContext` (at `server/routes/slo/index.ts`) resolves the datasource from the SO's `spec.datasourceId` but is failing the lookup even though the datasource is registered. Two likely causes:
+
+1. **In-memory datasource map stale**: The `InMemoryDatasourceService` tracks datasources in a map keyed by stable ID. If the map wasn't populated yet (e.g., discovery hasn't run since server start), or if discovery is asynchronous and the DELETE happens before the map updates, `datasourceService.get(datasourceId)` returns `undefined` → `buildDeployContext` returns `undefined` → the validator sees a missing datasourceId and rejects.
+
+2. **Validator running before deploy-context resolution**: The DELETE route may be running the spec validator (`validateSloSpec`) before or instead of `buildDeployContext`, and the validator is checking datasource presence against a stale or different registry.
+
+**Code-level evidence**:
+From `server/routes/slo/index.ts` (delete handler, approx lines 150–170):
+```typescript
+const deploy = buildDeployContext(
+  context,
+  rulerClient,
+  datasourceService,
+  doc.spec.datasourceId,
+  request
+);
+if (deploy) {
+  await deploy.ruler.deleteRuleGroup(
+    doc.status.provisioning.rulerNamespace,
+    doc.status.provisioning.ruleGroupName
+  );
+}
+```
+If `buildDeployContext` returns `undefined`, the ruler DELETE is skipped but the SO delete would still proceed (pre-9d3e8a0a). Post-9d3e8a0a, the handler should *require* `deploy` to be non-null before removing the SO — which means the 400 rejection is coming from an earlier validation step, not the deploy-context guard.
+
+**Likely fix location**:
+- `server/routes/slo/index.ts` — DELETE handler (lines ~150–200). The validator or deployment-context builder is rejecting the datasource ID before the delete logic runs.
+- `server/services/datasource/in_memory_datasource_service.ts` — check if `get(id)` is synchronous and reliable, or if discovery can lag behind the first route call.
+- `common/slo/slo_service.ts` — if the service-layer `delete` method runs validation before calling the deploy context.
+
+**Workaround**:
+Admin bypass via `DELETE /api/saved_objects/slo-definition/<id>` + manual Cortex cleanup `DELETE /api/v1/rules/slo-generated-ds-4/slo:scenario_s13_cleanup_group_d4cc0cb0`. This is the #SLO-orphan-recovery scenario documented earlier in this file (lines 712–741), but the root cause here is different: the datasource isn't genuinely missing — the lookup is failing spuriously.
+
+**Cleanup performed**: yes — admin bypass. `DELETE /api/saved_objects/slo-definition/9b532f91-c5a3-4204-bd11-80a917b6343d` + `DELETE /api/v1/rules/slo-generated-ds-4/slo:scenario_s13_cleanup_group_d4cc0cb0`. Verified post-cleanup: GET on the SLO id returns 404, and `curl /prometheus/api/v1/rules | jq '[.data.groups[].name | select(test("scenario_s13"))]'` returns `[]`.
