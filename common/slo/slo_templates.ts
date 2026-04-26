@@ -5,16 +5,19 @@
 
 /**
  * SLO templates — pre-configured partial SloSpec fragments used by the wizard
- * to pre-fill common HTTP / gRPC / custom PromQL patterns.
+ * to pre-fill SLI shapes for common APM and OTel patterns.
  *
- * A template yields a `SloSpecPartial` with sensible defaults; the wizard
- * overlays the user's service, dimensions, objectives, and metadata on top of
- * the template before submitting.
+ * Template categories:
+ *   - apm     : span-derived (Data Prepper) RED metrics. Always custom PromQL
+ *               because span-derived samples are gauge-semantic and the default
+ *               availability/latency_threshold generators wrap in rate().
+ *   - otel    : OTel semconv metrics emitted directly by instrumented services
+ *               (HTTP, RPC/gRPC, DB client, messaging, GenAI).
+ *   - custom  : blank-slate custom PromQL.
  *
- * Separately, `detectMetricType()` attempts to infer the Prometheus metric
- * type (counter vs histogram vs ...) from metadata or naming conventions, so
- * the wizard can auto-suggest the matching template. Graceful degradation:
- * when metadata is unavailable, heuristics and plain-text fallbacks are used.
+ * `detectMetricType()` infers the Prometheus metric type from metadata or the
+ * Prometheus-standard suffix convention. Heuristics + plain-text fallback keep
+ * the picker useful when the metadata API is unavailable.
  */
 
 import type { PrometheusSliType, SliCalcMethod } from './slo_types';
@@ -23,6 +26,17 @@ import type { PrometheusMetricMetadata } from '../types/alerting/types';
 // ============================================================================
 // Template interface
 // ============================================================================
+
+export type SloTemplateCategory = 'apm' | 'otel' | 'custom';
+
+/**
+ * Defaults for templates that pre-fill the custom PromQL editor. The wizard
+ * substitutes the literal placeholder `${service}` with the form's current
+ * service name at applyTemplate time.
+ */
+export type SloTemplateCustomDefaults =
+  | { mode: 'events'; goodQuery: string; totalQuery: string }
+  | { mode: 'raw'; errorRatioQuery: string };
 
 /**
  * A template produces the Prometheus-SLI portion of `SloSpec` plus a few
@@ -34,10 +48,12 @@ export interface SloTemplate {
   id: string;
   name: string;
   description: string;
-  /** OUI icon name for the card ('globe', 'clock', 'visBarVertical', 'wrench'). */
+  /** OUI icon name for the card. */
   icon: string;
+  /** Groups the template in the picker. */
+  category: SloTemplateCategory;
 
-  /** SLI body the template proposes. `metric` may be empty for Custom. */
+  /** SLI body the template proposes. `metric` may be empty for custom. */
   sli: {
     type: PrometheusSliType;
     calcMethod: SliCalcMethod;
@@ -55,86 +71,281 @@ export interface SloTemplate {
   /** Metric types the template expects when auto-detection runs. */
   expectedMetricType: 'counter' | 'histogram';
 
-  /** Metric-name regex for auto-detection. Custom template matches everything. */
-  detectionPattern: RegExp;
+  /**
+   * Metric-name regex for auto-detection. The `custom` catch-all and APM
+   * templates (which don't target a single probe metric) use `null`.
+   */
+  detectionPattern: RegExp | null;
+
+  /** Shown as an info callout in the wizard when the template is selected. */
+  note?: string;
+
+  /**
+   * Pre-fill for the custom PromQL editor, used when `sli.type === 'custom'`.
+   * `${service}` is substituted with the wizard's service state at apply time.
+   */
+  customPromqlDefaults?: SloTemplateCustomDefaults;
 }
 
 // ============================================================================
-// Built-in templates (P0 set: 5 templates)
+// Shared PromQL snippets for APM span-derived templates
+// ============================================================================
+
+/**
+ * Span-derived metrics (Data Prepper) use `namespace="span_derived"` and
+ * distinguish incoming (server) vs outgoing (client) spans via `remoteService`.
+ * Server-side queries (what a service *receives*) filter `remoteService=""`.
+ */
+const SERVER_SELECTOR = 'service="${service}",remoteService="",namespace="span_derived"';
+const DEPENDENCY_SELECTOR =
+  'service="${service}",remoteService="${remoteService}",namespace="span_derived"';
+
+/** APM latency histogram bucket bound (seconds). */
+const APM_DEFAULT_LATENCY_SECONDS = 0.5;
+
+function apmServiceAvailabilityDefaults(): SloTemplateCustomDefaults {
+  return {
+    mode: 'events',
+    goodQuery: `sum(request{${SERVER_SELECTOR}}) - sum(fault{${SERVER_SELECTOR}})`,
+    totalQuery: `sum(request{${SERVER_SELECTOR}})`,
+  };
+}
+
+function apmServiceLatencyDefaults(): SloTemplateCustomDefaults {
+  return {
+    mode: 'events',
+    goodQuery: `sum(latency_seconds_bucket{${SERVER_SELECTOR},le="${APM_DEFAULT_LATENCY_SECONDS}"})`,
+    totalQuery: `sum(latency_seconds_bucket{${SERVER_SELECTOR},le="+Inf"})`,
+  };
+}
+
+function apmDependencyAvailabilityDefaults(): SloTemplateCustomDefaults {
+  return {
+    mode: 'events',
+    goodQuery: `sum(request{${DEPENDENCY_SELECTOR}}) - sum(fault{${DEPENDENCY_SELECTOR}})`,
+    totalQuery: `sum(request{${DEPENDENCY_SELECTOR}})`,
+  };
+}
+
+function apmDependencyLatencyDefaults(): SloTemplateCustomDefaults {
+  return {
+    mode: 'events',
+    goodQuery: `sum(latency_seconds_bucket{${DEPENDENCY_SELECTOR},le="${APM_DEFAULT_LATENCY_SECONDS}"})`,
+    totalQuery: `sum(latency_seconds_bucket{${DEPENDENCY_SELECTOR},le="+Inf"})`,
+  };
+}
+
+// ============================================================================
+// Built-in templates
 // ============================================================================
 
 export const SLO_TEMPLATES: readonly SloTemplate[] = [
+  // --------------------------------------------------------------------------
+  // APM span-derived templates (Data Prepper)
+  // --------------------------------------------------------------------------
+  {
+    id: 'apm-service-availability',
+    name: 'APM service availability',
+    description:
+      'Non-fault request ratio for a service, computed from span-derived RED metrics ' +
+      '(request/fault with namespace="span_derived"). Best for services emitting OTel ' +
+      'traces through Data Prepper.',
+    icon: 'apmTrace',
+    category: 'apm',
+    sli: { type: 'custom', calcMethod: 'events' },
+    dimensionHints: { serviceLabel: 'service', operationLabel: 'operation' },
+    expectedMetricType: 'counter',
+    detectionPattern: null,
+    note:
+      'Span-derived samples are gauge-style; all 7 MWMBR recording windows will record the ' +
+      'same instantaneous ratio. Use attainment-breach alarms if burn-rate alerts are essential.',
+    customPromqlDefaults: apmServiceAvailabilityDefaults(),
+  },
+  {
+    id: 'apm-service-latency',
+    name: 'APM service latency',
+    description:
+      "Fraction of a service's requests completing under a latency bound, from span-derived " +
+      'latency_seconds_bucket. Default bound 500 ms; edit the query to change it.',
+    icon: 'clock',
+    category: 'apm',
+    sli: { type: 'custom', calcMethod: 'events' },
+    dimensionHints: { serviceLabel: 'service', operationLabel: 'operation' },
+    expectedMetricType: 'histogram',
+    detectionPattern: null,
+    note:
+      'Latency bound lives inside the PromQL `le` label value — update the query to change it ' +
+      '(e.g. le="0.25" for 250 ms).',
+    customPromqlDefaults: apmServiceLatencyDefaults(),
+  },
+  {
+    id: 'apm-dependency-availability',
+    name: 'APM dependency availability',
+    description:
+      'Non-fault ratio for calls a service makes to a downstream dependency, from ' +
+      'span-derived client-span metrics (remoteService="<target>").',
+    icon: 'graphApp',
+    category: 'apm',
+    sli: { type: 'custom', calcMethod: 'events' },
+    dimensionHints: { serviceLabel: 'service', operationLabel: 'remoteOperation' },
+    expectedMetricType: 'counter',
+    detectionPattern: null,
+    note:
+      'Fill in both `${service}` (caller) and `${remoteService}` (dependency) in the PromQL ' +
+      'before submitting.',
+    customPromqlDefaults: apmDependencyAvailabilityDefaults(),
+  },
+  {
+    id: 'apm-dependency-latency',
+    name: 'APM dependency latency',
+    description:
+      "Fraction of a service's calls to a downstream dependency under a latency bound, " +
+      'from span-derived client-span latency histograms.',
+    icon: 'clock',
+    category: 'apm',
+    sli: { type: 'custom', calcMethod: 'events' },
+    dimensionHints: { serviceLabel: 'service', operationLabel: 'remoteOperation' },
+    expectedMetricType: 'histogram',
+    detectionPattern: null,
+    customPromqlDefaults: apmDependencyLatencyDefaults(),
+  },
+
+  // --------------------------------------------------------------------------
+  // OTel semconv templates (post-1.23)
+  // --------------------------------------------------------------------------
   {
     id: 'http-availability',
-    name: 'HTTP Availability',
+    name: 'HTTP server availability',
     description:
-      'Track the ratio of successful HTTP requests (non-5xx) to total requests. ' +
-      'Best for services exposing http_requests_total counters.',
+      'Ratio of non-5xx HTTP requests to total. Targets the OTel semconv v1.23+ metric ' +
+      'http_server_request_duration_seconds_count with label http_response_status_code.',
     icon: 'globe',
+    category: 'otel',
     sli: {
       type: 'availability',
       calcMethod: 'events',
-      metric: 'http_requests_total',
-      goodEventsFilter: 'status_code!~"5.."',
+      metric: 'http_server_request_duration_seconds_count',
+      goodEventsFilter: 'http_response_status_code!~"5.."',
     },
-    dimensionHints: { serviceLabel: 'service', operationLabel: 'handler' },
+    dimensionHints: { serviceLabel: 'service_name', operationLabel: 'http_route' },
     expectedMetricType: 'counter',
-    detectionPattern: /^https?_requests?_total$|^http_server_requests?_total$/,
+    detectionPattern: /^http_server_request_duration_seconds_(count|bucket|sum)$/,
   },
   {
     id: 'http-latency',
-    name: 'HTTP Latency',
+    name: 'HTTP server latency',
     description:
-      'Track the fraction of requests under a latency threshold from histogram buckets. ' +
-      'Best for services exposing http_request_duration_seconds histogram.',
+      'Fraction of HTTP requests completing under a latency bound. Reads ' +
+      'http_server_request_duration_seconds_bucket (OTel semconv v1.23+).',
     icon: 'clock',
+    category: 'otel',
     sli: {
       type: 'latency_threshold',
       calcMethod: 'events',
-      metric: 'http_request_duration_seconds_bucket',
+      metric: 'http_server_request_duration_seconds_bucket',
       latencyThresholdUnit: 'seconds',
     },
-    dimensionHints: { serviceLabel: 'service', operationLabel: 'handler' },
+    dimensionHints: { serviceLabel: 'service_name', operationLabel: 'http_route' },
     defaultLatencyThreshold: 0.5,
     expectedMetricType: 'histogram',
-    detectionPattern: /^https?_request_duration_(seconds|milliseconds)_(bucket|count|sum)$/,
+    detectionPattern: /^http_server_request_duration_seconds_(bucket|count|sum)$/,
   },
   {
-    id: 'grpc-availability',
-    name: 'gRPC Availability',
+    id: 'rpc-availability',
+    name: 'RPC / gRPC availability',
     description:
-      'Track the ratio of successful gRPC calls (non-error codes) to total calls. ' +
-      'Best for gRPC services exposing grpc_server_handled_total counters.',
+      'Non-error RPC call ratio. Targets rpc_server_duration_seconds_count (OTel semconv); ' +
+      'good events = rpc_grpc_status_code="0" (OK).',
     icon: 'visBarVertical',
+    category: 'otel',
     sli: {
       type: 'availability',
       calcMethod: 'events',
-      metric: 'grpc_server_handled_total',
-      goodEventsFilter:
-        'grpc_code!~"INTERNAL|UNAVAILABLE|DEADLINE_EXCEEDED|UNKNOWN|RESOURCE_EXHAUSTED|DATA_LOSS"',
+      metric: 'rpc_server_duration_seconds_count',
+      goodEventsFilter: 'rpc_grpc_status_code="0"',
     },
-    dimensionHints: { serviceLabel: 'grpc_service', operationLabel: 'grpc_method' },
+    dimensionHints: { serviceLabel: 'rpc_service', operationLabel: 'rpc_method' },
     expectedMetricType: 'counter',
-    detectionPattern: /^grpc_server_handled_total$/,
+    detectionPattern: /^rpc_server_duration_seconds_(count|bucket|sum)$/,
   },
   {
-    id: 'grpc-latency',
-    name: 'gRPC Latency',
+    id: 'rpc-latency',
+    name: 'RPC / gRPC latency',
     description:
-      'Track the fraction of gRPC calls under a latency threshold from histogram buckets. ' +
-      'Best for gRPC services exposing grpc_server_handling_seconds histogram.',
+      'Fraction of RPC calls under a latency bound. Reads rpc_server_duration_seconds_bucket.',
     icon: 'clock',
+    category: 'otel',
     sli: {
       type: 'latency_threshold',
       calcMethod: 'events',
-      metric: 'grpc_server_handling_seconds_bucket',
+      metric: 'rpc_server_duration_seconds_bucket',
       latencyThresholdUnit: 'seconds',
     },
-    dimensionHints: { serviceLabel: 'grpc_service', operationLabel: 'grpc_method' },
+    dimensionHints: { serviceLabel: 'rpc_service', operationLabel: 'rpc_method' },
     defaultLatencyThreshold: 0.5,
     expectedMetricType: 'histogram',
-    detectionPattern: /^grpc_server_handling_(seconds|milliseconds)_(bucket|count|sum)$/,
+    detectionPattern: /^rpc_server_duration_seconds_(bucket|count|sum)$/,
   },
+  {
+    id: 'db-client-latency',
+    name: 'Database client latency',
+    description:
+      'Fraction of outgoing DB client calls under a latency bound. Reads ' +
+      'db_client_operation_duration_seconds_bucket (OTel database semconv).',
+    icon: 'database',
+    category: 'otel',
+    sli: {
+      type: 'latency_threshold',
+      calcMethod: 'events',
+      metric: 'db_client_operation_duration_seconds_bucket',
+      latencyThresholdUnit: 'seconds',
+    },
+    dimensionHints: { serviceLabel: 'service_name', operationLabel: 'db_system' },
+    defaultLatencyThreshold: 0.1,
+    expectedMetricType: 'histogram',
+    detectionPattern: /^db_client_operation_duration_seconds_(bucket|count|sum)$/,
+  },
+  {
+    id: 'messaging-latency',
+    name: 'Messaging processing latency',
+    description:
+      'Fraction of messaging-consumer processing under a latency bound. Reads ' +
+      'messaging_process_duration_seconds_bucket (OTel messaging semconv).',
+    icon: 'email',
+    category: 'otel',
+    sli: {
+      type: 'latency_threshold',
+      calcMethod: 'events',
+      metric: 'messaging_process_duration_seconds_bucket',
+      latencyThresholdUnit: 'seconds',
+    },
+    dimensionHints: { serviceLabel: 'service_name', operationLabel: 'messaging_destination_name' },
+    defaultLatencyThreshold: 1,
+    expectedMetricType: 'histogram',
+    detectionPattern: /^messaging_process_duration_seconds_(bucket|count|sum)$/,
+  },
+  {
+    id: 'genai-availability',
+    name: 'GenAI invocation availability',
+    description:
+      'Ratio of successful GenAI invocations. Reads ' +
+      'gen_ai_client_operation_duration_seconds_count; good events have error_type="".',
+    icon: 'inspect',
+    category: 'otel',
+    sli: {
+      type: 'availability',
+      calcMethod: 'events',
+      metric: 'gen_ai_client_operation_duration_seconds_count',
+      goodEventsFilter: 'error_type=""',
+    },
+    dimensionHints: { serviceLabel: 'service_name', operationLabel: 'gen_ai_operation_name' },
+    expectedMetricType: 'counter',
+    detectionPattern: /^gen_ai_client_operation_duration_seconds_(count|bucket|sum)$/,
+  },
+
+  // --------------------------------------------------------------------------
+  // Escape hatch
+  // --------------------------------------------------------------------------
   {
     id: 'custom',
     name: 'Custom PromQL',
@@ -142,13 +353,11 @@ export const SLO_TEMPLATES: readonly SloTemplate[] = [
       'Start from a blank slate. Supply your own PromQL — either good + total queries, ' +
       'or a single pre-computed error-ratio query.',
     icon: 'wrench',
-    sli: {
-      type: 'custom',
-      calcMethod: 'events',
-    },
+    category: 'custom',
+    sli: { type: 'custom', calcMethod: 'events' },
     dimensionHints: { serviceLabel: 'service', operationLabel: 'endpoint' },
     expectedMetricType: 'counter',
-    detectionPattern: /./,
+    detectionPattern: null,
   },
 ] as const;
 
@@ -169,10 +378,8 @@ export interface MetricDetectionResult {
  *
  *  1. Prefer metadata from `/api/v1/metadata`
  *  2. Fall back to Prometheus naming suffix heuristics (_total, _bucket, ...)
- *  3. Regex-match the metric name against each template's detectionPattern
- *     (excluding the Custom catch-all)
- *
- * Returns `suggestedTemplate: null` when nothing specific matches.
+ *  3. Regex-match the metric name against each template's detectionPattern.
+ *     Templates without a detection pattern (APM, custom) are never auto-picked.
  */
 export function detectMetricType(
   metricName: string,
@@ -204,10 +411,38 @@ function inferTypeFromSuffix(metricName: string): InferredMetricType {
 
 function findMatchingTemplate(metricName: string): SloTemplate | null {
   for (const t of SLO_TEMPLATES) {
-    if (t.id === 'custom') continue;
+    if (!t.detectionPattern) continue;
     if (t.detectionPattern.test(metricName)) return t;
   }
   return null;
+}
+
+// ============================================================================
+// Custom-PromQL placeholder substitution
+// ============================================================================
+
+/**
+ * Substitute `${service}`, `${remoteService}`, and `${environment}` placeholders
+ * in a template's customPromqlDefaults. Empty/undefined values are left as the
+ * literal placeholder so the user can spot what still needs filling in.
+ */
+export function substituteCustomPromqlDefaults(
+  defaults: SloTemplateCustomDefaults,
+  vars: { service?: string; remoteService?: string; environment?: string }
+): SloTemplateCustomDefaults {
+  const replace = (s: string) =>
+    s
+      .replace(/\$\{service\}/g, vars.service || '${service}')
+      .replace(/\$\{remoteService\}/g, vars.remoteService || '${remoteService}')
+      .replace(/\$\{environment\}/g, vars.environment || '${environment}');
+  if (defaults.mode === 'events') {
+    return {
+      mode: 'events',
+      goodQuery: replace(defaults.goodQuery),
+      totalQuery: replace(defaults.totalQuery),
+    };
+  }
+  return { mode: 'raw', errorRatioQuery: replace(defaults.errorRatioQuery) };
 }
 
 // ============================================================================
@@ -223,23 +458,23 @@ export interface GoodEventsFilterPreset {
 export const GOOD_EVENTS_FILTER_PRESETS: readonly GoodEventsFilterPreset[] = [
   {
     label: 'HTTP success (non-5xx)',
-    value: 'status_code!~"5.."',
+    value: 'http_response_status_code!~"5.."',
     description: 'Counts every non-5xx response as good — 4xx requests are counted as good too.',
   },
   {
     label: 'HTTP 2xx only',
-    value: 'status_code=~"2.."',
+    value: 'http_response_status_code=~"2.."',
     description: 'Only 2xx responses are good. Stricter — redirects and 4xx count as bad.',
   },
   {
-    label: 'gRPC OK',
-    value: 'grpc_code="OK"',
-    description: 'Only gRPC OK is good. All other codes (including NOT_FOUND) are bad.',
+    label: 'RPC OK (gRPC)',
+    value: 'rpc_grpc_status_code="0"',
+    description: 'Only gRPC OK (status 0) is good. All other codes are bad.',
   },
   {
-    label: 'gRPC non-error',
-    value: 'grpc_code!~"INTERNAL|UNAVAILABLE|DEADLINE_EXCEEDED"',
-    description: 'Excludes only severe gRPC error codes.',
+    label: 'GenAI success',
+    value: 'error_type=""',
+    description: 'Counts invocations with no OTel error_type as good.',
   },
 ] as const;
 

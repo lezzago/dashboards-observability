@@ -20,9 +20,14 @@ describe('wizard_state reducer', () => {
       field: 'service',
       value: 'my-api',
     });
-    const s1 = applyTemplate(s0, SLO_TEMPLATES.find((t) => t.id === 'http-availability')!);
+    const template = SLO_TEMPLATES.find((t) => t.id === 'http-availability')!;
+    const s1 = applyTemplate(s0, template);
     expect(s1.service).toBe('my-api');
-    expect(s1.dimensions[0]).toEqual({ name: 'service', value: 'my-api' });
+    // Dimension label name comes from the template's dimensionHints — not hardcoded.
+    expect(s1.dimensions[0]).toEqual({
+      name: template.dimensionHints.serviceLabel,
+      value: 'my-api',
+    });
     expect(s1.objectives[0].name).toBe('availability-99-9');
   });
 
@@ -80,6 +85,36 @@ describe('wizard_state reducer', () => {
     expect(s.alarms.sliHealth.enabled).toBe(true);
     expect(s.alarms.noData.forDuration).toBe('30m');
     expect(s.alarms.noData.enabled).toBe(false);
+  });
+
+  it('pre-fills custom PromQL with the service name substituted for APM span-derived templates', () => {
+    let s = reducer(initialState(), {
+      kind: 'setField',
+      field: 'service',
+      value: 'checkout',
+    });
+    s = reducer(s, { kind: 'setTemplate', templateId: 'apm-service-availability' });
+    expect(s.customPromql.mode).toBe('events');
+    // `${service}` placeholder should have been replaced.
+    expect(s.customPromql.goodQuery).not.toContain('${service}');
+    expect(s.customPromql.goodQuery).toContain('service="checkout"');
+    expect(s.customPromql.totalQuery).toContain('service="checkout"');
+    // Latency histogram bucket selector preserved in the *latency* template.
+    s = reducer(s, { kind: 'setTemplate', templateId: 'apm-service-latency' });
+    expect(s.customPromql.goodQuery).toContain('latency_seconds_bucket');
+    expect(s.customPromql.goodQuery).toContain('le="0.5"');
+  });
+
+  it('leaves ${remoteService} placeholder intact when the dependency template is applied without a remoteService', () => {
+    let s = reducer(initialState(), {
+      kind: 'setField',
+      field: 'service',
+      value: 'frontend',
+    });
+    s = reducer(s, { kind: 'setTemplate', templateId: 'apm-dependency-availability' });
+    // Caller is filled in, dependency is not.
+    expect(s.customPromql.goodQuery).toContain('service="frontend"');
+    expect(s.customPromql.goodQuery).toContain('remoteService="${remoteService}"');
   });
 
   it('swaps exclusion window schedule types, seeding sensible defaults', () => {

@@ -18,7 +18,10 @@ import type {
   SloAlarmConfig,
 } from '../../../../../common/slo/slo_types';
 import { DEFAULT_MWMBR_TIERS } from '../../../../../common/slo/slo_promql_generator';
-import { SLO_TEMPLATES } from '../../../../../common/slo/slo_templates';
+import {
+  SLO_TEMPLATES,
+  substituteCustomPromqlDefaults,
+} from '../../../../../common/slo/slo_templates';
 import type { SloTemplate } from '../../../../../common/slo/slo_templates';
 
 /** One row in the Objectives section. Strings for form editing; built into
@@ -213,9 +216,34 @@ export function initialState(): FormState {
  * goodEventsFilter, latency threshold). Objectives are reset to a single row
  * sized for the template so the wizard isn't stuck with stale latency-only
  * rows when flipping to availability.
+ *
+ * Templates that carry `customPromqlDefaults` (APM span-derived) also pre-fill
+ * the custom PromQL editor with `${service}` / `${remoteService}` already
+ * substituted from form state.
  */
 export function applyTemplate(state: FormState, template: SloTemplate | null): FormState {
   if (!template) return { ...state, templateId: null };
+  const nextCustomPromql = template.customPromqlDefaults
+    ? (() => {
+        const subbed = substituteCustomPromqlDefaults(template.customPromqlDefaults, {
+          service: state.service,
+        });
+        if (subbed.mode === 'events') {
+          return {
+            mode: 'events' as const,
+            goodQuery: subbed.goodQuery,
+            totalQuery: subbed.totalQuery,
+            errorRatioQuery: state.customPromql.errorRatioQuery,
+          };
+        }
+        return {
+          mode: 'raw' as const,
+          goodQuery: state.customPromql.goodQuery,
+          totalQuery: state.customPromql.totalQuery,
+          errorRatioQuery: subbed.errorRatioQuery,
+        };
+      })()
+    : state.customPromql;
   return {
     ...state,
     templateId: template.id,
@@ -226,6 +254,7 @@ export function applyTemplate(state: FormState, template: SloTemplate | null): F
       ...(state.dimensions.length > 1 ? state.dimensions.slice(1) : []),
     ],
     objectives: [defaultObjective(template)],
+    customPromql: nextCustomPromql,
   };
 }
 

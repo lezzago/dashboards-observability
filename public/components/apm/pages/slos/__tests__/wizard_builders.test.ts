@@ -125,6 +125,47 @@ describe('wizard_builders', () => {
     });
   });
 
+  it('builds an APM span-derived availability SLI from the template custom defaults', () => {
+    const apmAvailability = SLO_TEMPLATES.find((t) => t.id === 'apm-service-availability')!;
+    let s = reducer(initialState(), {
+      kind: 'setField',
+      field: 'datasourceId',
+      value: 'ds-2',
+    });
+    s = reducer(s, { kind: 'setField', field: 'name', value: 'checkout-avail' });
+    s = reducer(s, { kind: 'setField', field: 'service', value: 'checkout' });
+    s = reducer(s, { kind: 'setField', field: 'ownerTeam', value: 'sre' });
+    s = reducer(s, { kind: 'setTemplate', templateId: 'apm-service-availability' });
+    const input = buildCreateInput(s, apmAvailability);
+    const def = singlePromSli(input.spec.sli);
+    expect(def.type).toBe('custom');
+    // Narrow out-of-band so jest/no-conditional-expect stays happy.
+    const events =
+      def.customExpr?.mode === 'events'
+        ? def.customExpr
+        : ((undefined as never) as { goodQuery: string; totalQuery: string });
+    expect(events.goodQuery).toContain('service="checkout"');
+    expect(events.goodQuery).toContain('remoteService=""');
+    expect(events.totalQuery).toContain('namespace="span_derived"');
+  });
+
+  it('builds a DB client latency template with seconds unit and the histogram metric', () => {
+    const dbLatency = SLO_TEMPLATES.find((t) => t.id === 'db-client-latency')!;
+    let s = baseState();
+    s = reducer(s, { kind: 'setTemplate', templateId: 'db-client-latency' });
+    s = reducer(s, { kind: 'setField', field: 'service', value: 'foo' });
+    s = reducer(s, {
+      kind: 'setDimension',
+      index: 0,
+      dim: { name: 'service_name', value: 'foo' },
+    });
+    const input = buildCreateInput(s, dbLatency);
+    const def = singlePromSli(input.spec.sli);
+    expect(def.type).toBe('latency_threshold');
+    expect(def.metric).toBe('db_client_operation_duration_seconds_bucket');
+    expect(def.latencyThresholdUnit).toBe('seconds');
+  });
+
   it('persists burn-rate, budget-warning, alarm, and exclusion-window edits into the spec', () => {
     let s = baseState();
     s = reducer(s, {
