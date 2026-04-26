@@ -81,6 +81,31 @@ describe('metadata_handlers', () => {
     expect(result.body).toEqual({ values: [], total: 0, truncated: false });
   });
 
+  // ---- handleGetMetricNames: cap behaviour ----
+  // Previous cap was 200, which silently dropped `http_*`, `rpc_*`, and other
+  // high-letter metric families on realistic tenants. The cap is now high
+  // enough that sensible universes pass through intact.
+  it('does not truncate a 1000-metric universe that includes late-alphabet OTel families', async () => {
+    const otelFamilies = [
+      'http_server_request_duration_seconds_count',
+      'http_server_request_duration_seconds_bucket',
+      'rpc_server_duration_seconds_count',
+      'rpc_server_duration_seconds_bucket',
+      'messaging_process_duration_seconds_bucket',
+    ];
+    // 995 short "ax…"/"bx…" names to flood the early alphabet, plus the OTel
+    // ones at the end — if the cap is too tight, OTel falls off first.
+    const flood = Array.from({ length: 995 }, (_, i) => `a_metric_${String(i).padStart(4, '0')}`);
+    mockService.getMetricNames.mockResolvedValueOnce([...flood, ...otelFamilies]);
+    const result = await handleGetMetricNames(mockService as never, mockClient, 'ds-1');
+    expect(result.body.truncated).toBe(false);
+    expect(result.body.total).toBe(1000);
+    // Every OTel family the Suggest page detects must survive the handler cap.
+    for (const family of otelFamilies) {
+      expect(result.body.metrics).toContain(family);
+    }
+  });
+
   // ---- handleGetMetricMetadata ----
   it('returns metadata from service', async () => {
     const meta = [{ metric: 'up', type: 'gauge', help: 'Up' }];

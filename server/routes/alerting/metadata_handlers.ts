@@ -13,7 +13,23 @@ import type { PrometheusMetadataService } from '../../services/alerting/promethe
 import type { Logger } from '../../../common/types/alerting/types';
 import type { HandlerResult } from './route_utils';
 
-const MAX_RESULTS = 200;
+/**
+ * Upper bound on the number of names/values returned in a single response.
+ *
+ * Tuned for the realistic worst case: a Cortex tenant with a few hundred
+ * scraped targets can easily expose thousands of distinct metric names and
+ * label values. Capping at 200 silently truncates past the letter "e"
+ * (alphabetical sort) so families like `http_*` and `rpc_*` fall off,
+ * breaking callers that need the full metric universe — e.g. the Suggest
+ * page's OTel detectors or the wizard's metric/label auto-detection.
+ *
+ * Interactive typeahead callers (AlarmsApiClient consumers) already bound
+ * the displayed list UI-side (MAX_OPTIONS in use_prometheus_metadata.ts
+ * caps at 50 for EuiComboBox), so they don't rely on this server-side cap
+ * for responsiveness. The cap stays as a safety limit against pathological
+ * tenants, not a UX limit.
+ */
+const MAX_RESULTS = 5000;
 
 // --------------------------------------------------------------------------
 // Get Metric Names
