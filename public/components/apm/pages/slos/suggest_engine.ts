@@ -6,27 +6,43 @@
 /**
  * Pure draft-suggestion engine for the "Suggest SLOs" page.
  *
- * Given a small slice of Prometheus metadata (metric names, label values per
- * metric), it emits `Suggestion` records: each record is already a
- * well-formed `SloCreateInput` plus a little UI-facing metadata (reason,
- * estimated rule count). The user can toggle, tweak, and then create.
+ * Given the APM services the page already enumerated, plus a slice of
+ * Prometheus metadata and the current ruler rule groups, it emits
+ * `Suggestion` records: each record is a well-formed `SloCreateInput` plus
+ * UI-facing metadata (reason, estimated rule count, existing-rule match).
  *
- * Detectors covered:
- *   - APM span-derived services (Data Prepper: `request` + `fault`
- *     + `latency_seconds_bucket` with `namespace="span_derived"`). One pair
- *     of availability + latency drafts per (service, environment).
- *   - OTel semconv HTTP server (`http_server_request_duration_seconds_*`).
- *   - OTel semconv RPC server (`rpc_server_duration_seconds_*`).
- *   - OTel DB client (`db_client_operation_duration_seconds_*`).
- *   - OTel messaging consumer (`messaging_process_duration_seconds_*`).
- *   - OTel GenAI client (`gen_ai_client_operation_duration_seconds_*`).
+ * Detectors (service-first, per-service rollup — no per-route explosion):
+ *   - APM span-derived services (Data Prepper `request`/`fault` and
+ *     `latency_seconds_bucket` with `namespace="span_derived"`).
+ *     Availability + latency drafts per service.
+ *   - OTel semconv HTTP server (`http_server_request_duration_seconds_*`) —
+ *     availability + latency drafts scoped to (service_name | job).
+ *   - OTel RPC / gRPC server (`rpc_server_duration_seconds_*`) —
+ *     availability + latency drafts scoped to rpc_service.
+ *   - OTel DB client (`db_client_operation_duration_seconds_*`) —
+ *     latency drafts scoped to (service_name | job).
+ *   - OTel messaging consumer (`messaging_process_duration_seconds_*`) —
+ *     latency drafts scoped to (service_name | job).
+ *   - OTel GenAI client (`gen_ai_client_operation_duration_seconds_*`) —
+ *     availability drafts scoped to (service_name | job).
+ *
+ * A service can have *both* APM drafts and OTel drafts — they're different
+ * data shapes (span-derived gauges vs. direct counters/histograms). The
+ * engine does not dedupe across the two.
  *
  * Legacy OTel semconv (≤1.22) is intentionally not supported.
  *
- * No I/O. All metadata fetching lives in the page component.
+ * "Category 1" rule reuse: if the caller supplies `existingRuleGroups`
+ * (the ruler's current rule groups), we look for recording rules that
+ * already carry `slo_service="<svc>"` labels covering the same SLI kind
+ * and mark the draft as covered. Covered drafts are still emitted (for
+ * visibility) but default to unselected so Create doesn't dual-write.
+ *
+ * No I/O. All HTTP/fetch lives in the page component.
  */
 
 import { DEFAULT_MWMBR_TIERS } from '../../../../../common/slo/slo_promql_generator';
+import type { PromRule, PromRuleGroup } from '../../../../../common/types/alerting/types';
 import type {
   BurnRateConfig,
   PrometheusSli,
@@ -36,61 +52,113 @@ import type {
   SloSpec,
 } from '../../../../../common/slo/slo_types';
 
-/** Input slice the page collects from the metadata endpoints. */
-export interface DiscoveryInput {
-  datasourceId: string;
-  /** All metric names visible on the datasource. */
-  metricNames: string[];
-  /**
-   * For each metric we care about, the values seen on its relevant dimension
-   * labels. Page fetches only what the engine needs.
-   */
-  labelValuesByMetric: Record<
-    string,
-    {
-      // APM span-derived
-      service?: string[];
-      environment?: string[];
-      // OTel HTTP (new semconv)
-      job?: string[];
-      service_name?: string[];
-      http_route?: string[];
-      http_request_method?: string[];
-      // OTel RPC
-      rpc_service?: string[];
-      rpc_method?: string[];
-      // OTel DB
-      db_system?: string[];
-      // OTel messaging
-      messaging_system?: string[];
-      messaging_destination_name?: string[];
-    }
-  >;
+// ============================================================================
+// Public types
+// ============================================================================
+
+/** A service discovered by the caller (same shape as Services Home items). */
+export interface DiscoveredService {
+  serviceName: string;
+  environment?: string;
 }
+
+/**
+ * Slim slice of Prometheus metadata the engine consumes. Keyed by metric
+ * name; each entry carries the label values seen on the dimensions the
+ * detectors care about (see `metricsToProbe` for the full list).
+ */
+export interface MetricLabelValues {
+  job?: string[];
+  service_name?: string[];
+  rpc_service?: string[];
+  db_system?: string[];
+  messaging_destination_name?: string[];
+  http_route?: string[];
+  rpc_method?: string[];
+}
+
+export type LabelValuesByMetric = Record<string, MetricLabelValues>;
+
+export interface ServiceDiscoveryInput {
+  datasourceId: string;
+  services: DiscoveredService[];
+  /**
+   * Full metric-name universe visible on the datasource. Required to decide
+   * which OTel detectors to run. When empty, only APM detectors fire.
+   */
+  metricNames?: string[];
+  /** Label-value samples keyed by metric name. See `metricsToProbe`. */
+  labelValuesByMetric?: LabelValuesByMetric;
+  /**
+   * Current ruler rule groups. When provided, the engine flags drafts whose
+   * SLI kind is already covered by a recording rule labelled
+   * `slo_service="<service>"` so callers can avoid dual-writing.
+   */
+  existingRuleGroups?: PromRuleGroup[];
+}
+
+/** Stable prefix on `Suggestion.key` — used by the live-SLI preview. */
+export type SuggestionKind =
+  | 'apm-availability'
+  | 'apm-latency'
+  | 'http-availability'
+  | 'http-latency'
+  | 'rpc-availability'
+  | 'rpc-latency'
+  | 'db-latency'
+  | 'messaging-latency'
+  | 'genai-availability';
+
+/** Display-friendly label shown in the card badge. */
+export const KIND_LABEL: Record<SuggestionKind, string> = {
+  'apm-availability': 'APM availability',
+  'apm-latency': 'APM latency',
+  'http-availability': 'HTTP availability',
+  'http-latency': 'HTTP latency',
+  'rpc-availability': 'RPC availability',
+  'rpc-latency': 'RPC latency',
+  'db-latency': 'DB client latency',
+  'messaging-latency': 'Messaging latency',
+  'genai-availability': 'GenAI availability',
+};
 
 /** One draft SLO the user can accept / tweak / discard. */
 export interface Suggestion {
   /** Stable key for React list + selection state. */
   key: string;
+  /** Machine-readable kind — drives live-SLI preview + badges. */
+  kindId: SuggestionKind;
   /** Pre-filled create payload. */
   input: SloCreateInput;
   /** Short human-readable reason shown in the card. */
   reason: string;
-  /** Chip label ("HTTP availability", "RPC latency" etc.). */
+  /** Display label shown on the card badge. */
   kind: string;
   /** Detected metric the SLI targets — shown in the card body. */
   sourceMetric: string;
-  /** Jobs / services / routes used as dimensions (for display). */
+  /** Jobs / services used as dimensions (for display). */
   detected: Record<string, string>;
   /**
    * Expected number of rules if created with defaults — 7 recording +
    * 4 MWMBR + N budget warnings for a single-objective SLO.
    */
   estimatedRuleCount: number;
+  /**
+   * If set, an existing recording rule already covers this (service, kind).
+   * Create-all flows should skip this draft to avoid dual-writing.
+   */
+  existingRuleMatch?: ExistingRuleMatch;
+}
+
+export interface ExistingRuleMatch {
+  groupName: string;
+  ruleName: string;
+  /** SLO id if the rule was created by this plugin (extracted from labels). */
+  sloId?: string;
 }
 
 // ============================================================================
-// Helpers
+// Shared spec-builder helpers
 // ============================================================================
 
 const DEFAULT_BURN_RATES: BurnRateConfig[] = DEFAULT_MWMBR_TIERS.map((t) => ({ ...t }));
@@ -167,488 +235,168 @@ function buildSpec({
 }
 
 function estimatedRules(objectives: number): number {
-  // 7 recording windows + 4 MWMBR tiers + 2 default budget warnings, times objectives.
   return (7 + 4 + DEFAULT_BUDGETS.length) * objectives;
 }
 
 // ============================================================================
-// APM span-derived detector
+// Existing-rule index
 // ============================================================================
 
 /**
- * Detect APM services from Data Prepper span-derived metrics. The `request`
- * gauge is present whenever any traces are flowing, so its `service` label
- * values enumerate the services to target.
- *
- * Each service yields two drafts — availability (non-fault ratio) and latency
- * (p95-like, 500ms via histogram bucket cut). Both use custom PromQL because
- * span-derived samples are gauge-semantic and the default generator's
- * `rate()` wrapping produces wrong values for them.
+ * Canonical set of metric-name fragments that identify each SLI kind. We
+ * scan a recording rule's PromQL for these to decide what the rule computes.
+ * Order matters: more specific metric families go first so e.g. a rule
+ * referencing `http_server_request_duration_seconds_bucket` is classified as
+ * http-latency (histogram) rather than http-availability (count).
  */
-function detectApmSpanDerived(input: DiscoveryInput, out: Suggestion[]): void {
-  const requestMetric = 'request';
-  const bucketMetric = 'latency_seconds_bucket';
-  if (!input.metricNames.includes(requestMetric)) return;
-  const labels = input.labelValuesByMetric[requestMetric];
-  if (!labels) return;
-  const services = labels.service ?? [];
-  if (services.length === 0) return;
-  const hasHistogram = input.metricNames.includes(bucketMetric);
+const KIND_METRIC_SIGNATURES: Array<{
+  kind: SuggestionKind;
+  matches: (expr: string) => boolean;
+}> = [
+  { kind: 'http-latency', matches: (e) => /http_server_request_duration_seconds_bucket/.test(e) },
+  {
+    kind: 'http-availability',
+    matches: (e) => /http_server_request_duration_seconds_count/.test(e),
+  },
+  { kind: 'rpc-latency', matches: (e) => /rpc_server_duration_seconds_bucket/.test(e) },
+  { kind: 'rpc-availability', matches: (e) => /rpc_server_duration_seconds_count/.test(e) },
+  { kind: 'db-latency', matches: (e) => /db_client_operation_duration_seconds_/.test(e) },
+  { kind: 'messaging-latency', matches: (e) => /messaging_process_duration_seconds_/.test(e) },
+  {
+    kind: 'genai-availability',
+    matches: (e) => /gen_ai_client_operation_duration_seconds_/.test(e),
+  },
+  // APM span-derived: a latency histogram reference beats the plain
+  // request/fault signal so `apm-latency` wins for rules that compute both.
+  { kind: 'apm-latency', matches: (e) => /latency_seconds_bucket/.test(e) },
+  { kind: 'apm-availability', matches: (e) => /\brequest\b/.test(e) && /\bfault\b/.test(e) },
+];
 
-  for (const service of services) {
-    const serverSelector = `service="${service}",remoteService="",namespace="span_derived"`;
-
-    out.push({
-      key: `apm-avail:${service}`,
-      kind: 'APM availability',
-      reason: `span-derived request+fault observed for service="${service}". Non-fault ratio ≥ 99% is a sensible starting point.`,
-      sourceMetric: requestMetric,
-      detected: { service },
-      estimatedRuleCount: estimatedRules(1),
-      input: {
-        spec: buildSpec({
-          datasourceId: input.datasourceId,
-          name: `${service} — service availability`,
-          description: `Auto-suggested from span-derived metrics for service="${service}".`,
-          service,
-          sliDefinition: {
-            backend: 'prometheus',
-            type: 'custom',
-            calcMethod: 'events',
-            customExpr: {
-              mode: 'events',
-              goodQuery: `sum(request{${serverSelector}}) - sum(fault{${serverSelector}})`,
-              totalQuery: `sum(request{${serverSelector}})`,
-            },
-          },
-          // Custom SLIs don't require dimensions — PromQL already scopes.
-          dimensions: [],
-          objective: { name: `availability-99-${slug(service)}`, target: 0.99 },
-        }),
-      },
-    });
-
-    if (hasHistogram) {
-      out.push({
-        key: `apm-lat:${service}`,
-        kind: 'APM latency',
-        reason: `latency_seconds_bucket present for service="${service}". Draft targets ≥ 95% of requests under 500 ms.`,
-        sourceMetric: bucketMetric,
-        detected: { service },
-        estimatedRuleCount: estimatedRules(1),
-        input: {
-          spec: buildSpec({
-            datasourceId: input.datasourceId,
-            name: `${service} — service latency p95 < 500 ms`,
-            description: `Auto-suggested from span-derived latency histogram for service="${service}".`,
-            service,
-            sliDefinition: {
-              backend: 'prometheus',
-              type: 'custom',
-              calcMethod: 'events',
-              customExpr: {
-                mode: 'events',
-                goodQuery: `sum(latency_seconds_bucket{${serverSelector},le="0.5"})`,
-                totalQuery: `sum(latency_seconds_bucket{${serverSelector},le="+Inf"})`,
-              },
-            },
-            dimensions: [],
-            objective: { name: `latency-95-${slug(service)}`, target: 0.95 },
-          }),
-        },
-      });
-    }
+/**
+ * Decide which SLI kind a recording rule covers based on its PromQL. Returns
+ * null for rules we can't classify — callers treat those as "unrelated".
+ */
+function classifyRule(rule: PromRule): SuggestionKind | null {
+  if (rule.type !== 'recording') return null;
+  for (const { kind, matches } of KIND_METRIC_SIGNATURES) {
+    if (matches(rule.query)) return kind;
   }
+  return null;
 }
 
-// ============================================================================
-// OTel HTTP server detector (semconv v1.23+)
-// ============================================================================
+/**
+ * Build `Map<service, Map<kind, ExistingRuleMatch>>` from the ruler's rule
+ * groups. Service attribution prefers the rule's `slo_service` label (stamped
+ * by this plugin's generator), falling back to any of the common service
+ * labels that appear inside a PromQL selector (`service=`, `service_name=`,
+ * `rpc_service=`).
+ */
+function indexExistingRules(
+  groups: PromRuleGroup[] | undefined
+): Map<string, Map<SuggestionKind, ExistingRuleMatch>> {
+  const index = new Map<string, Map<SuggestionKind, ExistingRuleMatch>>();
+  if (!groups || groups.length === 0) return index;
 
-function detectHttpServer(input: DiscoveryInput, out: Suggestion[]): void {
-  const bucket = 'http_server_request_duration_seconds_bucket';
-  const countMetric = 'http_server_request_duration_seconds_count';
-  if (!input.metricNames.includes(bucket) && !input.metricNames.includes(countMetric)) return;
-  const labels = input.labelValuesByMetric[bucket] ?? input.labelValuesByMetric[countMetric];
-  if (!labels) return;
-  const jobs = labels.job ?? [];
-  const routes = labels.http_route ?? [];
-  if (jobs.length === 0) return;
-
-  for (const job of jobs) {
-    const service = jobToServiceName(job);
-    const targets = routes.length > 0 ? routes : [null];
-    for (const route of targets) {
-      const dims: Array<{ name: string; value: string }> = [{ name: 'job', value: job }];
-      if (route) dims.push({ name: 'http_route', value: route });
-      const scope = route ? ` (${route})` : '';
-
-      if (input.metricNames.includes(countMetric)) {
-        out.push({
-          key: `http-avail:${job}:${route ?? '*'}`,
-          kind: 'HTTP availability',
-          reason: `Detected ${countMetric} for job "${job}"${scope}; non-5xx ratio ≥ 99% is a sensible default.`,
-          sourceMetric: countMetric,
-          detected: { job, ...(route ? { http_route: route } : {}) },
-          estimatedRuleCount: estimatedRules(1),
-          input: {
-            spec: buildSpec({
-              datasourceId: input.datasourceId,
-              name: `${service}${scope} — HTTP availability`,
-              description: `Auto-suggested from ${countMetric} on job=${job}${scope}.`,
-              service,
-              sliDefinition: {
-                backend: 'prometheus',
-                type: 'availability',
-                calcMethod: 'events',
-                metric: countMetric,
-                goodEventsFilter: 'http_response_status_code!~"5.."',
-              },
-              dimensions: dims,
-              objective: { name: `availability-99-${slug(service)}`, target: 0.99 },
-            }),
-          },
-        });
-      }
-
-      if (input.metricNames.includes(bucket)) {
-        out.push({
-          key: `http-lat:${job}:${route ?? '*'}`,
-          kind: 'HTTP latency',
-          reason: `Histogram ${bucket} is present; 95% of requests under 500 ms is a common default.`,
-          sourceMetric: bucket,
-          detected: { job, ...(route ? { http_route: route } : {}) },
-          estimatedRuleCount: estimatedRules(1),
-          input: {
-            spec: buildSpec({
-              datasourceId: input.datasourceId,
-              name: `${service}${scope} — HTTP latency p95 < 500 ms`,
-              description: `Auto-suggested from ${bucket} on job=${job}${scope}.`,
-              service,
-              sliDefinition: {
-                backend: 'prometheus',
-                type: 'latency_threshold',
-                calcMethod: 'events',
-                metric: bucket,
-                latencyThresholdUnit: 'seconds',
-              },
-              dimensions: dims,
-              objective: {
-                name: `p95-under-500ms-${slug(service)}`,
-                target: 0.95,
-                latencyThreshold: 0.5,
-              },
-            }),
-          },
-        });
+  for (const group of groups) {
+    for (const rule of group.rules) {
+      if (rule.type !== 'recording') continue;
+      const kind = classifyRule(rule);
+      if (!kind) continue;
+      const services = extractRuleServices(rule);
+      if (services.length === 0) continue;
+      const match: ExistingRuleMatch = {
+        groupName: group.name,
+        ruleName: rule.name,
+        sloId: rule.labels?.slo_id,
+      };
+      for (const service of services) {
+        let perKind = index.get(service);
+        if (!perKind) {
+          perKind = new Map<SuggestionKind, ExistingRuleMatch>();
+          index.set(service, perKind);
+        }
+        // First match wins — rules later in the list are typically the
+        // alerting siblings; keep the recording rule as the representative.
+        if (!perKind.has(kind)) perKind.set(kind, match);
       }
     }
   }
-}
-
-// ============================================================================
-// OTel RPC (gRPC) server detector
-// ============================================================================
-
-function detectRpcServer(input: DiscoveryInput, out: Suggestion[]): void {
-  const bucket = 'rpc_server_duration_seconds_bucket';
-  const countMetric = 'rpc_server_duration_seconds_count';
-  if (!input.metricNames.includes(bucket) && !input.metricNames.includes(countMetric)) return;
-  const labels = input.labelValuesByMetric[bucket] ?? input.labelValuesByMetric[countMetric];
-  if (!labels) return;
-  const services = labels.rpc_service ?? [];
-  if (services.length === 0) return;
-
-  for (const rpcService of services) {
-    const dims: Array<{ name: string; value: string }> = [
-      { name: 'rpc_service', value: rpcService },
-    ];
-
-    if (input.metricNames.includes(countMetric)) {
-      out.push({
-        key: `rpc-avail:${rpcService}`,
-        kind: 'RPC availability',
-        reason: `Detected ${countMetric} for rpc_service="${rpcService}"; non-error status (0 = OK) = good.`,
-        sourceMetric: countMetric,
-        detected: { rpc_service: rpcService },
-        estimatedRuleCount: estimatedRules(1),
-        input: {
-          spec: buildSpec({
-            datasourceId: input.datasourceId,
-            name: `${rpcService} — RPC availability`,
-            description: `Auto-suggested from ${countMetric} on rpc_service=${rpcService}.`,
-            service: rpcService,
-            sliDefinition: {
-              backend: 'prometheus',
-              type: 'availability',
-              calcMethod: 'events',
-              metric: countMetric,
-              goodEventsFilter: 'rpc_grpc_status_code="0"',
-            },
-            dimensions: dims,
-            objective: { name: `availability-99-${slug(rpcService)}`, target: 0.99 },
-          }),
-        },
-      });
-    }
-
-    if (input.metricNames.includes(bucket)) {
-      out.push({
-        key: `rpc-lat:${rpcService}`,
-        kind: 'RPC latency',
-        reason: `Histogram ${bucket} is present; 95% of RPC calls under 500 ms is a common default.`,
-        sourceMetric: bucket,
-        detected: { rpc_service: rpcService },
-        estimatedRuleCount: estimatedRules(1),
-        input: {
-          spec: buildSpec({
-            datasourceId: input.datasourceId,
-            name: `${rpcService} — RPC latency p95 < 500 ms`,
-            description: `Auto-suggested from ${bucket} on rpc_service=${rpcService}.`,
-            service: rpcService,
-            sliDefinition: {
-              backend: 'prometheus',
-              type: 'latency_threshold',
-              calcMethod: 'events',
-              metric: bucket,
-              latencyThresholdUnit: 'seconds',
-            },
-            dimensions: dims,
-            objective: {
-              name: `p95-under-500ms-${slug(rpcService)}`,
-              target: 0.95,
-              latencyThreshold: 0.5,
-            },
-          }),
-        },
-      });
-    }
-  }
-}
-
-// ============================================================================
-// OTel database-client detector
-// ============================================================================
-
-function detectDbClient(input: DiscoveryInput, out: Suggestion[]): void {
-  const bucket = 'db_client_operation_duration_seconds_bucket';
-  if (!input.metricNames.includes(bucket)) return;
-  const labels = input.labelValuesByMetric[bucket];
-  if (!labels) return;
-  // Prefer service_name; fall back to job (Prometheus scrape label).
-  const serviceLabel = labels.service_name ?? labels.job ?? [];
-  if (serviceLabel.length === 0) return;
-  const dbSystems = labels.db_system ?? [];
-
-  for (const svc of serviceLabel) {
-    const service = jobToServiceName(svc);
-    const targets = dbSystems.length > 0 ? dbSystems : [null];
-    for (const dbSystem of targets) {
-      const dims: Array<{ name: string; value: string }> = [
-        {
-          name: labels.service_name ? 'service_name' : 'job',
-          value: svc,
-        },
-      ];
-      if (dbSystem) dims.push({ name: 'db_system', value: dbSystem });
-      const scope = dbSystem ? ` (${dbSystem})` : '';
-      out.push({
-        key: `db-lat:${svc}:${dbSystem ?? '*'}`,
-        kind: 'DB client latency',
-        reason: `Histogram ${bucket} is present for service="${service}"${scope}; 95% of DB calls under 100 ms is a sensible default.`,
-        sourceMetric: bucket,
-        detected: { service, ...(dbSystem ? { db_system: dbSystem } : {}) },
-        estimatedRuleCount: estimatedRules(1),
-        input: {
-          spec: buildSpec({
-            datasourceId: input.datasourceId,
-            name: `${service}${scope} — DB client latency p95 < 100 ms`,
-            description: `Auto-suggested from ${bucket} for ${service}${scope}.`,
-            service,
-            sliDefinition: {
-              backend: 'prometheus',
-              type: 'latency_threshold',
-              calcMethod: 'events',
-              metric: bucket,
-              latencyThresholdUnit: 'seconds',
-            },
-            dimensions: dims,
-            objective: {
-              name: `p95-under-100ms-${slug(service)}`,
-              target: 0.95,
-              latencyThreshold: 0.1,
-            },
-          }),
-        },
-      });
-    }
-  }
-}
-
-// ============================================================================
-// OTel messaging-consumer detector
-// ============================================================================
-
-function detectMessaging(input: DiscoveryInput, out: Suggestion[]): void {
-  const bucket = 'messaging_process_duration_seconds_bucket';
-  if (!input.metricNames.includes(bucket)) return;
-  const labels = input.labelValuesByMetric[bucket];
-  if (!labels) return;
-  const serviceLabel = labels.service_name ?? labels.job ?? [];
-  if (serviceLabel.length === 0) return;
-  const destinations = labels.messaging_destination_name ?? [];
-
-  for (const svc of serviceLabel) {
-    const service = jobToServiceName(svc);
-    const targets = destinations.length > 0 ? destinations : [null];
-    for (const destination of targets) {
-      const dims: Array<{ name: string; value: string }> = [
-        {
-          name: labels.service_name ? 'service_name' : 'job',
-          value: svc,
-        },
-      ];
-      if (destination) {
-        dims.push({ name: 'messaging_destination_name', value: destination });
-      }
-      const scope = destination ? ` (${destination})` : '';
-      out.push({
-        key: `msg-lat:${svc}:${destination ?? '*'}`,
-        kind: 'Messaging latency',
-        reason: `Histogram ${bucket} is present for service="${service}"${scope}; 95% of messages processed under 1 s is a sensible default.`,
-        sourceMetric: bucket,
-        detected: {
-          service,
-          ...(destination ? { messaging_destination_name: destination } : {}),
-        },
-        estimatedRuleCount: estimatedRules(1),
-        input: {
-          spec: buildSpec({
-            datasourceId: input.datasourceId,
-            name: `${service}${scope} — messaging latency p95 < 1 s`,
-            description: `Auto-suggested from ${bucket} for ${service}${scope}.`,
-            service,
-            sliDefinition: {
-              backend: 'prometheus',
-              type: 'latency_threshold',
-              calcMethod: 'events',
-              metric: bucket,
-              latencyThresholdUnit: 'seconds',
-            },
-            dimensions: dims,
-            objective: {
-              name: `p95-under-1s-${slug(service)}`,
-              target: 0.95,
-              latencyThreshold: 1,
-            },
-          }),
-        },
-      });
-    }
-  }
-}
-
-// ============================================================================
-// OTel GenAI client detector
-// ============================================================================
-
-function detectGenAI(input: DiscoveryInput, out: Suggestion[]): void {
-  const countMetric = 'gen_ai_client_operation_duration_seconds_count';
-  if (!input.metricNames.includes(countMetric)) return;
-  const labels = input.labelValuesByMetric[countMetric];
-  if (!labels) return;
-  const jobs = labels.job ?? [];
-  for (const job of jobs) {
-    const service = jobToServiceName(job);
-    out.push({
-      key: `genai-avail:${job}`,
-      kind: 'GenAI availability',
-      reason: `GenAI invocations on job "${job}" — error_type="" means the call returned successfully.`,
-      sourceMetric: countMetric,
-      detected: { job },
-      estimatedRuleCount: estimatedRules(1),
-      input: {
-        spec: buildSpec({
-          datasourceId: input.datasourceId,
-          name: `${service} — GenAI invocation availability`,
-          description: `Auto-suggested. error_type="" is the convention for successful GenAI operations.`,
-          service,
-          sliDefinition: {
-            backend: 'prometheus',
-            type: 'custom',
-            calcMethod: 'events',
-            customExpr: {
-              mode: 'events',
-              goodQuery: `sum(rate(${countMetric}{job="${job}", error_type=""}[5m]))`,
-              totalQuery: `sum(rate(${countMetric}{job="${job}"}[5m]))`,
-            },
-          },
-          dimensions: [],
-          objective: { name: `availability-99-${slug(service)}`, target: 0.99 },
-        }),
-      },
-    });
-  }
-}
-
-// ============================================================================
-// Entry point
-// ============================================================================
-
-/**
- * Run all detectors against the discovery input and return a deduplicated list
- * of draft SLO suggestions.
- */
-export function generateSuggestions(input: DiscoveryInput): Suggestion[] {
-  const out: Suggestion[] = [];
-  detectApmSpanDerived(input, out);
-  detectHttpServer(input, out);
-  detectRpcServer(input, out);
-  detectDbClient(input, out);
-  detectMessaging(input, out);
-  detectGenAI(input, out);
-  const seen = new Set<string>();
-  return out.filter((s) => (seen.has(s.key) ? false : (seen.add(s.key), true)));
-}
-
-// ============================================================================
-// Service-first entry point (APM span-derived)
-// ============================================================================
-
-/**
- * One row the Suggest page feeds in — mirrors the shape the Services Home
- * page uses (`ServiceTableItem`) so discovery can share that hook.
- */
-export interface DiscoveredService {
-  serviceName: string;
-  environment?: string;
-}
-
-export interface ServiceDiscoveryInput {
-  datasourceId: string;
-  services: DiscoveredService[];
+  return index;
 }
 
 /**
- * Produce SLO drafts for each discovered APM service. For every service we
- * emit both an availability and a latency draft built on span-derived metrics
- * (custom PromQL with `service` and `remoteService=""` scoping). This is the
- * flow the "Suggest SLOs" page uses — the same enumeration of services that
- * Services Home shows, plus the SLO shape the APM-first templates use.
+ * Extract the service(s) a recording rule targets. We check three sources in
+ * order:
+ *   1. `slo_service` label — authoritative for rules created by this plugin.
+ *   2. Common service-selector label values embedded in the PromQL expression
+ *      (`service="X"`, `service_name="X"`, `rpc_service="X"`).
+ *      A rule can reference more than one service (aggregated rollup), so
+ *      this returns the full list.
+ *   3. `service_name` / `service` label on the rule itself.
  */
-export function generateSuggestionsFromServices(input: ServiceDiscoveryInput): Suggestion[] {
-  const out: Suggestion[] = [];
+function extractRuleServices(rule: PromRule): string[] {
+  const labelService =
+    rule.labels?.slo_service ??
+    rule.labels?.service_name ??
+    rule.labels?.service ??
+    rule.labels?.rpc_service;
+  if (labelService) return [labelService];
+
+  // Fallback: regex over the expression.
+  const found = new Set<string>();
+  const patterns = [
+    /\bservice="([^"]+)"/g,
+    /\bservice_name="([^"]+)"/g,
+    /\brpc_service="([^"]+)"/g,
+  ];
+  for (const re of patterns) {
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(rule.query)) !== null) {
+      if (m[1]) found.add(m[1]);
+    }
+  }
+  return [...found];
+}
+
+/**
+ * Attach `existingRuleMatch` to every draft that is already covered by a
+ * recording rule. Mutates the suggestion records in place for simplicity —
+ * the engine owns them at this point.
+ */
+function attachExistingRuleMatches(
+  suggestions: Suggestion[],
+  existingRuleGroups: PromRuleGroup[] | undefined
+): void {
+  if (!existingRuleGroups || existingRuleGroups.length === 0) return;
+  const index = indexExistingRules(existingRuleGroups);
+  if (index.size === 0) return;
+  for (const s of suggestions) {
+    const perKind = index.get(s.input.spec.service);
+    if (!perKind) continue;
+    const match = perKind.get(s.kindId);
+    if (match) s.existingRuleMatch = match;
+  }
+}
+
+// ============================================================================
+// Detectors — APM span-derived
+// ============================================================================
+
+function apmDrafts(input: ServiceDiscoveryInput, out: Suggestion[]): void {
   for (const svc of input.services) {
     if (!svc.serviceName) continue;
     const service = svc.serviceName;
     const serverSelector = `service="${service}",remoteService="",namespace="span_derived"`;
+    const detected: Record<string, string> = { service };
+    if (svc.environment) detected.environment = svc.environment;
 
     out.push({
       key: `apm-avail:${service}`,
-      kind: 'APM availability',
+      kindId: 'apm-availability',
+      kind: KIND_LABEL['apm-availability'],
       reason: `span-derived request+fault observed for service="${service}". Non-fault ratio ≥ 99% is a sensible starting point.`,
       sourceMetric: 'request',
-      detected: svc.environment ? { service, environment: svc.environment } : { service },
+      detected,
       estimatedRuleCount: estimatedRules(1),
       input: {
         spec: buildSpec({
@@ -674,10 +422,11 @@ export function generateSuggestionsFromServices(input: ServiceDiscoveryInput): S
 
     out.push({
       key: `apm-lat:${service}`,
-      kind: 'APM latency',
+      kindId: 'apm-latency',
+      kind: KIND_LABEL['apm-latency'],
       reason: `Draft targets ≥ 95% of requests under 500 ms for service="${service}" using span-derived latency_seconds_bucket.`,
       sourceMetric: 'latency_seconds_bucket',
-      detected: svc.environment ? { service, environment: svc.environment } : { service },
+      detected,
       estimatedRuleCount: estimatedRules(1),
       input: {
         spec: buildSpec({
@@ -701,69 +450,427 @@ export function generateSuggestionsFromServices(input: ServiceDiscoveryInput): S
       },
     });
   }
+}
+
+// ============================================================================
+// Detectors — OTel semconv (per-service rollup)
+// ============================================================================
+
+/**
+ * Map a service name to the label selector that scopes OTel metrics to that
+ * service. Prefers `service_name` when its value matches, then falls back to
+ * the `job` label (Prometheus scrape label) trimmed via `jobToServiceName`.
+ * Returns null if we can't find any match for the service in the metric's
+ * label values — the detector skips the draft.
+ */
+function resolveOtelServiceSelector(
+  service: string,
+  values: MetricLabelValues | undefined
+): { selector: string; dimension: { name: string; value: string } } | null {
+  if (!values) return null;
+  if (values.service_name?.includes(service)) {
+    return {
+      selector: `service_name="${service}"`,
+      dimension: { name: 'service_name', value: service },
+    };
+  }
+  // Fallback: pick the first job whose trimmed form matches the service.
+  const matchingJob = values.job?.find((j) => jobToServiceName(j) === service);
+  if (matchingJob) {
+    return {
+      selector: `job="${matchingJob}"`,
+      dimension: { name: 'job', value: matchingJob },
+    };
+  }
+  return null;
+}
+
+function httpDrafts(input: ServiceDiscoveryInput, out: Suggestion[]): void {
+  const names = input.metricNames ?? [];
+  const labels = input.labelValuesByMetric ?? {};
+  const countMetric = 'http_server_request_duration_seconds_count';
+  const bucketMetric = 'http_server_request_duration_seconds_bucket';
+  const hasCount = names.includes(countMetric);
+  const hasBucket = names.includes(bucketMetric);
+  if (!hasCount && !hasBucket) return;
+
+  for (const svc of input.services) {
+    if (!svc.serviceName) continue;
+    const service = svc.serviceName;
+    const resolved =
+      resolveOtelServiceSelector(service, labels[countMetric]) ??
+      resolveOtelServiceSelector(service, labels[bucketMetric]);
+    if (!resolved) continue;
+
+    if (hasCount) {
+      out.push({
+        key: `http-avail:${service}`,
+        kindId: 'http-availability',
+        kind: KIND_LABEL['http-availability'],
+        reason: `OTel ${countMetric} observed for ${resolved.dimension.name}="${resolved.dimension.value}"; non-5xx responses ≥ 99% is a common default.`,
+        sourceMetric: countMetric,
+        detected: { [resolved.dimension.name]: resolved.dimension.value },
+        estimatedRuleCount: estimatedRules(1),
+        input: {
+          spec: buildSpec({
+            datasourceId: input.datasourceId,
+            name: `${service} — HTTP availability`,
+            description: `Auto-suggested from ${countMetric} for ${resolved.dimension.name}="${resolved.dimension.value}".`,
+            service,
+            sliDefinition: {
+              backend: 'prometheus',
+              type: 'availability',
+              calcMethod: 'events',
+              metric: countMetric,
+              goodEventsFilter: 'http_response_status_code!~"5.."',
+            },
+            dimensions: [resolved.dimension],
+            objective: { name: `availability-99-${slug(service)}`, target: 0.99 },
+          }),
+        },
+      });
+    }
+
+    if (hasBucket) {
+      out.push({
+        key: `http-lat:${service}`,
+        kindId: 'http-latency',
+        kind: KIND_LABEL['http-latency'],
+        reason: `OTel ${bucketMetric} present; 95% of HTTP requests under 500 ms is a sensible default.`,
+        sourceMetric: bucketMetric,
+        detected: { [resolved.dimension.name]: resolved.dimension.value },
+        estimatedRuleCount: estimatedRules(1),
+        input: {
+          spec: buildSpec({
+            datasourceId: input.datasourceId,
+            name: `${service} — HTTP latency p95 < 500 ms`,
+            description: `Auto-suggested from ${bucketMetric} for ${resolved.dimension.name}="${resolved.dimension.value}".`,
+            service,
+            sliDefinition: {
+              backend: 'prometheus',
+              type: 'latency_threshold',
+              calcMethod: 'events',
+              metric: bucketMetric,
+              latencyThresholdUnit: 'seconds',
+            },
+            dimensions: [resolved.dimension],
+            objective: {
+              name: `p95-under-500ms-${slug(service)}`,
+              target: 0.95,
+              latencyThreshold: 0.5,
+            },
+          }),
+        },
+      });
+    }
+  }
+}
+
+function rpcDrafts(input: ServiceDiscoveryInput, out: Suggestion[]): void {
+  const names = input.metricNames ?? [];
+  const labels = input.labelValuesByMetric ?? {};
+  const countMetric = 'rpc_server_duration_seconds_count';
+  const bucketMetric = 'rpc_server_duration_seconds_bucket';
+  const hasCount = names.includes(countMetric);
+  const hasBucket = names.includes(bucketMetric);
+  if (!hasCount && !hasBucket) return;
+
+  // RPC scopes by `rpc_service` — but that's a *semantic* label on RPC calls,
+  // not the Prom scrape job. We try to match by rpc_service first; if a
+  // service is named the same in both the APM service list and the
+  // rpc_service label set, it's the same thing.
+  const rpcServices = new Set<string>([
+    ...(labels[countMetric]?.rpc_service ?? []),
+    ...(labels[bucketMetric]?.rpc_service ?? []),
+  ]);
+  if (rpcServices.size === 0) return;
+
+  for (const svc of input.services) {
+    if (!svc.serviceName) continue;
+    const service = svc.serviceName;
+    if (!rpcServices.has(service)) continue;
+    const dimension = { name: 'rpc_service', value: service };
+
+    if (hasCount) {
+      out.push({
+        key: `rpc-avail:${service}`,
+        kindId: 'rpc-availability',
+        kind: KIND_LABEL['rpc-availability'],
+        reason: `OTel ${countMetric} observed for rpc_service="${service}"; non-error (gRPC 0 = OK) ≥ 99% is a common default.`,
+        sourceMetric: countMetric,
+        detected: { rpc_service: service },
+        estimatedRuleCount: estimatedRules(1),
+        input: {
+          spec: buildSpec({
+            datasourceId: input.datasourceId,
+            name: `${service} — RPC availability`,
+            description: `Auto-suggested from ${countMetric} for rpc_service="${service}".`,
+            service,
+            sliDefinition: {
+              backend: 'prometheus',
+              type: 'availability',
+              calcMethod: 'events',
+              metric: countMetric,
+              goodEventsFilter: 'rpc_grpc_status_code="0"',
+            },
+            dimensions: [dimension],
+            objective: { name: `availability-99-${slug(service)}`, target: 0.99 },
+          }),
+        },
+      });
+    }
+
+    if (hasBucket) {
+      out.push({
+        key: `rpc-lat:${service}`,
+        kindId: 'rpc-latency',
+        kind: KIND_LABEL['rpc-latency'],
+        reason: `OTel ${bucketMetric} present; 95% of RPC calls under 500 ms is a sensible default.`,
+        sourceMetric: bucketMetric,
+        detected: { rpc_service: service },
+        estimatedRuleCount: estimatedRules(1),
+        input: {
+          spec: buildSpec({
+            datasourceId: input.datasourceId,
+            name: `${service} — RPC latency p95 < 500 ms`,
+            description: `Auto-suggested from ${bucketMetric} for rpc_service="${service}".`,
+            service,
+            sliDefinition: {
+              backend: 'prometheus',
+              type: 'latency_threshold',
+              calcMethod: 'events',
+              metric: bucketMetric,
+              latencyThresholdUnit: 'seconds',
+            },
+            dimensions: [dimension],
+            objective: {
+              name: `p95-under-500ms-${slug(service)}`,
+              target: 0.95,
+              latencyThreshold: 0.5,
+            },
+          }),
+        },
+      });
+    }
+  }
+}
+
+function dbDrafts(input: ServiceDiscoveryInput, out: Suggestion[]): void {
+  const names = input.metricNames ?? [];
+  const labels = input.labelValuesByMetric ?? {};
+  const bucketMetric = 'db_client_operation_duration_seconds_bucket';
+  if (!names.includes(bucketMetric)) return;
+
+  for (const svc of input.services) {
+    if (!svc.serviceName) continue;
+    const service = svc.serviceName;
+    const resolved = resolveOtelServiceSelector(service, labels[bucketMetric]);
+    if (!resolved) continue;
+
+    out.push({
+      key: `db-lat:${service}`,
+      kindId: 'db-latency',
+      kind: KIND_LABEL['db-latency'],
+      reason: `OTel ${bucketMetric} present for ${resolved.dimension.name}="${resolved.dimension.value}"; 95% of DB calls under 100 ms is a sensible default.`,
+      sourceMetric: bucketMetric,
+      detected: { [resolved.dimension.name]: resolved.dimension.value },
+      estimatedRuleCount: estimatedRules(1),
+      input: {
+        spec: buildSpec({
+          datasourceId: input.datasourceId,
+          name: `${service} — DB client latency p95 < 100 ms`,
+          description: `Auto-suggested from ${bucketMetric} for ${service}.`,
+          service,
+          sliDefinition: {
+            backend: 'prometheus',
+            type: 'latency_threshold',
+            calcMethod: 'events',
+            metric: bucketMetric,
+            latencyThresholdUnit: 'seconds',
+          },
+          dimensions: [resolved.dimension],
+          objective: {
+            name: `p95-under-100ms-${slug(service)}`,
+            target: 0.95,
+            latencyThreshold: 0.1,
+          },
+        }),
+      },
+    });
+  }
+}
+
+function messagingDrafts(input: ServiceDiscoveryInput, out: Suggestion[]): void {
+  const names = input.metricNames ?? [];
+  const labels = input.labelValuesByMetric ?? {};
+  const bucketMetric = 'messaging_process_duration_seconds_bucket';
+  if (!names.includes(bucketMetric)) return;
+
+  for (const svc of input.services) {
+    if (!svc.serviceName) continue;
+    const service = svc.serviceName;
+    const resolved = resolveOtelServiceSelector(service, labels[bucketMetric]);
+    if (!resolved) continue;
+
+    out.push({
+      key: `msg-lat:${service}`,
+      kindId: 'messaging-latency',
+      kind: KIND_LABEL['messaging-latency'],
+      reason: `OTel ${bucketMetric} present for ${resolved.dimension.name}="${resolved.dimension.value}"; 95% of messages processed under 1 s is a sensible default.`,
+      sourceMetric: bucketMetric,
+      detected: { [resolved.dimension.name]: resolved.dimension.value },
+      estimatedRuleCount: estimatedRules(1),
+      input: {
+        spec: buildSpec({
+          datasourceId: input.datasourceId,
+          name: `${service} — messaging latency p95 < 1 s`,
+          description: `Auto-suggested from ${bucketMetric} for ${service}.`,
+          service,
+          sliDefinition: {
+            backend: 'prometheus',
+            type: 'latency_threshold',
+            calcMethod: 'events',
+            metric: bucketMetric,
+            latencyThresholdUnit: 'seconds',
+          },
+          dimensions: [resolved.dimension],
+          objective: {
+            name: `p95-under-1s-${slug(service)}`,
+            target: 0.95,
+            latencyThreshold: 1,
+          },
+        }),
+      },
+    });
+  }
+}
+
+function genAiDrafts(input: ServiceDiscoveryInput, out: Suggestion[]): void {
+  const names = input.metricNames ?? [];
+  const labels = input.labelValuesByMetric ?? {};
+  const countMetric = 'gen_ai_client_operation_duration_seconds_count';
+  if (!names.includes(countMetric)) return;
+
+  for (const svc of input.services) {
+    if (!svc.serviceName) continue;
+    const service = svc.serviceName;
+    const resolved = resolveOtelServiceSelector(service, labels[countMetric]);
+    if (!resolved) continue;
+
+    out.push({
+      key: `genai-avail:${service}`,
+      kindId: 'genai-availability',
+      kind: KIND_LABEL['genai-availability'],
+      reason: `OTel ${countMetric} observed for ${resolved.dimension.name}="${resolved.dimension.value}". error_type="" is the convention for successful GenAI operations.`,
+      sourceMetric: countMetric,
+      detected: { [resolved.dimension.name]: resolved.dimension.value },
+      estimatedRuleCount: estimatedRules(1),
+      input: {
+        spec: buildSpec({
+          datasourceId: input.datasourceId,
+          name: `${service} — GenAI invocation availability`,
+          description: `Auto-suggested from ${countMetric}.`,
+          service,
+          sliDefinition: {
+            backend: 'prometheus',
+            type: 'availability',
+            calcMethod: 'events',
+            metric: countMetric,
+            goodEventsFilter: 'error_type=""',
+          },
+          dimensions: [resolved.dimension],
+          objective: { name: `availability-99-${slug(service)}`, target: 0.99 },
+        }),
+      },
+    });
+  }
+}
+
+// ============================================================================
+// Entry point
+// ============================================================================
+
+/**
+ * Produce SLO drafts for each discovered APM service. APM detectors always
+ * fire; OTel detectors fire only when their metric family is present in
+ * `metricNames`. A single service may yield both APM and OTel drafts — they
+ * target different underlying data and are not deduped.
+ *
+ * When `existingRuleGroups` is supplied, drafts whose (service, kind) is
+ * already covered by a recording rule are returned with `existingRuleMatch`
+ * set so the UI can de-select them by default.
+ */
+export function generateSuggestionsForServices(input: ServiceDiscoveryInput): Suggestion[] {
+  const out: Suggestion[] = [];
+  apmDrafts(input, out);
+  httpDrafts(input, out);
+  rpcDrafts(input, out);
+  dbDrafts(input, out);
+  messagingDrafts(input, out);
+  genAiDrafts(input, out);
+  attachExistingRuleMatches(out, input.existingRuleGroups);
   return out;
 }
 
-/** The metrics this engine needs label-values for, given a metric-name list. */
-export function metricsToProbe(
-  metricNames: string[]
-): Array<{
-  metric: string;
-  labels: string[];
-}> {
-  const have = (m: string) => metricNames.includes(m);
-  const probes: Array<{ metric: string; labels: string[] }> = [];
+/**
+ * Back-compat alias. Existing callers pass only `{ datasourceId, services }`
+ * — equivalent to calling `generateSuggestionsForServices` with no metric
+ * metadata, which disables the OTel detectors.
+ */
+export function generateSuggestionsFromServices(
+  input: Pick<ServiceDiscoveryInput, 'datasourceId' | 'services'>
+): Suggestion[] {
+  return generateSuggestionsForServices(input);
+}
 
-  // APM span-derived — discovery via the `request` gauge label set.
-  if (have('request')) {
-    probes.push({ metric: 'request', labels: ['service', 'environment'] });
-  }
-  if (have('latency_seconds_bucket')) {
-    probes.push({ metric: 'latency_seconds_bucket', labels: ['service'] });
-  }
-  // OTel HTTP server (v1.23+).
-  if (have('http_server_request_duration_seconds_bucket')) {
-    probes.push({
-      metric: 'http_server_request_duration_seconds_bucket',
-      labels: ['job', 'http_route'],
-    });
-  } else if (have('http_server_request_duration_seconds_count')) {
+/**
+ * The metrics + labels the engine needs label-values for, given the metric
+ * name universe. The page uses this to decide which
+ * `/metadata/label-values/{label}?selector=<metric>` calls to issue.
+ */
+export function metricsToProbe(metricNames: string[]): Array<{ metric: string; labels: string[] }> {
+  const has = (m: string) => metricNames.includes(m);
+  const probes: Array<{ metric: string; labels: string[] }> = [];
+  if (has('http_server_request_duration_seconds_count')) {
     probes.push({
       metric: 'http_server_request_duration_seconds_count',
-      labels: ['job', 'http_route'],
+      labels: ['service_name', 'job'],
     });
   }
-  // OTel RPC.
-  if (have('rpc_server_duration_seconds_bucket')) {
+  if (has('http_server_request_duration_seconds_bucket')) {
     probes.push({
-      metric: 'rpc_server_duration_seconds_bucket',
-      labels: ['rpc_service', 'rpc_method'],
+      metric: 'http_server_request_duration_seconds_bucket',
+      labels: ['service_name', 'job'],
     });
-  } else if (have('rpc_server_duration_seconds_count')) {
+  }
+  if (has('rpc_server_duration_seconds_count')) {
     probes.push({
       metric: 'rpc_server_duration_seconds_count',
-      labels: ['rpc_service', 'rpc_method'],
+      labels: ['rpc_service'],
     });
   }
-  // OTel DB client.
-  if (have('db_client_operation_duration_seconds_bucket')) {
+  if (has('rpc_server_duration_seconds_bucket')) {
+    probes.push({
+      metric: 'rpc_server_duration_seconds_bucket',
+      labels: ['rpc_service'],
+    });
+  }
+  if (has('db_client_operation_duration_seconds_bucket')) {
     probes.push({
       metric: 'db_client_operation_duration_seconds_bucket',
-      labels: ['service_name', 'job', 'db_system'],
+      labels: ['service_name', 'job'],
     });
   }
-  // OTel messaging.
-  if (have('messaging_process_duration_seconds_bucket')) {
+  if (has('messaging_process_duration_seconds_bucket')) {
     probes.push({
       metric: 'messaging_process_duration_seconds_bucket',
-      labels: ['service_name', 'job', 'messaging_destination_name'],
+      labels: ['service_name', 'job'],
     });
   }
-  // OTel GenAI.
-  if (have('gen_ai_client_operation_duration_seconds_count')) {
+  if (has('gen_ai_client_operation_duration_seconds_count')) {
     probes.push({
       metric: 'gen_ai_client_operation_duration_seconds_count',
-      labels: ['job'],
+      labels: ['service_name', 'job'],
     });
   }
   return probes;

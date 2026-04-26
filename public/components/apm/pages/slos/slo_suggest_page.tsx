@@ -46,8 +46,16 @@ import { useServices } from '../../shared/hooks/use_services';
 import { parseTimeRange, getTimeInSeconds } from '../../shared/utils/time_utils';
 import { PromQLSearchService } from '../../query_services/promql_search_service';
 import type { GeneratedRuleGroup, SloCreateInput } from '../../../../../common/slo/slo_types';
+import type { PromRuleGroup } from '../../../../../common/types/alerting/types';
 import type { SloApiClient } from './slo_api_client';
-import { DiscoveredService, Suggestion, generateSuggestionsFromServices } from './suggest_engine';
+import {
+  DiscoveredService,
+  LabelValuesByMetric,
+  MetricLabelValues,
+  Suggestion,
+  SuggestionKind,
+  generateSuggestionsForServices,
+} from './suggest_engine';
 
 export interface SloSuggestPageProps {
   apiClient: SloApiClient;
@@ -64,6 +72,7 @@ export interface SloSuggestPageProps {
 export const SloSuggestPage: React.FC<SloSuggestPageProps> = ({
   apiClient,
   chrome,
+  http,
   notifications,
   parentBreadcrumb,
 }) => {
@@ -105,19 +114,136 @@ export const SloSuggestPage: React.FC<SloSuggestPageProps> = ({
     }
   );
 
+  // Prometheus metric universe + label values. Used to decide which OTel
+  // detectors fire and to scope each OTel draft to the right label selector.
+  // Populated lazily after the APM service list lands.
+  const [metricNames, setMetricNames] = useState<string[]>([]);
+  const [labelValuesByMetric, setLabelValuesByMetric] = useState<LabelValuesByMetric>({});
+  const [existingRuleGroups, setExistingRuleGroups] = useState<PromRuleGroup[]>([]);
+  const [discoveryLoading, setDiscoveryLoading] = useState(false);
+  /** Bumping this triggers the discovery effect; covers the "Rediscover" button. */
+  const [discoveryEpoch, setDiscoveryEpoch] = useState(0);
+
+  useEffect(() => {
+    if (!datasourceId) {
+      setMetricNames([]);
+      setLabelValuesByMetric({});
+      setExistingRuleGroups([]);
+      return;
+    }
+    let cancelled = false;
+    setDiscoveryLoading(true);
+    (async () => {
+      try {
+        // Probe each OTel metric family directly via
+        // `/metadata/label-values/<label>?selector={__name__="<metric>"}`.
+        // We intentionally skip `/metadata/metrics` and the label/__name__
+        // fallback: both are truncated server-side at 200 names (alphabetical),
+        // which drops the `http_*`, `rpc_*`, etc. families we need. Probing
+        // the bucket/count metric directly bounds the traffic at ~12 requests
+        // regardless of TSDB size, and label-values is cached (90s TTL)
+        // server-side so follow-up loads are cheap.
+        //
+        // A family "exists" iff *any* of its probes returns a non-empty label
+        // set — that's what the detectors in suggest_engine.ts check too.
+        const OTEL_PROBES: Array<{ metric: string; labels: string[] }> = [
+          { metric: 'http_server_request_duration_seconds_count', labels: ['service_name', 'job'] },
+          {
+            metric: 'http_server_request_duration_seconds_bucket',
+            labels: ['service_name', 'job'],
+          },
+          { metric: 'rpc_server_duration_seconds_count', labels: ['rpc_service'] },
+          { metric: 'rpc_server_duration_seconds_bucket', labels: ['rpc_service'] },
+          {
+            metric: 'db_client_operation_duration_seconds_bucket',
+            labels: ['service_name', 'job'],
+          },
+          {
+            metric: 'messaging_process_duration_seconds_bucket',
+            labels: ['service_name', 'job'],
+          },
+          {
+            metric: 'gen_ai_client_operation_duration_seconds_count',
+            labels: ['service_name', 'job'],
+          },
+        ];
+        const labelPromises = OTEL_PROBES.flatMap((probe) =>
+          probe.labels.map(async (label) => {
+            // Pass `selector` through http.get's `query` option rather than
+            // inline in the URL — OSD's http client URL-encodes every
+            // reserved char in the path segment, including `?`, which would
+            // swallow the selector into the final path component and make
+            // the server return empty values.
+            const url = `/api/alerting/prometheus/${encodeURIComponent(
+              datasourceId
+            )}/metadata/label-values/${encodeURIComponent(label)}`;
+            try {
+              const res = await http.get<{ values: string[] }>(url, {
+                query: { selector: `{__name__="${probe.metric}"}` },
+              });
+              return { metric: probe.metric, label, values: res?.values ?? [] };
+            } catch {
+              return { metric: probe.metric, label, values: [] as string[] };
+            }
+          })
+        );
+        const rulerPromise = http
+          .get<{ data?: { groups?: PromRuleGroup[] } }>(
+            `/api/alerting/prometheus/${encodeURIComponent(datasourceId)}/rules`
+          )
+          .catch(() => ({ data: { groups: [] as PromRuleGroup[] } }));
+
+        const [labelResults, rulerRes] = await Promise.all([
+          Promise.all(labelPromises),
+          rulerPromise,
+        ]);
+        if (cancelled) return;
+
+        // Aggregate per-metric label values. A metric is considered "present"
+        // iff any of its probes returned values — we synthesise the metric
+        // name list from that signal so the detectors' `has(metricName)`
+        // checks continue to work.
+        const labelsByMetric: LabelValuesByMetric = {};
+        const presentMetrics = new Set<string>();
+        for (const { metric, label, values } of labelResults) {
+          const existing: MetricLabelValues = labelsByMetric[metric] ?? {};
+          (existing as Record<string, string[]>)[label] = values;
+          labelsByMetric[metric] = existing;
+          if (values.length > 0) presentMetrics.add(metric);
+        }
+        setMetricNames([...presentMetrics]);
+        setLabelValuesByMetric(labelsByMetric);
+        setExistingRuleGroups(rulerRes?.data?.groups ?? []);
+      } finally {
+        if (!cancelled) setDiscoveryLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [datasourceId, http, discoveryEpoch]);
+
   const suggestions = useMemo<Suggestion[]>(() => {
     if (!datasourceId || !services || services.length === 0) return [];
     const discovered: DiscoveredService[] = services.map((s) => ({
       serviceName: s.serviceName,
       environment: s.environment,
     }));
-    return generateSuggestionsFromServices({ datasourceId, services: discovered });
-  }, [datasourceId, services]);
+    return generateSuggestionsForServices({
+      datasourceId,
+      services: discovered,
+      metricNames,
+      labelValuesByMetric,
+      existingRuleGroups,
+    });
+  }, [datasourceId, services, metricNames, labelValuesByMetric, existingRuleGroups]);
 
-  // Default every suggestion to "selected" when the list changes — user can
-  // uncheck the ones they don't want.
+  // Default every suggestion to "selected" when the list changes — EXCEPT
+  // those already covered by an existing Prometheus rule. Users can re-check
+  // covered drafts explicitly if they want a duplicate, but the common case
+  // is "leave them unchecked so we don't dual-write".
   useEffect(() => {
-    setSelected(new Set(suggestions.map((s) => s.key)));
+    setSelected(new Set(suggestions.filter((s) => !s.existingRuleMatch).map((s) => s.key)));
   }, [suggestions]);
 
   const toggle = useCallback((key: string) => {
@@ -201,11 +327,20 @@ export const SloSuggestPage: React.FC<SloSuggestPageProps> = ({
   const totalRules = decoratedSuggestions
     .filter((s) => selected.has(s.key))
     .reduce((acc, s) => acc + s.estimatedRuleCount, 0);
-  const uniqueServices = Array.from(
-    new Set((services ?? []).map((s) => s.serviceName).filter(Boolean))
-  );
+  const coveredCount = decoratedSuggestions.filter((s) => s.existingRuleMatch).length;
+  // The service list comes from APM discovery but an OTel-only service (one
+  // that emits direct metrics without span-derived RED) can still surface a
+  // draft. Union both sources so those services render their own accordion.
+  const serviceNameSet = new Set<string>();
+  for (const s of services ?? []) {
+    if (s.serviceName) serviceNameSet.add(s.serviceName);
+  }
+  for (const s of decoratedSuggestions) {
+    if (s.input.spec.service) serviceNameSet.add(s.input.spec.service);
+  }
+  const uniqueServices = Array.from(serviceNameSet);
 
-  const loading = configLoading || servicesLoading;
+  const loading = configLoading || servicesLoading || discoveryLoading;
 
   const headerActions = [
     <EuiButtonEmpty key="back" iconType="arrowLeft" href="#/slos" size="s">
@@ -215,7 +350,10 @@ export const SloSuggestPage: React.FC<SloSuggestPageProps> = ({
       key="discover"
       size="s"
       iconType="refresh"
-      onClick={refetch}
+      onClick={() => {
+        refetch();
+        setDiscoveryEpoch((n) => n + 1);
+      }}
       isLoading={loading}
       data-test-subj="slos-suggest-discover"
     >
@@ -251,8 +389,11 @@ export const SloSuggestPage: React.FC<SloSuggestPageProps> = ({
               <EuiText size="s" color="subdued">
                 Enumerates services emitting OTel traces through Data Prepper — the same list
                 Services Home shows — and drafts an availability and latency SLO for each using
-                span-derived RED metrics. Nothing is created (and no alerts will fire) until you
-                click <strong>Create</strong>.
+                span-derived RED metrics. When OTel direct-metric histograms (HTTP server, RPC, DB
+                client, messaging, GenAI) are present, additional per-service drafts are produced
+                alongside the APM pair. Drafts already covered by an existing Prometheus recording
+                rule are flagged and left unchecked. Nothing is created (and no alerts will fire)
+                until you click <strong>Create</strong>.
               </EuiText>
               {datasourceId && (
                 <>
@@ -323,6 +464,14 @@ export const SloSuggestPage: React.FC<SloSuggestPageProps> = ({
                         selected. Clicking <strong>Create</strong> will provision{' '}
                         <strong>{totalRules}</strong> Prometheus rules in namespace{' '}
                         <EuiCode>slo-generated</EuiCode>.
+                        {coveredCount > 0 && (
+                          <>
+                            {' '}
+                            <strong>{coveredCount}</strong> draft{coveredCount === 1 ? '' : 's'}{' '}
+                            {coveredCount === 1 ? 'is' : 'are'} already covered by an existing
+                            Prometheus rule and left unchecked by default.
+                          </>
+                        )}
                       </EuiText>
                     </EuiFlexItem>
                     <EuiFlexItem grow={false}>
@@ -500,6 +649,18 @@ const SuggestionCard: React.FC<{
             <EuiFlexItem grow={false}>
               <EuiBadge color="hollow">{suggestion.estimatedRuleCount} rules</EuiBadge>
             </EuiFlexItem>
+            {suggestion.existingRuleMatch && (
+              <EuiFlexItem grow={false}>
+                <EuiBadge
+                  color="warning"
+                  iconType="check"
+                  title={`Matching recording rule: ${suggestion.existingRuleMatch.groupName} / ${suggestion.existingRuleMatch.ruleName}`}
+                  data-test-subj={`slos-suggest-covered-${suggestion.key}`}
+                >
+                  covered by existing rule
+                </EuiBadge>
+              </EuiFlexItem>
+            )}
           </EuiFlexGroup>
         </EuiFlexItem>
       </EuiFlexGroup>
@@ -507,6 +668,17 @@ const SuggestionCard: React.FC<{
       <EuiSpacer size="s" />
       <EuiText size="xs" color="subdued">
         {suggestion.reason}
+        {suggestion.existingRuleMatch && (
+          <>
+            {' '}
+            Already covered by <EuiCode>{suggestion.existingRuleMatch.ruleName}</EuiCode> in rule
+            group <EuiCode>{suggestion.existingRuleMatch.groupName}</EuiCode>
+            {suggestion.existingRuleMatch.sloId
+              ? ` (SLO ${suggestion.existingRuleMatch.sloId})`
+              : ''}
+            . Leave unchecked to avoid dual-writing.
+          </>
+        )}
       </EuiText>
       <EuiSpacer size="s" />
       <EuiDescriptionList
@@ -714,8 +886,7 @@ const BatchPreviewSection: React.FC<{
         setLiveByKey((prev) => ({ ...prev, [r.key]: { status: 'skipped' } }));
         return;
       }
-      const service = r.suggestion.input.spec.service;
-      const queries = buildLiveQueries(kind, service, windowChoice);
+      const queries = buildLiveQueries(kind, r.suggestion, windowChoice);
       Promise.all(
         queries.map((q) =>
           promqlService
@@ -1038,45 +1209,197 @@ const PreviewRow: React.FC<{
 // Live-SLI query builders
 //
 // APM span-derived metrics are gauges, so we aggregate with sum_over_time over
-// the selected window before taking the ratio. This matches how the Services
-// Home page computes avg-throughput (see use_services_red_metrics.ts).
+// the selected window before taking the ratio (see use_services_red_metrics.ts
+// for the same pattern). OTel direct-metric families are true counters /
+// cumulative histograms, so those queries use rate() and histogram_quantile()
+// directly — no sum_over_time wrap.
+//
+// Every builder returns [ratio, samples, p99Ms]:
+//   - ratio   : SLI fraction in [0,1]; "vector(0) unless vector(1)" means
+//               "emit nothing", and the UI renders only p99 + samples.
+//   - samples : total observations in the window (used for "no data yet"
+//               gating).
+//   - p99Ms   : observed p99 in milliseconds when meaningful, else a
+//               no-emit expression so the UI shows "—".
 // ============================================================================
 
-type LiveKind = 'apm-availability' | 'apm-latency';
+/**
+ * A deliberately no-op query — Prometheus returns no samples, `extractScalar`
+ * produces `undefined`, and the UI treats the slot as missing. Used when a
+ * builder doesn't have a sensible ratio or p99 to report for the kind.
+ */
+const LIVE_NO_EMIT = 'vector(0) unless vector(1)';
 
-function liveKindFor(s: Suggestion): LiveKind | null {
-  // Key format from suggest_engine: `apm-avail:<service>` / `apm-lat:<service>`.
-  if (s.key.startsWith('apm-avail:')) return 'apm-availability';
-  if (s.key.startsWith('apm-lat:')) return 'apm-latency';
-  return null;
+function liveKindFor(s: Suggestion): SuggestionKind | null {
+  return s.kindId;
 }
 
 function buildLiveQueries(
-  kind: LiveKind,
-  service: string,
+  kind: SuggestionKind,
+  suggestion: Suggestion,
   win: WindowOption
 ): [string, string, string] {
-  const selector = `service="${service}",remoteService="",namespace="span_derived"`;
-  if (kind === 'apm-availability') {
-    const ratio =
-      `(sum(sum_over_time(request{${selector}}[${win}])) - sum(sum_over_time(fault{${selector}}[${win}]))) ` +
-      `/ sum(sum_over_time(request{${selector}}[${win}]))`;
-    const samples = `sum(sum_over_time(request{${selector}}[${win}]))`;
-    const p99 = `histogram_quantile(0.99, sum by (le)(sum_over_time(latency_seconds_bucket{${selector}}[${win}]))) * 1000`;
-    return [ratio, samples, p99];
+  switch (kind) {
+    case 'apm-availability':
+      return buildApmAvailabilityQueries(suggestion.input.spec.service, win);
+    case 'apm-latency':
+      return buildApmLatencyQueries(suggestion.input.spec.service, win);
+    case 'http-availability':
+      return buildHttpAvailabilityQueries(suggestion, win);
+    case 'http-latency':
+      return buildHttpLatencyQueries(suggestion, win);
+    case 'rpc-availability':
+      return buildRpcAvailabilityQueries(suggestion.input.spec.service, win);
+    case 'rpc-latency':
+      return buildRpcLatencyQueries(suggestion.input.spec.service, win);
+    case 'db-latency':
+      return buildDbLatencyQueries(suggestion, win);
+    case 'messaging-latency':
+      return buildMessagingLatencyQueries(suggestion, win);
+    case 'genai-availability':
+      return buildGenAiAvailabilityQueries(suggestion, win);
   }
-  // apm-latency: Data Prepper's span-derived histogram buckets are NOT
-  // cumulative — each `le` series reports observations in the bucket range,
-  // not "≤ le". That makes a raw bucket-based fraction-under-threshold
-  // unreliable, so for the latency preview we surface the observed p99
-  // computed from the histogram (which does the right math) and let the
-  // caller compare it against the template's latency bound. Ratio slot is
-  // emitted as NaN so the UI falls back to the p99-vs-bound display.
+}
+
+// --- APM span-derived (gauges) ---
+
+function buildApmAvailabilityQueries(service: string, win: WindowOption): [string, string, string] {
+  const selector = `service="${service}",remoteService="",namespace="span_derived"`;
+  const ratio =
+    `(sum(sum_over_time(request{${selector}}[${win}])) - sum(sum_over_time(fault{${selector}}[${win}]))) ` +
+    `/ sum(sum_over_time(request{${selector}}[${win}]))`;
+  const samples = `sum(sum_over_time(request{${selector}}[${win}]))`;
+  const p99 = `histogram_quantile(0.99, sum by (le)(sum_over_time(latency_seconds_bucket{${selector}}[${win}]))) * 1000`;
+  return [ratio, samples, p99];
+}
+
+function buildApmLatencyQueries(service: string, win: WindowOption): [string, string, string] {
+  // Data Prepper's span-derived histogram buckets are NOT cumulative — each
+  // `le` series reports observations in the bucket range, not "≤ le". The raw
+  // bucket-based fraction-under-threshold SLI is unreliable here, so we only
+  // emit observed p99; the UI compares it against the template's bound.
+  const selector = `service="${service}",remoteService="",namespace="span_derived"`;
   const p99 = `histogram_quantile(0.99, sum by (le)(sum_over_time(latency_seconds_bucket{${selector}}[${win}]))) * 1000`;
   const samples = `sum(sum_over_time(latency_seconds_count{${selector}}[${win}]))`;
-  // Return an empty ratio query — `extractScalar` will return undefined and
-  // the UI knows to render only p99 + samples for latency rows.
-  return ['vector(0) unless vector(1)', samples, p99];
+  return [LIVE_NO_EMIT, samples, p99];
+}
+
+// --- OTel HTTP server (true counters) ---
+
+/**
+ * Rebuild the OTel service selector from the dimension the engine stamped on
+ * the draft. Returns the raw PromQL fragment, e.g. `service_name="checkout"`
+ * or `job="opentelemetry-demo/checkout"`.
+ */
+function otelDimensionSelector(suggestion: Suggestion): string {
+  const dims =
+    suggestion.input.spec.sli.type === 'single' ? suggestion.input.spec.sli.dimensions : [];
+  const parts = dims.filter((d) => d.value).map((d) => `${d.name}="${d.value}"`);
+  // Fallback: scope to the spec's service field via `service_name`. Better to
+  // over-match than to emit an unscoped aggregate.
+  if (parts.length === 0 && suggestion.input.spec.service) {
+    parts.push(`service_name="${suggestion.input.spec.service}"`);
+  }
+  return parts.join(',');
+}
+
+function buildHttpAvailabilityQueries(
+  suggestion: Suggestion,
+  win: WindowOption
+): [string, string, string] {
+  const metric = 'http_server_request_duration_seconds_count';
+  const bucketMetric = 'http_server_request_duration_seconds_bucket';
+  const selector = otelDimensionSelector(suggestion);
+  const ratio =
+    `sum(rate(${metric}{${selector},http_response_status_code!~"5.."}[${win}])) ` +
+    `/ sum(rate(${metric}{${selector}}[${win}]))`;
+  const samples = `sum(increase(${metric}{${selector}}[${win}]))`;
+  const p99 = `histogram_quantile(0.99, sum by (le)(rate(${bucketMetric}{${selector}}[${win}]))) * 1000`;
+  return [ratio, samples, p99];
+}
+
+function buildHttpLatencyQueries(
+  suggestion: Suggestion,
+  win: WindowOption
+): [string, string, string] {
+  const metric = 'http_server_request_duration_seconds_bucket';
+  const countMetric = 'http_server_request_duration_seconds_count';
+  const selector = otelDimensionSelector(suggestion);
+  const p99 = `histogram_quantile(0.99, sum by (le)(rate(${metric}{${selector}}[${win}]))) * 1000`;
+  const samples = `sum(increase(${countMetric}{${selector}}[${win}]))`;
+  // OTel histograms ARE cumulative so a bucket-ratio is actually sound, but
+  // the UI already handles latency via p99-vs-bound comparison. Keep ratio
+  // no-emit for symmetry with APM latency.
+  return [LIVE_NO_EMIT, samples, p99];
+}
+
+// --- OTel RPC (true counters) ---
+
+function buildRpcAvailabilityQueries(
+  rpcService: string,
+  win: WindowOption
+): [string, string, string] {
+  const metric = 'rpc_server_duration_seconds_count';
+  const bucketMetric = 'rpc_server_duration_seconds_bucket';
+  const selector = `rpc_service="${rpcService}"`;
+  const ratio =
+    `sum(rate(${metric}{${selector},rpc_grpc_status_code="0"}[${win}])) ` +
+    `/ sum(rate(${metric}{${selector}}[${win}]))`;
+  const samples = `sum(increase(${metric}{${selector}}[${win}]))`;
+  const p99 = `histogram_quantile(0.99, sum by (le)(rate(${bucketMetric}{${selector}}[${win}]))) * 1000`;
+  return [ratio, samples, p99];
+}
+
+function buildRpcLatencyQueries(rpcService: string, win: WindowOption): [string, string, string] {
+  const metric = 'rpc_server_duration_seconds_bucket';
+  const countMetric = 'rpc_server_duration_seconds_count';
+  const selector = `rpc_service="${rpcService}"`;
+  const p99 = `histogram_quantile(0.99, sum by (le)(rate(${metric}{${selector}}[${win}]))) * 1000`;
+  const samples = `sum(increase(${countMetric}{${selector}}[${win}]))`;
+  return [LIVE_NO_EMIT, samples, p99];
+}
+
+// --- OTel DB / messaging / GenAI ---
+
+function buildDbLatencyQueries(
+  suggestion: Suggestion,
+  win: WindowOption
+): [string, string, string] {
+  const metric = 'db_client_operation_duration_seconds_bucket';
+  const countMetric = 'db_client_operation_duration_seconds_count';
+  const selector = otelDimensionSelector(suggestion);
+  const p99 = `histogram_quantile(0.99, sum by (le)(rate(${metric}{${selector}}[${win}]))) * 1000`;
+  const samples = `sum(increase(${countMetric}{${selector}}[${win}]))`;
+  return [LIVE_NO_EMIT, samples, p99];
+}
+
+function buildMessagingLatencyQueries(
+  suggestion: Suggestion,
+  win: WindowOption
+): [string, string, string] {
+  const metric = 'messaging_process_duration_seconds_bucket';
+  const countMetric = 'messaging_process_duration_seconds_count';
+  const selector = otelDimensionSelector(suggestion);
+  const p99 = `histogram_quantile(0.99, sum by (le)(rate(${metric}{${selector}}[${win}]))) * 1000`;
+  const samples = `sum(increase(${countMetric}{${selector}}[${win}]))`;
+  return [LIVE_NO_EMIT, samples, p99];
+}
+
+function buildGenAiAvailabilityQueries(
+  suggestion: Suggestion,
+  win: WindowOption
+): [string, string, string] {
+  const metric = 'gen_ai_client_operation_duration_seconds_count';
+  const bucketMetric = 'gen_ai_client_operation_duration_seconds_bucket';
+  const selector = otelDimensionSelector(suggestion);
+  const ratio =
+    `sum(rate(${metric}{${selector},error_type=""}[${win}])) ` +
+    `/ sum(rate(${metric}{${selector}}[${win}]))`;
+  const samples = `sum(increase(${metric}{${selector}}[${win}]))`;
+  // GenAI instrumentation often omits the bucket — emit the query anyway; if
+  // the metric isn't present Cortex returns no samples and the UI shows "—".
+  const p99 = `histogram_quantile(0.99, sum by (le)(rate(${bucketMetric}{${selector}}[${win}]))) * 1000`;
+  return [ratio, samples, p99];
 }
 
 /**
