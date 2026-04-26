@@ -63,29 +63,50 @@ export interface SloWizardPageProps {
 // Template selector
 // ============================================================================
 
+const CATEGORY_TITLES: Record<string, string> = {
+  apm: 'APM service SLOs (span-derived)',
+  otel: 'OTel semconv metrics',
+  custom: 'Custom',
+};
+
+const CATEGORY_ORDER: ReadonlyArray<'apm' | 'otel' | 'custom'> = ['apm', 'otel', 'custom'];
+
 const TemplateSelector: React.FC<{ onPick: (id: string) => void }> = ({ onPick }) => (
   <EuiPanel>
     <EuiText size="m">
       <h4>Pick a template</h4>
     </EuiText>
     <EuiText size="s" color="subdued">
-      Templates pre-fill the SLI shape for common observability patterns. Choose Custom to start
-      from blank PromQL.
+      APM templates build SLIs from the span-derived RED metrics Data Prepper produces for every
+      traced service. OTel templates target direct semconv metrics (HTTP, RPC, DB, messaging,
+      GenAI). Custom starts from blank PromQL.
     </EuiText>
-    <EuiSpacer size="m" />
-    <EuiFlexGrid columns={3}>
-      {SLO_TEMPLATES.map((t) => (
-        <EuiFlexItem key={t.id}>
-          <EuiCard
-            icon={<EuiIcon size="xl" type={t.icon} />}
-            title={t.name}
-            description={t.description}
-            onClick={() => onPick(t.id)}
-            data-test-subj={`slos-template-${t.id}`}
-          />
-        </EuiFlexItem>
-      ))}
-    </EuiFlexGrid>
+    {CATEGORY_ORDER.map((category) => {
+      const templates = SLO_TEMPLATES.filter((t) => t.category === category);
+      if (templates.length === 0) return null;
+      return (
+        <React.Fragment key={category}>
+          <EuiSpacer size="m" />
+          <EuiText size="xs" color="subdued">
+            <strong>{CATEGORY_TITLES[category] ?? category}</strong>
+          </EuiText>
+          <EuiSpacer size="s" />
+          <EuiFlexGrid columns={3}>
+            {templates.map((t) => (
+              <EuiFlexItem key={t.id}>
+                <EuiCard
+                  icon={<EuiIcon size="xl" type={t.icon} />}
+                  title={t.name}
+                  description={t.description}
+                  onClick={() => onPick(t.id)}
+                  data-test-subj={`slos-template-${t.id}`}
+                />
+              </EuiFlexItem>
+            ))}
+          </EuiFlexGrid>
+        </React.Fragment>
+      );
+    })}
   </EuiPanel>
 );
 
@@ -262,6 +283,19 @@ export const SloWizardPage: React.FC<SloWizardPageProps> = ({
               <OwnerPanel state={state} errors={errors} dispatch={dispatch} />
 
               <EuiSpacer size="m" />
+
+              {template.note && (
+                <>
+                  <EuiCallOut
+                    size="s"
+                    color="primary"
+                    iconType="iInCircle"
+                    title={template.note}
+                    data-test-subj="slos-wizard-template-note"
+                  />
+                  <EuiSpacer size="m" />
+                </>
+              )}
 
               <SliPanel state={state} errors={errors} dispatch={dispatch} template={template} />
 
