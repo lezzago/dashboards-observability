@@ -739,8 +739,6 @@ export const SloSuggestPage: React.FC<SloSuggestPageProps> = ({
           confirmButtonText="Create"
           defaultFocusedButton="confirm"
           data-test-subj="slosSuggestConfirmModal"
-          cancelButtonProps={{ 'data-test-subj': 'slosSuggestConfirmCancel' }}
-          confirmButtonProps={{ 'data-test-subj': 'slosSuggestConfirmCreate' }}
         >
           <EuiText size="s">
             <p>
