@@ -51,6 +51,13 @@ import { validateSloSpec } from '../../../../../common/slo/slo_validators';
 import { initialState, reducer } from './wizard_state';
 import type { FormState } from './wizard_state';
 import { buildCreateInput } from './wizard_builders';
+import { WizardNav } from './wizard_nav';
+import { WIZARD_SECTIONS } from './wizard_sections';
+import type { WizardSectionId } from './wizard_sections';
+
+function sectionAnchorId(id: WizardSectionId): string {
+  return WIZARD_SECTIONS.find((s) => s.id === id)!.anchorId;
+}
 
 export interface SloWizardPageProps {
   apiClient: SloApiClient;
@@ -264,113 +271,158 @@ export const SloWizardPage: React.FC<SloWizardPageProps> = ({
     </EuiButton>,
   ];
 
+  const visibleSectionIds: WizardSectionId[] = [
+    'identity',
+    'owner',
+    'sli',
+    ...(template.sli.type === 'custom' ? (['promql'] as WizardSectionId[]) : []),
+    'objectives',
+    'window',
+    'advanced',
+    'exclusions',
+    'labels',
+    'rulesPreview',
+  ];
+
   return (
     <EuiPage data-test-subj="sloWizardPage">
       <EuiPageBody component="main">
         <HeaderControlledComponentsWrapper components={wizardActions} />
         <EuiPageContent color="transparent" hasBorder={false} paddingSize="none">
           <EuiPageContentBody>
-            <EuiForm component="form">
-              <IdentityPanel
-                state={state}
-                errors={errors}
-                dispatch={dispatch}
-                template={template.name}
-              />
+            <EuiFlexGroup gutterSize="l" alignItems="flexStart">
+              <EuiFlexItem grow={false}>
+                <WizardNav errors={errors} visibleSectionIds={visibleSectionIds} />
+              </EuiFlexItem>
+              <EuiFlexItem>
+                <EuiForm component="form">
+                  <div id={sectionAnchorId('identity')}>
+                    <IdentityPanel
+                      state={state}
+                      errors={errors}
+                      dispatch={dispatch}
+                      template={template.name}
+                    />
+                  </div>
 
-              <EuiSpacer size="m" />
-
-              <OwnerPanel state={state} errors={errors} dispatch={dispatch} />
-
-              <EuiSpacer size="m" />
-
-              {template.note && (
-                <>
-                  <EuiCallOut
-                    size="s"
-                    color="primary"
-                    iconType="iInCircle"
-                    title={template.note}
-                    data-test-subj="slosWizardTemplateNote"
-                  />
                   <EuiSpacer size="m" />
-                </>
-              )}
 
-              <SliPanel state={state} errors={errors} dispatch={dispatch} template={template} />
+                  <div id={sectionAnchorId('owner')}>
+                    <OwnerPanel state={state} errors={errors} dispatch={dispatch} />
+                  </div>
 
-              <EuiSpacer size="m" />
-
-              {template.sli.type === 'custom' && (
-                <>
-                  <CustomPromqlEditor
-                    value={state.customPromql}
-                    errors={errors}
-                    dispatch={dispatch}
-                  />
                   <EuiSpacer size="m" />
-                </>
-              )}
 
-              <ObjectivesSection
-                objectives={state.objectives}
-                latencyThresholdUnit={state.latencyThresholdUnit}
-                template={template}
-                errors={errors}
-                dispatch={dispatch}
-              />
+                  {template.note && (
+                    <>
+                      <EuiCallOut
+                        size="s"
+                        color="primary"
+                        iconType="iInCircle"
+                        title={template.note}
+                        data-test-subj="slosWizardTemplateNote"
+                      />
+                      <EuiSpacer size="m" />
+                    </>
+                  )}
 
-              <EuiSpacer size="m" />
+                  <div id={sectionAnchorId('sli')}>
+                    <SliPanel
+                      state={state}
+                      errors={errors}
+                      dispatch={dispatch}
+                      template={template}
+                    />
+                  </div>
 
-              <WindowPanel state={state} warnings={warnings} dispatch={dispatch} />
-
-              <EuiSpacer size="m" />
-
-              <AdvancedSection
-                burnRates={state.burnRates}
-                budgetWarnings={state.budgetWarnings}
-                alarms={state.alarms}
-                errors={errors}
-                dispatch={dispatch}
-              />
-
-              <EuiSpacer size="m" />
-
-              <ExclusionWindowsEditor
-                exclusionWindows={state.exclusionWindows}
-                dispatch={dispatch}
-              />
-
-              <EuiSpacer size="m" />
-
-              <LabelsAnnotationsPanel state={state} errors={errors} dispatch={dispatch} />
-
-              <EuiSpacer size="m" />
-
-              <GeneratedRulesPreview apiClient={apiClient} input={liveInput} />
-
-              {rulerError && (
-                <>
                   <EuiSpacer size="m" />
-                  <EuiCallOut
-                    title={rulerErrorTitle(rulerError)}
-                    color="danger"
-                    iconType="alert"
-                    data-test-subj="slosWizardRulerError"
-                  >
-                    <EuiText size="s">
-                      <p data-test-subj="slosWizardRulerErrorBody">{rulerError.rawBody}</p>
-                      <p>
-                        <small>
-                          Code: <code>{rulerError.code}</code> · upstream HTTP{' '}
-                          {rulerError.httpStatus}
-                        </small>
-                      </p>
-                    </EuiText>
-                  </EuiCallOut>
-                </>
-              )}
-            </EuiForm>
+
+                  {template.sli.type === 'custom' && (
+                    <>
+                      <div id={sectionAnchorId('promql')}>
+                        <CustomPromqlEditor
+                          value={state.customPromql}
+                          errors={errors}
+                          dispatch={dispatch}
+                        />
+                      </div>
+                      <EuiSpacer size="m" />
+                    </>
+                  )}
+
+                  <div id={sectionAnchorId('objectives')}>
+                    <ObjectivesSection
+                      objectives={state.objectives}
+                      latencyThresholdUnit={state.latencyThresholdUnit}
+                      template={template}
+                      errors={errors}
+                      dispatch={dispatch}
+                    />
+                  </div>
+
+                  <EuiSpacer size="m" />
+
+                  <div id={sectionAnchorId('window')}>
+                    <WindowPanel state={state} warnings={warnings} dispatch={dispatch} />
+                  </div>
+
+                  <EuiSpacer size="m" />
+
+                  <div id={sectionAnchorId('advanced')}>
+                    <AdvancedSection
+                      burnRates={state.burnRates}
+                      budgetWarnings={state.budgetWarnings}
+                      alarms={state.alarms}
+                      errors={errors}
+                      dispatch={dispatch}
+                    />
+                  </div>
+
+                  <EuiSpacer size="m" />
+
+                  <div id={sectionAnchorId('exclusions')}>
+                    <ExclusionWindowsEditor
+                      exclusionWindows={state.exclusionWindows}
+                      dispatch={dispatch}
+                    />
+                  </div>
+
+                  <EuiSpacer size="m" />
+
+                  <div id={sectionAnchorId('labels')}>
+                    <LabelsAnnotationsPanel state={state} errors={errors} dispatch={dispatch} />
+                  </div>
+
+                  <EuiSpacer size="m" />
+
+                  <div id={sectionAnchorId('rulesPreview')}>
+                    <GeneratedRulesPreview apiClient={apiClient} input={liveInput} />
+                  </div>
+
+                  {rulerError && (
+                    <>
+                      <EuiSpacer size="m" />
+                      <EuiCallOut
+                        title={rulerErrorTitle(rulerError)}
+                        color="danger"
+                        iconType="alert"
+                        data-test-subj="slosWizardRulerError"
+                      >
+                        <EuiText size="s">
+                          <p data-test-subj="slosWizardRulerErrorBody">{rulerError.rawBody}</p>
+                          <p>
+                            <small>
+                              Code: <code>{rulerError.code}</code> · upstream HTTP{' '}
+                              {rulerError.httpStatus}
+                            </small>
+                          </p>
+                        </EuiText>
+                      </EuiCallOut>
+                    </>
+                  )}
+                </EuiForm>
+              </EuiFlexItem>
+            </EuiFlexGroup>
           </EuiPageContentBody>
         </EuiPageContent>
       </EuiPageBody>
