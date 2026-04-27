@@ -40,6 +40,7 @@ import {
   EuiPageContentBody,
   EuiPanel,
   EuiSpacer,
+  EuiStat,
   EuiText,
   EuiToolTip,
 } from '@elastic/eui';
@@ -452,32 +453,15 @@ export const SloSuggestPage: React.FC<SloSuggestPageProps> = ({
         <HeaderControlledComponentsWrapper components={headerActions} />
         <EuiPageContent color="transparent" hasBorder={false} paddingSize="none">
           <EuiPageContentBody>
-            {/* Intro */}
-            <EuiPanel>
-              <EuiText size="m">
-                <h4>Suggest SLOs from APM services</h4>
-              </EuiText>
-              <EuiSpacer size="s" />
-              <EuiText size="s" color="subdued">
-                Enumerates services emitting OTel traces through Data Prepper — the same list
-                Services Home shows — and drafts an availability and latency SLO for each using
-                span-derived RED metrics. When OTel direct-metric histograms (HTTP server, RPC, DB
-                client, messaging, GenAI) are present, additional per-service drafts are produced
-                alongside the APM pair. Drafts already covered by an existing Prometheus recording
-                rule are flagged and left unchecked. Nothing is created (and no alerts will fire)
-                until you click <strong>Create</strong>.
-              </EuiText>
-              {datasourceId && (
-                <>
-                  <EuiSpacer size="s" />
-                  <EuiText size="xs" color="subdued">
-                    SLOs will be written against Prometheus datasource{' '}
-                    <EuiCode>{datasourceId}</EuiCode>.
-                  </EuiText>
-                </>
-              )}
-            </EuiPanel>
-
+            {/* Intro — one-line summary; the verbose copy belongs in docs. */}
+            <EuiText size="m">
+              <h4>Suggest SLOs from APM services</h4>
+            </EuiText>
+            <EuiSpacer size="xs" />
+            <EuiText size="xs" color="subdued">
+              Drafts availability + latency SLOs per service from span-derived RED metrics, plus
+              OTel semconv add-ons where present.
+            </EuiText>
             <EuiSpacer size="m" />
 
             {servicesError && (
@@ -526,28 +510,39 @@ export const SloSuggestPage: React.FC<SloSuggestPageProps> = ({
 
             {!loading && decoratedSuggestions.length > 0 && (
               <>
-                <EuiPanel color="subdued">
-                  <EuiFlexGroup alignItems="center" responsive={false} gutterSize="m">
-                    <EuiFlexItem grow={true}>
-                      <EuiText size="s">
-                        <strong>{uniqueServices.length}</strong> service
-                        {uniqueServices.length === 1 ? '' : 's'} discovered —{' '}
-                        <strong>{selectedCount}</strong> of {decoratedSuggestions.length} draft SLOs
-                        selected. Clicking <strong>Create</strong> will provision{' '}
-                        <strong>{totalRules}</strong> Prometheus rules in namespace{' '}
-                        <EuiCode>slo-generated</EuiCode>.
-                        {coveredCount > 0 && (
-                          <>
-                            {' '}
-                            <strong>{coveredCount}</strong> draft{coveredCount === 1 ? '' : 's'}{' '}
-                            {coveredCount === 1 ? 'is' : 'are'} already covered by an existing
-                            Prometheus rule and left unchecked by default.
-                          </>
-                        )}
-                      </EuiText>
+                <EuiPanel paddingSize="m" hasBorder data-test-subj="slosSuggestHeaderStrip">
+                  <EuiFlexGroup alignItems="center" responsive={false} gutterSize="l">
+                    <EuiFlexItem grow={false}>
+                      <EuiStat
+                        title={`${selectedCount}`}
+                        description={`of ${decoratedSuggestions.length} SLOs`}
+                        titleSize="m"
+                        reverse
+                        data-test-subj="slosSuggestStatSlos"
+                      />
                     </EuiFlexItem>
                     <EuiFlexItem grow={false}>
-                      <EuiFlexGroup gutterSize="s" responsive={false}>
+                      <EuiStat
+                        title={`${uniqueServices.length}`}
+                        description={`service${uniqueServices.length === 1 ? '' : 's'}`}
+                        titleSize="m"
+                        reverse
+                        data-test-subj="slosSuggestStatServices"
+                      />
+                    </EuiFlexItem>
+                    <EuiFlexItem grow={false}>
+                      <EuiStat
+                        title={`${totalRules}`}
+                        description="rules to provision"
+                        titleSize="m"
+                        titleColor="subdued"
+                        reverse
+                        data-test-subj="slosSuggestStatRules"
+                      />
+                    </EuiFlexItem>
+                    <EuiFlexItem grow={true} />
+                    <EuiFlexItem grow={false}>
+                      <EuiFlexGroup gutterSize="s" responsive={false} alignItems="center">
                         <EuiFlexItem grow={false}>
                           <EuiButtonEmpty
                             size="s"
@@ -578,6 +573,19 @@ export const SloSuggestPage: React.FC<SloSuggestPageProps> = ({
                     </EuiFlexItem>
                   </EuiFlexGroup>
                 </EuiPanel>
+                <EuiSpacer size="xs" />
+                <EuiText size="xs" color="subdued" data-test-subj="slosSuggestHeaderSubline">
+                  {coveredCount > 0 ? (
+                    <>
+                      {coveredCount} draft{coveredCount === 1 ? '' : 's'} already covered by
+                      existing rules · Namespace: <EuiCode>slo-generated</EuiCode>
+                    </>
+                  ) : (
+                    <>
+                      Namespace: <EuiCode>slo-generated</EuiCode>
+                    </>
+                  )}
+                </EuiText>
                 <EuiSpacer size="m" />
 
                 {showPreview && selectedCount > 0 && (
