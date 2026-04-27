@@ -29,6 +29,8 @@ import {
   EuiFieldText,
   EuiFlexGroup,
   EuiFlexItem,
+  EuiIcon,
+  EuiIconTip,
   EuiLoadingSpinner,
   EuiPage,
   EuiPageBody,
@@ -37,6 +39,7 @@ import {
   EuiPanel,
   EuiSpacer,
   EuiText,
+  EuiToolTip,
 } from '@elastic/eui';
 import { useHistory } from 'react-router-dom';
 import { ChromeStart, HttpStart, NotificationsStart } from '../../../../../../../src/core/public';
@@ -45,9 +48,14 @@ import { useApmConfig } from '../../config/apm_config_context';
 import { useServices } from '../../shared/hooks/use_services';
 import { parseTimeRange, getTimeInSeconds } from '../../shared/utils/time_utils';
 import { PromQLSearchService } from '../../query_services/promql_search_service';
-import type { GeneratedRuleGroup, SloCreateInput } from '../../../../../common/slo/slo_types';
+import type {
+  GeneratedRuleGroup,
+  SloCreateInput,
+  SloSummary,
+} from '../../../../../common/slo/slo_types';
 import type { PromRuleGroup } from '../../../../../common/types/alerting/types';
 import type { SloApiClient } from './slo_api_client';
+import { templateIconFor } from './template_icons';
 import {
   DiscoveredService,
   LabelValuesByMetric,
@@ -590,6 +598,219 @@ export const SloSuggestPage: React.FC<SloSuggestPageProps> = ({
         </EuiPageContent>
       </EuiPageBody>
     </EuiPage>
+  );
+};
+
+// ============================================================================
+// Inline suggestion row — a compact, single-line-ish layout used inside the
+// service tree table's expanded-row area. Replaces the wider `SuggestionCard`
+// for that context: checkbox · name · kind · rules · covered badge · inline
+// owner/tier/target/p95 override fields. The long `reason` blurb and
+// rule-match details move into tooltips so the row stays compact on a 19-
+// services × N-drafts page.
+// ============================================================================
+
+interface OverrideValues {
+  ownerTeam?: string;
+  tier?: string;
+  target?: string;
+  latencyThreshold?: string;
+}
+
+type OverridePatch = Partial<{
+  ownerTeam: string;
+  tier: string;
+  target: string;
+  latencyThreshold: string;
+}>;
+
+/** Derive a listing-shaped projection so we can reuse `templateIconFor`. */
+function suggestionIconType(s: Suggestion): string {
+  const sli = s.input.spec.sli;
+  const sliBackend = sli.type === 'single' ? sli.definition.backend : undefined;
+  const sliLeafType =
+    sli.type === 'single' ? (sli.definition as { type?: string }).type ?? undefined : undefined;
+  const projection = {
+    sliNodeType: sli.type === 'single' ? 'single' : 'composite',
+    sliBackend,
+    sliLeafType,
+  } as Partial<SloSummary>;
+  return templateIconFor(projection as SloSummary);
+}
+
+interface SuggestionInlineRowProps {
+  suggestion: Suggestion;
+  selected: boolean;
+  onToggle: () => void;
+  overrides: OverrideValues;
+  onOverrideChange: (patch: OverridePatch) => void;
+  /** Render status — used by the batch-create progress strip. */
+  rowStatus?: 'pending' | 'creating' | 'success' | 'error';
+  rowStatusMessage?: string;
+}
+
+export const SuggestionInlineRow: React.FC<SuggestionInlineRowProps> = ({
+  suggestion,
+  selected,
+  onToggle,
+  overrides,
+  onOverrideChange,
+  rowStatus,
+  rowStatusMessage,
+}) => {
+  const spec = suggestion.input.spec;
+  const objective = spec.objectives[0];
+  const isLatency = objective?.latencyThreshold !== undefined;
+  const unit =
+    spec.sli.type === 'single' &&
+    spec.sli.definition.backend === 'prometheus' &&
+    spec.sli.definition.type === 'latency_threshold'
+      ? spec.sli.definition.latencyThresholdUnit ?? 'seconds'
+      : 'seconds';
+  const isCovered = Boolean(suggestion.existingRuleMatch);
+  const fadedOut = isCovered && !selected;
+  const disableCheckbox = rowStatus === 'creating' || rowStatus === 'success';
+
+  const coveredTooltip = suggestion.existingRuleMatch
+    ? `Matched: ${suggestion.existingRuleMatch.groupName} / ${
+        suggestion.existingRuleMatch.ruleName
+      }${
+        suggestion.existingRuleMatch.sloId ? ` (SLO ${suggestion.existingRuleMatch.sloId})` : ''
+      }. Unchecked to avoid dual-writing.`
+    : '';
+
+  return (
+    <EuiPanel
+      color={selected ? 'primary' : 'plain'}
+      paddingSize="s"
+      hasBorder
+      style={{
+        marginBottom: 8,
+        opacity: fadedOut ? 0.75 : 1,
+      }}
+      data-test-subj={`slosSuggestInlineRow-${suggestion.key}`}
+    >
+      <EuiFlexGroup gutterSize="s" alignItems="center" responsive={false} wrap>
+        <EuiFlexItem grow={false}>
+          {rowStatus === 'creating' ? (
+            <EuiLoadingSpinner
+              size="m"
+              data-test-subj={`slosSuggestRowStatus-${suggestion.key}-creating`}
+            />
+          ) : rowStatus === 'success' ? (
+            <EuiIcon
+              type="check"
+              color="success"
+              data-test-subj={`slosSuggestRowStatus-${suggestion.key}-success`}
+            />
+          ) : rowStatus === 'error' ? (
+            <EuiIconTip
+              type="alert"
+              color="danger"
+              content={rowStatusMessage ?? 'Create failed.'}
+              data-test-subj={`slosSuggestRowStatus-${suggestion.key}-error`}
+            />
+          ) : (
+            <EuiCheckbox
+              id={`slosSuggestSelect-${suggestion.key}`}
+              checked={selected}
+              onChange={onToggle}
+              disabled={disableCheckbox}
+              data-test-subj={`slosSuggestSelect-${suggestion.key}`}
+            />
+          )}
+        </EuiFlexItem>
+        <EuiFlexItem grow={false}>
+          <EuiIcon type={suggestionIconType(suggestion)} color="subdued" />
+        </EuiFlexItem>
+        <EuiFlexItem grow={true}>
+          <EuiFlexGroup gutterSize="xs" alignItems="center" responsive={false} wrap>
+            <EuiFlexItem grow={false}>
+              <EuiToolTip content={suggestion.reason} position="top">
+                <EuiText size="s">
+                  <strong>{spec.name}</strong>
+                </EuiText>
+              </EuiToolTip>
+            </EuiFlexItem>
+            <EuiFlexItem grow={false}>
+              <EuiBadge color="hollow">{suggestion.kind}</EuiBadge>
+            </EuiFlexItem>
+            <EuiFlexItem grow={false}>
+              <EuiBadge color="hollow">{suggestion.estimatedRuleCount} rules</EuiBadge>
+            </EuiFlexItem>
+            {isCovered && (
+              <EuiFlexItem grow={false}>
+                <EuiToolTip content={coveredTooltip} position="top">
+                  <EuiBadge
+                    color="warning"
+                    iconType="check"
+                    data-test-subj={`slosSuggestCovered-${suggestion.key}`}
+                  >
+                    covered by existing rule
+                  </EuiBadge>
+                </EuiToolTip>
+              </EuiFlexItem>
+            )}
+          </EuiFlexGroup>
+        </EuiFlexItem>
+      </EuiFlexGroup>
+
+      <EuiSpacer size="xs" />
+      {/* Inline override strip — same field shapes as the card, just laid out
+          in a single row instead of two. */}
+      <EuiFlexGroup gutterSize="s" responsive={false} wrap>
+        <EuiFlexItem style={{ minWidth: 160 }}>
+          <EuiFieldText
+            compressed
+            prepend="Owner"
+            value={overrides.ownerTeam ?? spec.owner.teams[0] ?? ''}
+            onChange={(e) => onOverrideChange({ ownerTeam: e.target.value })}
+            placeholder="team"
+            aria-label="Owner team"
+          />
+        </EuiFlexItem>
+        <EuiFlexItem style={{ minWidth: 120 }}>
+          <EuiFieldText
+            compressed
+            prepend="Tier"
+            value={overrides.tier ?? spec.tier ?? ''}
+            onChange={(e) => onOverrideChange({ tier: e.target.value })}
+            placeholder="tier-1"
+            aria-label="Tier"
+          />
+        </EuiFlexItem>
+        <EuiFlexItem style={{ minWidth: 120 }}>
+          <EuiFieldNumber
+            compressed
+            prepend="Target"
+            append="%"
+            value={
+              overrides.target ??
+              (objective ? (objective.target * 100).toFixed(2).replace(/\.?0+$/, '') : '99')
+            }
+            onChange={(e) => onOverrideChange({ target: String(Number(e.target.value) / 100) })}
+            min={50}
+            max={99.999}
+            step={0.01}
+            aria-label="Target percentage"
+          />
+        </EuiFlexItem>
+        {isLatency && (
+          <EuiFlexItem style={{ minWidth: 120 }}>
+            <EuiFieldNumber
+              compressed
+              prepend="p95 ≤"
+              append={unit === 'milliseconds' ? 'ms' : 's'}
+              value={overrides.latencyThreshold ?? String(objective.latencyThreshold)}
+              onChange={(e) => onOverrideChange({ latencyThreshold: e.target.value })}
+              min={0}
+              step={unit === 'milliseconds' ? 10 : 0.01}
+              aria-label="Latency threshold"
+            />
+          </EuiFlexItem>
+        )}
+      </EuiFlexGroup>
+    </EuiPanel>
   );
 };
 
