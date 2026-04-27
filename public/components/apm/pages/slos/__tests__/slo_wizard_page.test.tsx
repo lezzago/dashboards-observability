@@ -296,8 +296,8 @@ describe('SloWizardPage — Wave 2 additions', () => {
   });
 
   // #S12 — per-field validator errors on labels/annotations must surface
-  // inline under the offending textarea, not just as a generic toast.
-  it('surfaces a per-label validator error inline on the Labels row', async () => {
+  // inline next to the offending row, not just as a generic toast.
+  it('surfaces a per-label validator error inline on the offending row', async () => {
     const apiClient: Partial<SloApiClient> = {
       preview: jest.fn().mockResolvedValue({
         groupName: 'g',
@@ -309,8 +309,12 @@ describe('SloWizardPage — Wave 2 additions', () => {
     };
     renderWizard(apiClient);
     fillMinimumRequiredFields();
-    fireEvent.change(screen.getByTestId('slosWizardLabels'), {
-      target: { value: 'env=550e8400-e29b-41d4-a716-446655440000' },
+    fireEvent.click(screen.getByTestId('slosWizardLabelAdd'));
+    fireEvent.change(screen.getByTestId('slosWizardLabelKey-0'), {
+      target: { value: 'env' },
+    });
+    fireEvent.change(screen.getByTestId('slosWizardLabelValue-0'), {
+      target: { value: '550e8400-e29b-41d4-a716-446655440000' },
     });
 
     await act(async () => {
@@ -320,13 +324,10 @@ describe('SloWizardPage — Wave 2 additions', () => {
       jest.runOnlyPendingTimers();
     });
 
-    const labelsRow = screen.getByTestId('slosWizardLabelsRow');
+    const row = screen.getByTestId('slosWizardLabelRow-0').closest('.euiFormRow')!;
     await waitFor(() => {
-      expect(labelsRow.textContent).toMatch(/Label values must not be UUIDs/);
+      expect(row.textContent).toMatch(/Label values must not be UUIDs/);
     });
-    // The offending label key is preserved in the message so the user knows
-    // which row in the textarea triggered the rejection.
-    expect(labelsRow.textContent).toMatch(/env:/);
     // The generic submit was gated — apiClient.create must not have fired.
     expect(apiClient.create).not.toHaveBeenCalled();
   });
@@ -343,9 +344,13 @@ describe('SloWizardPage — Wave 2 additions', () => {
     };
     renderWizard(apiClient);
     fillMinimumRequiredFields();
+    fireEvent.click(screen.getByTestId('slosWizardAnnotationAdd'));
+    fireEvent.change(screen.getByTestId('slosWizardAnnotationKey-0'), {
+      target: { value: 'runbook' },
+    });
     // 4 KiB cap — 5 KiB of x's trips the validator.
-    fireEvent.change(screen.getByTestId('slosWizardAnnotations'), {
-      target: { value: `runbook=${'x'.repeat(5120)}` },
+    fireEvent.change(screen.getByTestId('slosWizardAnnotationValue-0'), {
+      target: { value: 'x'.repeat(5120) },
     });
 
     await act(async () => {

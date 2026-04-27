@@ -25,6 +25,7 @@ import {
 import type { SloTemplate } from '../../../../../common/slo/slo_templates';
 import { getBurnRatePreset } from './burn_rate_presets';
 import type { BurnRatePresetId } from './burn_rate_presets';
+import type { KeyValueEntry } from './wizard_key_value_grid';
 
 /** One row in the Objectives section. Strings for form editing; built into
  *  numeric `target` / `latencyThreshold` at submit time (keeps typing UX sane). */
@@ -57,8 +58,8 @@ export interface FormState {
   goodEventsFilter: string;
   latencyThresholdUnit: 'seconds' | 'milliseconds';
   customPromql: CustomPromqlState;
-  labelsRaw: string;
-  annotationsRaw: string;
+  labels: KeyValueEntry[];
+  annotations: KeyValueEntry[];
   shadow: boolean;
 
   // Advanced (W2.5)
@@ -113,7 +114,23 @@ export type Action =
   | { kind: 'setExclusionWindowScheduleType'; index: number; type: 'cron' | 'oneoff' }
   | { kind: 'addExclusionWindow' }
   | { kind: 'removeExclusionWindow'; index: number }
-  | { kind: 'markSubmitAttempted' };
+  | { kind: 'markSubmitAttempted' }
+  | {
+      kind: 'setLabelEntry';
+      index: number;
+      field: 'key' | 'value';
+      value: string;
+    }
+  | { kind: 'addLabelEntry' }
+  | { kind: 'removeLabelEntry'; index: number }
+  | {
+      kind: 'setAnnotationEntry';
+      index: number;
+      field: 'key' | 'value';
+      value: string;
+    }
+  | { kind: 'addAnnotationEntry' }
+  | { kind: 'removeAnnotationEntry'; index: number };
 
 /**
  * Scalar keys of FormState — the subset `setField` is allowed to assign.
@@ -130,8 +147,6 @@ type ScalarField =
   | 'windowDuration'
   | 'goodEventsFilter'
   | 'latencyThresholdUnit'
-  | 'labelsRaw'
-  | 'annotationsRaw'
   | 'shadow';
 
 export type ToggleableAlarm =
@@ -209,8 +224,8 @@ export function initialState(): FormState {
     goodEventsFilter: '',
     latencyThresholdUnit: 'seconds',
     customPromql: { mode: 'events', goodQuery: '', totalQuery: '', errorRatioQuery: '' },
-    labelsRaw: '',
-    annotationsRaw: '',
+    labels: [],
+    annotations: [],
     shadow: false,
     burnRates: defaultBurnRates(),
     budgetWarnings: defaultBudgetWarnings(),
@@ -437,6 +452,30 @@ export function reducer(state: FormState, action: Action): FormState {
     }
     case 'markSubmitAttempted':
       return state.submitAttempted ? state : { ...state, submitAttempted: true };
+    case 'setLabelEntry': {
+      const next = state.labels.slice();
+      next[action.index] = { ...next[action.index], [action.field]: action.value };
+      return { ...state, labels: next };
+    }
+    case 'addLabelEntry':
+      return { ...state, labels: [...state.labels, { key: '', value: '' }] };
+    case 'removeLabelEntry': {
+      const next = state.labels.slice();
+      next.splice(action.index, 1);
+      return { ...state, labels: next };
+    }
+    case 'setAnnotationEntry': {
+      const next = state.annotations.slice();
+      next[action.index] = { ...next[action.index], [action.field]: action.value };
+      return { ...state, annotations: next };
+    }
+    case 'addAnnotationEntry':
+      return { ...state, annotations: [...state.annotations, { key: '', value: '' }] };
+    case 'removeAnnotationEntry': {
+      const next = state.annotations.slice();
+      next.splice(action.index, 1);
+      return { ...state, annotations: next };
+    }
   }
 }
 

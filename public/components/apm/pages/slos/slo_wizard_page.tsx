@@ -55,6 +55,7 @@ import { WizardNav } from './wizard_nav';
 import { WIZARD_SECTIONS } from './wizard_sections';
 import type { WizardSectionId } from './wizard_sections';
 import { WizardValidationSummary } from './wizard_validation_summary';
+import { WizardKeyValueGrid } from './wizard_key_value_grid';
 
 function sectionAnchorId(id: WizardSectionId): string {
   return WIZARD_SECTIONS.find((s) => s.id === id)!.anchorId;
@@ -681,59 +682,70 @@ const LabelsAnnotationsPanel: React.FC<{
   errors: Record<string, string>;
   dispatch: React.Dispatch<import('./wizard_state').Action>;
 }> = ({ state, errors, dispatch }) => {
-  // Per-label errors are keyed as `spec.labels["<name>"]`; per-annotation size
-  // errors land on the scalar `spec.annotations` key. Collect each group so we
-  // can mark the corresponding textarea invalid and render the offending
-  // messages inline (#S12).
-  const labelErrors = Object.entries(errors)
-    .filter(([k]) => k.startsWith('spec.labels'))
-    .map(([k, msg]) => {
-      const match = /^spec\.labels\["(.+)"\]$/.exec(k);
-      return match ? `${match[1]}: ${msg}` : msg;
-    });
-  const annotationError = errors['spec.annotations'];
+  // Per-label validator errors are keyed as `spec.labels["<name>"]`. Walk the
+  // live labels array in order and attach the matching error to the row that
+  // declared the offending key. Untouched rows (empty key) surface no error.
+  const labelRowErrors = state.labels.map((entry) => {
+    if (!entry.key) return undefined;
+    return errors[`spec.labels["${entry.key}"]`];
+  });
+  // Annotation size-cap errors land on the scalar `spec.annotations` key —
+  // there's no per-row addressability. Attach to every row so at least the
+  // user sees the cap violation.
+  const annotationScalarError = errors['spec.annotations'];
+  const annotationRowErrors = state.annotations.map(() => annotationScalarError);
+
   return (
     <EuiPanel>
       <EuiText size="m">
         <h4>Labels &amp; annotations (optional)</h4>
       </EuiText>
       <EuiText size="xs" color="subdued">
-        One per line as <code>key=value</code>. Labels propagate to rules as{' '}
-        <code>slo_label_&lt;key&gt;</code>. Annotations stay on the document.
+        Labels propagate to rules as <code>slo_label_&lt;key&gt;</code>. Annotations stay on the
+        document (e.g., runbook URLs).
       </EuiText>
       <EuiSpacer size="s" />
       <EuiFormRow
         label="Labels"
-        isInvalid={labelErrors.length > 0}
-        error={labelErrors}
+        fullWidth
         data-test-subj="slosWizardLabelsRow"
+        display="rowCompressed"
       >
-        <EuiTextArea
-          rows={3}
-          value={state.labelsRaw}
-          isInvalid={labelErrors.length > 0}
-          onChange={(e) =>
-            dispatch({ kind: 'setField', field: 'labelsRaw', value: e.target.value })
+        <WizardKeyValueGrid
+          entries={state.labels}
+          rowErrors={labelRowErrors}
+          onChange={(index, field, value) =>
+            dispatch({ kind: 'setLabelEntry', index, field, value })
           }
-          data-test-subj="slosWizardLabels"
-          placeholder={'compliance=pci\nregion=us-west-2'}
+          onAdd={() => dispatch({ kind: 'addLabelEntry' })}
+          onRemove={(index) => dispatch({ kind: 'removeLabelEntry', index })}
+          testSubjPrefix="slosWizardLabel"
+          addLabel="Add label"
+          keyPlaceholder="compliance"
+          valuePlaceholder="pci"
         />
       </EuiFormRow>
+      <EuiSpacer size="s" />
       <EuiFormRow
         label="Annotations"
-        isInvalid={!!annotationError}
-        error={annotationError}
+        fullWidth
+        isInvalid={!!annotationScalarError}
+        error={annotationScalarError}
         data-test-subj="slosWizardAnnotationsRow"
+        display="rowCompressed"
       >
-        <EuiTextArea
-          rows={2}
-          value={state.annotationsRaw}
-          isInvalid={!!annotationError}
-          onChange={(e) =>
-            dispatch({ kind: 'setField', field: 'annotationsRaw', value: e.target.value })
+        <WizardKeyValueGrid
+          entries={state.annotations}
+          rowErrors={annotationRowErrors}
+          onChange={(index, field, value) =>
+            dispatch({ kind: 'setAnnotationEntry', index, field, value })
           }
-          data-test-subj="slosWizardAnnotations"
-          placeholder="runbook=https://wiki/slo/..."
+          onAdd={() => dispatch({ kind: 'addAnnotationEntry' })}
+          onRemove={(index) => dispatch({ kind: 'removeAnnotationEntry', index })}
+          testSubjPrefix="slosWizardAnnotation"
+          addLabel="Add annotation"
+          keyPlaceholder="runbook"
+          valuePlaceholder="https://wiki/slo/..."
         />
       </EuiFormRow>
     </EuiPanel>

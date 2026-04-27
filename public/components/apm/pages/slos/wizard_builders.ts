@@ -18,6 +18,7 @@ import type {
 } from '../../../../../common/slo/slo_types';
 import type { SloTemplate } from '../../../../../common/slo/slo_templates';
 import type { FormState } from './wizard_state';
+import type { KeyValueEntry } from './wizard_key_value_grid';
 
 export function parseKeyValueBlock(raw: string): Record<string, string> {
   const out: Record<string, string> = {};
@@ -29,6 +30,22 @@ export function parseKeyValueBlock(raw: string): Record<string, string> {
     const key = trimmed.slice(0, eq).trim();
     const value = trimmed.slice(eq + 1).trim();
     if (key) out[key] = value;
+  }
+  return out;
+}
+
+/**
+ * Flatten a KeyValueEntry[] into the flat Record<string,string> shape the
+ * spec expects. Rows without a key are dropped (the user likely hasn't
+ * finished filling them in); empty values are preserved so the caller can
+ * express "this label key exists but has no value" if needed.
+ */
+export function entriesToRecord(entries: KeyValueEntry[]): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const { key, value } of entries) {
+    const trimmed = key.trim();
+    if (!trimmed) continue;
+    out[trimmed] = value;
   }
   return out;
 }
@@ -116,8 +133,8 @@ export function buildCreateInput(state: FormState, template: SloTemplate): SloCr
       resolved: { enabled: state.alarms.resolved.enabled },
     },
     exclusionWindows: state.exclusionWindows.map((ew) => ({ ...ew, schedule: { ...ew.schedule } })),
-    labels: parseKeyValueBlock(state.labelsRaw),
-    annotations: parseKeyValueBlock(state.annotationsRaw),
+    labels: entriesToRecord(state.labels),
+    annotations: entriesToRecord(state.annotations),
   };
   return { spec };
 }
