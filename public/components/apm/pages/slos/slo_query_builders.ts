@@ -116,6 +116,67 @@ export function buildErrorRatioQuery(slo: SloDocument, objective: Objective): st
   return buildErrorRatioExprForWindow(slo, objective, '5m');
 }
 
+/**
+ * Raw "good events" count over a window. Returned as the PromQL expression
+ * for `sum(increase(<counter>{good_selectors}[window]))`. Used by the detail
+ * page's Events stat to surface good/total alongside the ratio.
+ *
+ * Returns `null` for custom SLIs or when the SLI shape cannot emit a count —
+ * callers render the Events card with em-dashes + "waiting for samples".
+ */
+export function buildGoodEventsCountQuery(
+  slo: SloDocument,
+  objective: Objective,
+  window: string
+): string | null {
+  if (slo.spec.sli.type !== 'single') return null;
+  const def = slo.spec.sli.definition;
+  if (def.backend !== 'prometheus') return null;
+  if (def.type === 'custom') return null;
+
+  const good = buildSelectors(slo, true);
+
+  if (def.type === 'availability') {
+    const metric = def.metric;
+    if (!metric) return null;
+    const counter = metric.endsWith('_total') ? metric : ensureCountMetric(metric);
+    return `sum(increase(${counter}{${good}}[${window}]))`;
+  }
+
+  // latency_threshold: "good" = requests under the latency bucket bound.
+  const bucket = ensureBucketMetric(def.metric ?? '');
+  const dim = buildSelectors(slo, false);
+  const le = formatLeBound(objective.latencyThreshold ?? 0, def.latencyThresholdUnit ?? 'seconds');
+  return `sum(increase(${bucket}{${dim}, le="${le}"}[${window}]))`;
+}
+
+/**
+ * Raw "total events" count over a window. Pairs with
+ * `buildGoodEventsCountQuery` so the UI can show `good / total · ratio%`.
+ */
+export function buildTotalEventsCountQuery(
+  slo: SloDocument,
+  objective: Objective,
+  window: string
+): string | null {
+  if (slo.spec.sli.type !== 'single') return null;
+  const def = slo.spec.sli.definition;
+  if (def.backend !== 'prometheus') return null;
+  if (def.type === 'custom') return null;
+
+  const dim = buildSelectors(slo, false);
+
+  if (def.type === 'availability') {
+    const metric = def.metric;
+    if (!metric) return null;
+    const counter = metric.endsWith('_total') ? metric : ensureCountMetric(metric);
+    return `sum(increase(${counter}{${dim}}[${window}]))`;
+  }
+
+  const bucket = ensureBucketMetric(def.metric ?? '');
+  return `sum(increase(${bucket}{${dim}, le="+Inf"}[${window}]))`;
+}
+
 /** Request rate per second, evaluated with the SLI's dimensions. */
 export function buildRequestRateQuery(slo: SloDocument): string | null {
   if (slo.spec.sli.type !== 'single') return null;
