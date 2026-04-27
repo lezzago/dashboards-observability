@@ -202,6 +202,102 @@ const MODE_LABEL: Record<'active' | 'shadow', string> = {
   shadow: 'Shadow',
 };
 
+/**
+ * Dominant-value summary for a single trait. If ≥95% of rows share one value
+ * we treat it as the workspace default; the majority is suppressed per-row and
+ * surfaced once at the page level.
+ */
+interface TraitMajority {
+  /** The dominant value, if any row has one set. */
+  value: string | null;
+  /** Whether the dominant value covers at least the threshold share. */
+  isDominant: boolean;
+}
+
+const MAJORITY_THRESHOLD = 0.95;
+
+function computeMajority(values: Array<string | null | undefined>): TraitMajority {
+  const counts = new Map<string, number>();
+  let defined = 0;
+  for (const v of values) {
+    if (v === null || v === undefined || v === '') continue;
+    defined++;
+    counts.set(v, (counts.get(v) ?? 0) + 1);
+  }
+  if (defined === 0) return { value: null, isDominant: false };
+  let top: string | null = null;
+  let topN = 0;
+  counts.forEach((n, v) => {
+    if (n > topN) {
+      top = v;
+      topN = n;
+    }
+  });
+  return { value: top, isDominant: top !== null && topN / defined >= MAJORITY_THRESHOLD };
+}
+
+/**
+ * Compact badge row for Tier / Mode / Enabled. When the dataset has a single
+ * dominant value (≥95%) for a trait, we hide that badge on majority rows and
+ * only show it when a row deviates — exceptions visually pop.
+ */
+interface SloTraitsCellProps {
+  row: SloSummary;
+  majorities: {
+    tier: TraitMajority;
+    mode: TraitMajority;
+    enabled: TraitMajority;
+  };
+}
+
+const SloTraitsCell: React.FC<SloTraitsCellProps> = ({ row, majorities }) => {
+  const enabledValue = row.enabled ? 'yes' : 'no';
+  const badges: React.ReactNode[] = [];
+  if (row.tier && !(majorities.tier.isDominant && majorities.tier.value === row.tier)) {
+    badges.push(
+      <EuiBadge key="tier" color="hollow">
+        {row.tier}
+      </EuiBadge>
+    );
+  }
+  if (!(majorities.mode.isDominant && majorities.mode.value === row.mode)) {
+    badges.push(
+      <EuiBadge key="mode" color="hollow">
+        {row.mode}
+      </EuiBadge>
+    );
+  }
+  if (!(majorities.enabled.isDominant && majorities.enabled.value === enabledValue)) {
+    badges.push(
+      <EuiBadge key="enabled" color={row.enabled ? 'hollow' : 'warning'}>
+        {row.enabled ? 'enabled' : 'disabled'}
+      </EuiBadge>
+    );
+  }
+  if (badges.length === 0) {
+    return (
+      <EuiText size="xs" color="subdued" data-test-subj={`slosTraitsCell-${row.id}`}>
+        —
+      </EuiText>
+    );
+  }
+  return (
+    <EuiFlexGroup
+      gutterSize="xs"
+      alignItems="center"
+      responsive={false}
+      wrap
+      data-test-subj={`slosTraitsCell-${row.id}`}
+    >
+      {badges.map((b, i) => (
+        <EuiFlexItem grow={false} key={i}>
+          {b}
+        </EuiFlexItem>
+      ))}
+    </EuiFlexGroup>
+  );
+};
+
 // Module-level memoized table panel. EuiResizableContainer re-runs its render
 // prop on every mousemove; memoizing keeps pagination and sort stable. Project
 // memory references the same pattern from services_home.tsx.
@@ -212,6 +308,7 @@ interface SlosTablePanelProps {
   resultCount: number;
   filteredToZero: boolean;
   onClearAllFilters: () => void;
+  defaultsLine: string | null;
 }
 
 const SlosTablePanelUI: React.FC<SlosTablePanelProps> = ({
@@ -221,6 +318,7 @@ const SlosTablePanelUI: React.FC<SlosTablePanelProps> = ({
   resultCount,
   filteredToZero,
   onClearAllFilters,
+  defaultsLine,
 }) => {
   if (filteredToZero) {
     return (
@@ -245,6 +343,11 @@ const SlosTablePanelUI: React.FC<SlosTablePanelProps> = ({
           <EuiText size="m">
             <h4>SLO catalog</h4>
           </EuiText>
+          {defaultsLine ? (
+            <EuiText size="xs" color="subdued" data-test-subj="slosListingDefaults">
+              {defaultsLine}
+            </EuiText>
+          ) : null}
         </EuiFlexItem>
         <EuiFlexItem grow={false}>
           <EuiText size="s" color="subdued" data-test-subj="slosListingResultCount">
@@ -350,6 +453,31 @@ export const SloListingPage: React.FC<SloListingPageProps> = ({
     load();
   }, [load]);
 
+  // Majority-value analysis for the three low-cardinality traits. Computed once
+  // per render over the current items; badges for the dominant value are then
+  // suppressed per-row and surfaced as a single page-level "Defaults —" line.
+  const traitMajorities = useMemo(() => {
+    return {
+      tier: computeMajority(items.map((s) => s.tier ?? null)),
+      mode: computeMajority(items.map((s) => s.mode)),
+      enabled: computeMajority(items.map((s) => (s.enabled ? 'yes' : 'no'))),
+    };
+  }, [items]);
+
+  const defaultsLine = useMemo(() => {
+    const parts: string[] = [];
+    if (traitMajorities.tier.isDominant && traitMajorities.tier.value) {
+      parts.push(`tier: ${traitMajorities.tier.value}`);
+    }
+    if (traitMajorities.mode.isDominant && traitMajorities.mode.value) {
+      parts.push(`mode: ${traitMajorities.mode.value}`);
+    }
+    if (traitMajorities.enabled.isDominant && traitMajorities.enabled.value) {
+      parts.push(`enabled: ${traitMajorities.enabled.value}`);
+    }
+    return parts.length > 0 ? `Defaults — ${parts.join(' · ')}` : null;
+  }, [traitMajorities]);
+
   // EuiBasicTable render signature:
   //   - with `field`:    render(value, row)
   //   - without `field`: render(row)
@@ -380,12 +508,6 @@ export const SloListingPage: React.FC<SloListingPageProps> = ({
         ),
       },
       {
-        name: 'Tier',
-        align: 'center',
-        width: '8%',
-        render: (row: SloSummary) => <EuiText size="s">{row.tier ?? '—'}</EuiText>,
-      },
-      {
         name: 'Objectives',
         render: (row: SloSummary) => (
           <EuiText size="s">
@@ -394,16 +516,9 @@ export const SloListingPage: React.FC<SloListingPageProps> = ({
         ),
       },
       {
-        name: 'Mode',
-        align: 'center',
-        width: '8%',
-        render: (row: SloSummary) => <EuiText size="s">{row.mode}</EuiText>,
-      },
-      {
-        name: 'Enabled',
-        align: 'center',
-        width: '8%',
-        render: (row: SloSummary) => <EuiText size="s">{row.enabled ? 'Yes' : 'No'}</EuiText>,
+        name: 'Traits',
+        width: '140px',
+        render: (row: SloSummary) => <SloTraitsCell row={row} majorities={traitMajorities} />,
       },
       {
         name: 'Health',
@@ -411,7 +526,7 @@ export const SloListingPage: React.FC<SloListingPageProps> = ({
         render: (row: SloSummary) => <SloHealthCell row={row} />,
       },
     ],
-    []
+    [traitMajorities]
   );
 
   const hasAnyFilter = useMemo(
@@ -684,6 +799,7 @@ export const SloListingPage: React.FC<SloListingPageProps> = ({
                         resultCount={items.length}
                         filteredToZero={filteredToZero}
                         onClearAllFilters={clearAllFilters}
+                        defaultsLine={defaultsLine}
                       />
                     </EuiResizablePanel>
                   </>
