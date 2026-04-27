@@ -21,15 +21,19 @@ import {
   EuiBadge,
   EuiCallOut,
   EuiCodeBlock,
+  EuiEmptyPrompt,
   EuiFlexGroup,
   EuiFlexItem,
+  EuiLink,
   EuiLoadingSpinner,
   EuiPanel,
   EuiSpacer,
   EuiText,
 } from '@elastic/eui';
 import type { GeneratedRuleGroup, SloCreateInput } from '../../../../../common/slo/slo_types';
+import { SLO_RULER_NAMESPACE } from '../../../../../common/slo/slo_promql_generator';
 import type { SloApiClient } from './slo_api_client';
+import { findSectionForKey, scrollToErrorKey } from './wizard_sections';
 
 export const PREVIEW_DEBOUNCE_MS = 500;
 
@@ -40,6 +44,12 @@ export interface GeneratedRulesPreviewProps {
    * preview (e.g. no template selected); the component will render a hint.
    */
   input: SloCreateInput | null;
+  /**
+   * Live client-side validation errors keyed by validator path. When set,
+   * the empty-state prompt lists the missing fields as clickable links that
+   * scroll the user to the right section.
+   */
+  errors?: Record<string, string>;
 }
 
 interface PreviewState {
@@ -53,6 +63,7 @@ const INITIAL: PreviewState = { status: 'idle' };
 export const GeneratedRulesPreview: React.FC<GeneratedRulesPreviewProps> = ({
   apiClient,
   input,
+  errors,
 }) => {
   // Debounce on the serialized input so equivalent objects don't retrigger
   // fetches (stable JSON → stable effect dep). Unlike useDebouncedValue, we
@@ -103,18 +114,18 @@ export const GeneratedRulesPreview: React.FC<GeneratedRulesPreviewProps> = ({
         The Prometheus rule group that will be deployed when you click Create.
       </EuiText>
       <EuiSpacer size="s" />
-      {renderBody(state)}
+      {renderBody(state, input, errors ?? {})}
     </EuiPanel>
   );
 };
 
-function renderBody(state: PreviewState): JSX.Element {
+function renderBody(
+  state: PreviewState,
+  input: SloCreateInput | null,
+  errors: Record<string, string>
+): JSX.Element {
   if (state.status === 'idle') {
-    return (
-      <EuiText size="s" color="subdued" data-test-subj="slosWizardPreviewIdle">
-        Fill in the required fields to see the generated rules.
-      </EuiText>
-    );
+    return renderEmptyPrompt(input, errors);
   }
   if (state.status === 'loading') {
     return (
@@ -131,6 +142,12 @@ function renderBody(state: PreviewState): JSX.Element {
     );
   }
   if (state.status === 'error') {
+    // Server-side validation failures (400-class) route to the same empty-state
+    // prompt so the fix path is consistent with "form isn't valid yet". Genuine
+    // upstream failures (ruler unreachable, 5xx) keep the warning callout.
+    if (isValidationStyleError(state.error)) {
+      return renderEmptyPrompt(input, errors, state.error);
+    }
     return (
       <EuiCallOut
         title="Preview unavailable"
@@ -158,6 +175,11 @@ function renderBody(state: PreviewState): JSX.Element {
           </EuiText>
         </EuiFlexItem>
         <EuiFlexItem grow={false}>
+          <EuiText size="xs" color="subdued" data-test-subj="slosWizardPreviewNamespace">
+            namespace <code>{SLO_RULER_NAMESPACE}</code>
+          </EuiText>
+        </EuiFlexItem>
+        <EuiFlexItem grow={false}>
           <EuiText size="xs" color="subdued">
             eval interval {group.interval}s
           </EuiText>
@@ -181,5 +203,68 @@ function renderBody(state: PreviewState): JSX.Element {
         </EuiCodeBlock>
       </EuiAccordion>
     </div>
+  );
+}
+
+function isValidationStyleError(msg: string | undefined): boolean {
+  if (!msg) return false;
+  return /bad request|400|validation/i.test(msg);
+}
+
+function renderEmptyPrompt(
+  input: SloCreateInput | null,
+  errors: Record<string, string>,
+  serverMessage?: string
+): JSX.Element {
+  const missingEntries = Object.entries(errors);
+  const body =
+    missingEntries.length > 0 ? (
+      <>
+        <EuiText size="s" color="subdued">
+          Missing or invalid fields:
+        </EuiText>
+        <ul data-test-subj="slosWizardPreviewMissingList">
+          {missingEntries.map(([key, msg]) => {
+            const section = findSectionForKey(key);
+            return (
+              <li key={key}>
+                <EuiLink
+                  onClick={() => scrollToErrorKey(key)}
+                  data-test-subj={`slosWizardPreviewMissing-${key}`}
+                >
+                  <strong>{section?.label ?? key}:</strong> {msg}
+                </EuiLink>
+              </li>
+            );
+          })}
+        </ul>
+      </>
+    ) : (
+      <EuiText size="s" color="subdued">
+        {input === null
+          ? 'Pick a template to start building the rule set.'
+          : 'Fill in the required fields to see the generated rules.'}
+      </EuiText>
+    );
+  return (
+    <EuiEmptyPrompt
+      iconType="inspect"
+      titleSize="xs"
+      title={<h4>Preview renders once the form is valid</h4>}
+      body={
+        <>
+          {body}
+          {serverMessage && (
+            <>
+              <EuiSpacer size="s" />
+              <EuiText size="xs" color="subdued" data-test-subj="slosWizardPreviewServerMsg">
+                Server message: {serverMessage}
+              </EuiText>
+            </>
+          )}
+        </>
+      }
+      data-test-subj="slosWizardPreviewEmpty"
+    />
   );
 }

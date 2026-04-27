@@ -83,11 +83,48 @@ describe('GeneratedRulesPreview', () => {
     jest.clearAllTimers();
   });
 
-  it('renders an idle hint when no input is provided', () => {
+  it('renders an empty prompt when no input is provided', () => {
     const preview = jest.fn();
     render(<GeneratedRulesPreview apiClient={{ preview }} input={null} />);
-    expect(screen.getByTestId('slosWizardPreviewIdle')).toBeInTheDocument();
+    expect(screen.getByTestId('slosWizardPreviewEmpty')).toBeInTheDocument();
     expect(preview).not.toHaveBeenCalled();
+  });
+
+  it('lists client-side validator errors as clickable links in the empty prompt', () => {
+    const preview = jest.fn();
+    render(
+      <GeneratedRulesPreview
+        apiClient={{ preview }}
+        input={null}
+        errors={{ 'spec.name': 'SLO name is required' }}
+      />
+    );
+    expect(screen.getByTestId('slosWizardPreviewMissingList')).toBeInTheDocument();
+    expect(screen.getByTestId('slosWizardPreviewMissing-spec.name')).toHaveTextContent(
+      'Identity: SLO name is required'
+    );
+  });
+
+  it('routes Bad Request server errors to the empty prompt (not the warning callout)', async () => {
+    const preview = jest.fn().mockRejectedValue(new Error('Request failed: 400 Bad Request'));
+    render(<GeneratedRulesPreview apiClient={{ preview }} input={makeInput()} />);
+    act(() => {
+      jest.advanceTimersByTime(PREVIEW_DEBOUNCE_MS);
+    });
+    await screen.findByTestId('slosWizardPreviewEmpty');
+    expect(screen.queryByTestId('slosWizardPreviewError')).toBeNull();
+  });
+
+  it('renders the namespace strip on success', async () => {
+    const group = makeGroup();
+    const preview = jest.fn().mockResolvedValue(group);
+    render(<GeneratedRulesPreview apiClient={{ preview }} input={makeInput()} />);
+    act(() => {
+      jest.advanceTimersByTime(PREVIEW_DEBOUNCE_MS);
+    });
+    expect(await screen.findByTestId('slosWizardPreviewNamespace')).toHaveTextContent(
+      'slo-generated'
+    );
   });
 
   it('does not call preview until the debounce elapses', async () => {

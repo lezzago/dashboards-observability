@@ -168,6 +168,13 @@ export const SloWizardPage: React.FC<SloWizardPageProps> = ({
     () => (liveInput ? validateSloSpec(liveInput.spec).warnings : {}),
     [liveInput]
   );
+  // Live errors drive the rule-preview empty-state list — *before* the user
+  // has clicked submit. Distinct from the `errors` state variable which only
+  // populates after submit (and gates the top-level summary).
+  const liveErrors = useMemo<Record<string, string>>(
+    () => (liveInput ? validateSloSpec(liveInput.spec).errors : {}),
+    [liveInput]
+  );
   useEffect(() => {
     setWarnings(liveWarnings);
   }, [liveWarnings]);
@@ -401,7 +408,11 @@ export const SloWizardPage: React.FC<SloWizardPageProps> = ({
                   <EuiSpacer size="m" />
 
                   <div id={sectionAnchorId('rulesPreview')}>
-                    <GeneratedRulesPreview apiClient={apiClient} input={liveInput} />
+                    <GeneratedRulesPreview
+                      apiClient={apiClient}
+                      input={liveInput}
+                      errors={liveErrors}
+                    />
                   </div>
 
                   {rulerError && (
