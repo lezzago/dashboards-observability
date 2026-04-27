@@ -31,6 +31,9 @@ import {
   EuiFieldText,
   EuiFlexGroup,
   EuiFlexItem,
+  EuiFlyout,
+  EuiFlyoutBody,
+  EuiFlyoutHeader,
   EuiIcon,
   EuiIconTip,
   EuiLoadingSpinner,
@@ -41,6 +44,7 @@ import {
   EuiPanel,
   EuiSpacer,
   EuiStat,
+  EuiTitle,
   EuiText,
   EuiToolTip,
 } from '@elastic/eui';
@@ -588,17 +592,6 @@ export const SloSuggestPage: React.FC<SloSuggestPageProps> = ({
                 </EuiText>
                 <EuiSpacer size="m" />
 
-                {showPreview && selectedCount > 0 && (
-                  <>
-                    <BatchPreviewSection
-                      apiClient={apiClient}
-                      selectedSuggestions={decoratedSuggestions.filter((s) => selected.has(s.key))}
-                      prometheusConnectionId={config?.prometheusDataSource?.name}
-                      prometheusConnectionMeta={config?.prometheusDataSource?.meta}
-                    />
-                    <EuiSpacer size="m" />
-                  </>
-                )}
                 <ServiceTreeTable
                   serviceRows={serviceRows}
                   expandedMap={expandedMap}
@@ -614,6 +607,39 @@ export const SloSuggestPage: React.FC<SloSuggestPageProps> = ({
           </EuiPageContentBody>
         </EuiPageContent>
       </EuiPageBody>
+      {/* Persistent right-dock flyout. `type="push"` reflows the page; the
+          flyout is only rendered when the preview toggle is on AND there
+          are selected drafts, so `selectedCount === 0` auto-closes it.
+          Keystrokes in override fields don't flip `showPreview`, so the
+          subtree — and BatchPreviewSection's debounced effect — stays
+          mounted across rapid edits. */}
+      {showPreview && selectedCount > 0 && (
+        <EuiFlyout
+          onClose={() => setShowPreview(false)}
+          ownFocus={false}
+          type="push"
+          size="m"
+          side="right"
+          pushMinBreakpoint="xs"
+          data-test-subj="slosSuggestPreviewFlyout"
+        >
+          <EuiFlyoutHeader hasBorder data-test-subj="slosSuggestPreviewFlyoutHeader">
+            <EuiTitle size="s">
+              <h3>
+                Rule preview · {selectedCount} SLO{selectedCount === 1 ? '' : 's'}
+              </h3>
+            </EuiTitle>
+          </EuiFlyoutHeader>
+          <EuiFlyoutBody>
+            <BatchPreviewSection
+              apiClient={apiClient}
+              selectedSuggestions={decoratedSuggestions.filter((s) => selected.has(s.key))}
+              prometheusConnectionId={config?.prometheusDataSource?.name}
+              prometheusConnectionMeta={config?.prometheusDataSource?.meta}
+            />
+          </EuiFlyoutBody>
+        </EuiFlyout>
+      )}
     </EuiPage>
   );
 };
@@ -1254,61 +1280,53 @@ const BatchPreviewSection: React.FC<{
   }, 0);
 
   return (
-    <EuiPanel data-test-subj="slosSuggestPreview">
-      <EuiFlexGroup alignItems="flexStart" responsive={false} gutterSize="s">
-        <EuiFlexItem grow={true}>
-          <EuiText size="m">
-            <h4>Preview</h4>
-          </EuiText>
-          <EuiText size="s" color="subdued">
-            Rule groups that will be deployed on Create — plus the current SLI evaluated against the
-            APM Prometheus datasource. A red <strong>breaching</strong> badge means the draft would
-            already be firing, making it a good candidate to create and investigate.
+    <div data-test-subj="slosSuggestPreview">
+      <EuiText size="s" color="subdued">
+        Rule groups that will be deployed on Create — plus the current SLI evaluated against the APM
+        Prometheus datasource. A red <strong>breaching</strong> badge means the draft would already
+        be firing, making it a good candidate to create and investigate.
+      </EuiText>
+      <EuiSpacer size="s" />
+      <EuiFlexGroup gutterSize="xs" alignItems="center" responsive={false} wrap>
+        <EuiFlexItem grow={false}>
+          <EuiText size="xs" color="subdued">
+            Evaluate over
           </EuiText>
         </EuiFlexItem>
         <EuiFlexItem grow={false}>
-          <EuiFlexGroup gutterSize="xs" alignItems="center" responsive={false} wrap>
-            <EuiFlexItem grow={false}>
-              <EuiText size="xs" color="subdued">
-                Evaluate over
-              </EuiText>
-            </EuiFlexItem>
-            <EuiFlexItem grow={false}>
-              <EuiButtonGroup
-                legend="SLI evaluation window"
-                idSelected={windowChoice}
-                onChange={(id) => setWindowChoice(id as WindowOption)}
-                options={[...WINDOW_OPTIONS]}
-                buttonSize="compressed"
-                data-test-subj="slosSuggestPreviewWindow"
-              />
-            </EuiFlexItem>
-          </EuiFlexGroup>
-          <EuiSpacer size="xs" />
-          <EuiFlexGroup gutterSize="xs" responsive={false} wrap justifyContent="flexEnd">
-            {loadingCount > 0 && (
-              <EuiFlexItem grow={false}>
-                <EuiBadge color="hollow">{loadingCount} loading</EuiBadge>
-              </EuiFlexItem>
-            )}
-            <EuiFlexItem grow={false}>
-              <EuiBadge color="primary">{successCount} previewed</EuiBadge>
-            </EuiFlexItem>
-            <EuiFlexItem grow={false}>
-              <EuiBadge color="primary">{totalRuleCount} rules total</EuiBadge>
-            </EuiFlexItem>
-            {breachCount > 0 && (
-              <EuiFlexItem grow={false}>
-                <EuiBadge color="danger">{breachCount} breaching</EuiBadge>
-              </EuiFlexItem>
-            )}
-            {errorCount > 0 && (
-              <EuiFlexItem grow={false}>
-                <EuiBadge color="danger">{errorCount} failed</EuiBadge>
-              </EuiFlexItem>
-            )}
-          </EuiFlexGroup>
+          <EuiButtonGroup
+            legend="SLI evaluation window"
+            idSelected={windowChoice}
+            onChange={(id) => setWindowChoice(id as WindowOption)}
+            options={[...WINDOW_OPTIONS]}
+            buttonSize="compressed"
+            data-test-subj="slosSuggestPreviewWindow"
+          />
         </EuiFlexItem>
+      </EuiFlexGroup>
+      <EuiSpacer size="xs" />
+      <EuiFlexGroup gutterSize="xs" responsive={false} wrap>
+        {loadingCount > 0 && (
+          <EuiFlexItem grow={false}>
+            <EuiBadge color="hollow">{loadingCount} loading</EuiBadge>
+          </EuiFlexItem>
+        )}
+        <EuiFlexItem grow={false}>
+          <EuiBadge color="primary">{successCount} previewed</EuiBadge>
+        </EuiFlexItem>
+        <EuiFlexItem grow={false}>
+          <EuiBadge color="primary">{totalRuleCount} rules total</EuiBadge>
+        </EuiFlexItem>
+        {breachCount > 0 && (
+          <EuiFlexItem grow={false}>
+            <EuiBadge color="danger">{breachCount} breaching</EuiBadge>
+          </EuiFlexItem>
+        )}
+        {errorCount > 0 && (
+          <EuiFlexItem grow={false}>
+            <EuiBadge color="danger">{errorCount} failed</EuiBadge>
+          </EuiFlexItem>
+        )}
       </EuiFlexGroup>
       <EuiSpacer size="m" />
       {previews.length === 0 ? (
@@ -1325,7 +1343,7 @@ const BatchPreviewSection: React.FC<{
           />
         ))
       )}
-    </EuiPanel>
+    </div>
   );
 };
 
