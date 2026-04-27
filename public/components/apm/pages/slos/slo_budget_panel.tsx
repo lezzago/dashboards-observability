@@ -35,6 +35,7 @@ import { usePromQLChartData } from '../../shared/hooks/use_promql_chart_data';
 import { TimeRange } from '../../common/types/service_types';
 import type { Objective, SloDocument, SloLiveStatus } from '../../../../../common/slo/slo_types';
 import { buildErrorRatioExprForWindow } from './slo_query_builders';
+import { formatPct } from '../../../../../common/slo/format';
 
 export interface SloBudgetPanelProps {
   slo: SloDocument;
@@ -63,11 +64,6 @@ function parseDurationToMs(duration: string): number {
     default:
       return 0;
   }
-}
-
-function formatPct(value: number, digits = 2): string {
-  if (!Number.isFinite(value)) return '—';
-  return `${(value * 100).toFixed(digits)}%`;
 }
 
 function formatDurationMs(ms: number): string {
@@ -203,10 +199,9 @@ export const SloBudgetPanel: React.FC<SloBudgetPanelProps> = ({
           </EuiText>
           <EuiText size="xs" color="subdued">
             {slo.spec.window.type === 'rolling'
-              ? `Rolling ${slo.spec.window.duration} window — target ${formatPct(target, 3).replace(
-                  /\.?0+%$/,
-                  '%'
-                )}`
+              ? `Rolling ${slo.spec.window.duration} window — target ${formatPct(target, {
+                  decimals: 3,
+                }).replace(/\.?0+%$/, '%')}`
               : `Calendar ${slo.spec.window.period} window`}
           </EuiText>
         </EuiFlexItem>
@@ -226,13 +221,13 @@ export const SloBudgetPanel: React.FC<SloBudgetPanelProps> = ({
             }
             title={
               <span style={{ color: attainmentColor }}>
-                {formatPct(attainment, 3).replace(/\.?0+%$/, '%')}
+                {formatPct(attainment, { decimals: 3 }).replace(/\.?0+%$/, '%')}
               </span>
             }
             data-test-subj="slos-budget-attainment"
           />
           <EuiText size="xs" color="subdued">
-            target {formatPct(target, 3).replace(/\.?0+%$/, '%')}
+            target {formatPct(target, { decimals: 3 }).replace(/\.?0+%$/, '%')}
           </EuiText>
         </EuiFlexItem>
 
@@ -246,11 +241,11 @@ export const SloBudgetPanel: React.FC<SloBudgetPanelProps> = ({
                 <span>Budget remaining</span>
               </EuiToolTip>
             }
-            title={formatPct(remaining, 1)}
+            title={formatPct(remaining, { decimals: 1 })}
             data-test-subj="slos-budget-remaining"
           />
           <EuiText size="xs" color="subdued">
-            budget {formatPct(errorBudget, 3).replace(/\.?0+%$/, '%')} total
+            budget {formatPct(errorBudget, { decimals: 3 }).replace(/\.?0+%$/, '%')} total
           </EuiText>
         </EuiFlexItem>
 
@@ -312,7 +307,8 @@ export const SloBudgetPanel: React.FC<SloBudgetPanelProps> = ({
       <EuiSpacer size="m" />
 
       <EuiText size="xs" color="subdued">
-        <strong>Budget consumed</strong> — {formatPct(Math.max(0, 1 - remaining), 1)} of allowed
+        <strong>Budget consumed</strong> — {formatPct(Math.max(0, 1 - remaining), { decimals: 1 })}{' '}
+        of allowed
       </EuiText>
       <EuiSpacer size="xs" />
       <BudgetBar remaining={remaining} />

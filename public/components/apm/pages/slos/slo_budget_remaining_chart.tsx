@@ -32,6 +32,7 @@ import type {
   SloDocument,
 } from '../../../../../common/slo/slo_types';
 import { buildErrorRatioExprForWindow } from './slo_query_builders';
+import { formatPct } from '../../../../../common/slo/format';
 
 export interface SloBudgetRemainingChartProps {
   slo: SloDocument;
@@ -39,11 +40,6 @@ export interface SloBudgetRemainingChartProps {
   prometheusConnectionId: string;
   timeRange: TimeRange;
   refreshTrigger: number;
-}
-
-function formatPct(value: number): string {
-  if (!Number.isFinite(value)) return '—';
-  return `${(value * 100).toFixed(1)}%`;
 }
 
 /**
