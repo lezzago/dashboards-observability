@@ -54,6 +54,7 @@ import { buildCreateInput } from './wizard_builders';
 import { WizardNav } from './wizard_nav';
 import { WIZARD_SECTIONS } from './wizard_sections';
 import type { WizardSectionId } from './wizard_sections';
+import { WizardValidationSummary } from './wizard_validation_summary';
 
 function sectionAnchorId(id: WizardSectionId): string {
   return WIZARD_SECTIONS.find((s) => s.id === id)!.anchorId;
@@ -180,6 +181,7 @@ export const SloWizardPage: React.FC<SloWizardPageProps> = ({
 
   const onSubmit = useCallback(async () => {
     if (!template) return;
+    dispatch({ kind: 'markSubmitAttempted' });
     const input = buildCreateInput(state, template);
     const { errors: specErrors, warnings: specWarnings } = validateSloSpec(input.spec);
     setWarnings(specWarnings);
@@ -296,6 +298,8 @@ export const SloWizardPage: React.FC<SloWizardPageProps> = ({
               </EuiFlexItem>
               <EuiFlexItem>
                 <EuiForm component="form">
+                  {state.submitAttempted && <WizardValidationSummary errors={errors} />}
+
                   <div id={sectionAnchorId('identity')}>
                     <IdentityPanel
                       state={state}

@@ -66,6 +66,11 @@ export interface FormState {
 
   // Exclusion windows (W2.6) — shape-only; enforcement deferred post-GA.
   exclusionWindows: ExclusionWindow[];
+
+  // Flipped by the Submit handler so the wizard only reveals the top-level
+  // validation summary AFTER the user has attempted submit at least once.
+  // Typing doesn't produce a sea of red; clicking Create does.
+  submitAttempted: boolean;
 }
 
 export type Action =
@@ -104,7 +109,8 @@ export type Action =
     }
   | { kind: 'setExclusionWindowScheduleType'; index: number; type: 'cron' | 'oneoff' }
   | { kind: 'addExclusionWindow' }
-  | { kind: 'removeExclusionWindow'; index: number };
+  | { kind: 'removeExclusionWindow'; index: number }
+  | { kind: 'markSubmitAttempted' };
 
 /**
  * Scalar keys of FormState — the subset `setField` is allowed to assign.
@@ -207,6 +213,7 @@ export function initialState(): FormState {
     budgetWarnings: defaultBudgetWarnings(),
     alarms: defaultAlarms(),
     exclusionWindows: [],
+    submitAttempted: false,
   };
 }
 
@@ -421,6 +428,8 @@ export function reducer(state: FormState, action: Action): FormState {
       next.splice(action.index, 1);
       return { ...state, exclusionWindows: next };
     }
+    case 'markSubmitAttempted':
+      return state.submitAttempted ? state : { ...state, submitAttempted: true };
   }
 }
 
