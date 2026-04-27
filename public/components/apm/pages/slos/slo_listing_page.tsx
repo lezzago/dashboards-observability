@@ -5,6 +5,7 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  EuiBadge,
   EuiBasicTableColumn,
   EuiButton,
   EuiButtonEmpty,
@@ -44,7 +45,8 @@ import type {
   SloListFilters,
   SloSummary,
 } from '../../../../../common/slo/slo_types';
-import { SLO_HEALTH_COLOR } from '../../../../../common/slo/state';
+import { formatPct } from '../../../../../common/slo/format';
+import { getSloHealthColor } from '../../../../../common/slo/state';
 
 export interface SloListingPageProps {
   apiClient: SloApiClient;
@@ -68,7 +70,10 @@ function worstBudgetRemaining(summary: SloSummary): number {
 }
 
 /** Compact budget bar for the table column. Identical visual language to the overview leaderboard. */
-const BudgetColumnBar: React.FC<{ remaining: number }> = ({ remaining }) => {
+const BudgetColumnBar: React.FC<{ remaining: number; width?: number }> = ({
+  remaining,
+  width = 160,
+}) => {
   const consumed = Math.max(0, 1 - remaining);
   const consumedPct = Math.min(100, consumed * 100);
   const overBudget = remaining < 0;
@@ -80,7 +85,7 @@ const BudgetColumnBar: React.FC<{ remaining: number }> = ({ remaining }) => {
         background: euiThemeVars.euiColorLightestShade,
         borderRadius: 3,
         overflow: 'hidden',
-        width: 80,
+        width,
       }}
     >
       <div
@@ -93,6 +98,68 @@ const BudgetColumnBar: React.FC<{ remaining: number }> = ({ remaining }) => {
           background: overBudget ? euiThemeVars.euiColorDanger : euiThemeVars.euiColorWarning,
         }}
       />
+    </div>
+  );
+};
+
+/**
+ * Single combined cell for state + remaining budget + firing count. The old
+ * layout dedicated three columns to this information (Status, Budget left,
+ * Firing); visually scanning the listing took three separate eye fixations
+ * per row. Stacking them in one cell keeps the budget % as the dominant
+ * signal and the firing badge as an exception indicator.
+ */
+const SloHealthCell: React.FC<{ row: SloSummary }> = ({ row }) => {
+  const remaining = worstBudgetRemaining(row);
+  const overBudget = remaining < 0;
+  const budgetLabel = overBudget
+    ? 'over budget'
+    : formatPct(Math.max(0, remaining), { decimals: 0 });
+  const budgetColor: 'danger' | 'warning' | 'default' = overBudget
+    ? 'danger'
+    : remaining < 0.25
+    ? 'warning'
+    : 'default';
+  const firing = row.status.firingCount;
+  return (
+    <div data-test-subj={`slosHealthCell-${row.id}`} style={{ width: 180 }}>
+      <EuiFlexGroup
+        gutterSize="xs"
+        alignItems="center"
+        responsive={false}
+        justifyContent="flexStart"
+      >
+        <EuiFlexItem grow={false}>
+          <EuiToolTip content={`State: ${row.status.state}`}>
+            <EuiHealth color={getSloHealthColor(row.status.state)}>
+              <span style={{ fontSize: 12 }}>{row.status.state}</span>
+            </EuiHealth>
+          </EuiToolTip>
+        </EuiFlexItem>
+        <EuiFlexItem grow={true} style={{ textAlign: 'right' }}>
+          <EuiToolTip content="Remaining error budget (worst objective).">
+            <EuiText
+              size="s"
+              color={budgetColor === 'default' ? 'default' : budgetColor}
+              style={{ fontWeight: 600 }}
+            >
+              {budgetLabel}
+            </EuiText>
+          </EuiToolTip>
+        </EuiFlexItem>
+        {firing > 0 ? (
+          <EuiFlexItem grow={false}>
+            <EuiToolTip content={`${firing} alert${firing === 1 ? '' : 's'} firing`}>
+              <EuiBadge color="danger" iconType="bell" data-test-subj={`slosFiringBadge-${row.id}`}>
+                {firing}
+              </EuiBadge>
+            </EuiToolTip>
+          </EuiFlexItem>
+        ) : null}
+      </EuiFlexGroup>
+      <div style={{ marginTop: 4 }}>
+        <BudgetColumnBar remaining={remaining} width={160} />
+      </div>
     </div>
   );
 };
@@ -339,38 +406,9 @@ export const SloListingPage: React.FC<SloListingPageProps> = ({
         render: (row: SloSummary) => <EuiText size="s">{row.enabled ? 'Yes' : 'No'}</EuiText>,
       },
       {
-        name: 'Status',
-        align: 'center',
-        render: (row: SloSummary) => (
-          <EuiHealth color={SLO_HEALTH_COLOR[row.status.state]}>{row.status.state}</EuiHealth>
-        ),
-      },
-      {
-        name: 'Budget left',
-        align: 'left',
-        width: '130px',
-        render: (row: SloSummary) => {
-          const remaining = worstBudgetRemaining(row);
-          const label =
-            remaining <= 0 ? 'over budget' : `${Math.max(0, remaining * 100).toFixed(0)}%`;
-          const color = remaining <= 0 ? 'danger' : remaining < 0.25 ? 'warning' : 'subdued';
-          return (
-            <EuiToolTip content="Remaining error budget (worst objective).">
-              <div>
-                <EuiText size="xs" color={color}>
-                  {label}
-                </EuiText>
-                <BudgetColumnBar remaining={remaining} />
-              </div>
-            </EuiToolTip>
-          );
-        },
-      },
-      {
-        name: 'Firing',
-        align: 'center',
-        width: '6%',
-        render: (row: SloSummary) => <EuiText size="s">{row.status.firingCount}</EuiText>,
+        name: 'Health',
+        width: '200px',
+        render: (row: SloSummary) => <SloHealthCell row={row} />,
       },
     ],
     []
