@@ -14,6 +14,7 @@ import {
   EuiFlexGroup,
   EuiFlexItem,
   EuiHealth,
+  EuiIcon,
   EuiInMemoryTable,
   EuiLink,
   EuiLoadingSpinner,
@@ -47,6 +48,7 @@ import type {
 } from '../../../../../common/slo/slo_types';
 import { formatPct } from '../../../../../common/slo/format';
 import { getSloHealthColor } from '../../../../../common/slo/state';
+import { templateIconFor } from './template_icons';
 
 export interface SloListingPageProps {
   apiClient: SloApiClient;
@@ -487,14 +489,26 @@ export const SloListingPage: React.FC<SloListingPageProps> = ({
       {
         name: 'Name',
         render: (row: SloSummary) => (
-          <EuiLink
-            href={`#/slos/${encodeURIComponent(row.id)}`}
-            data-test-subj={`slosLink-${row.id}`}
-          >
-            <EuiText size="s">
-              <strong>{row.name}</strong>
-            </EuiText>
-          </EuiLink>
+          <EuiFlexGroup gutterSize="s" alignItems="center" responsive={false}>
+            <EuiFlexItem grow={false}>
+              <EuiIcon
+                type={templateIconFor(row)}
+                size="m"
+                color="subdued"
+                data-test-subj={`slosNameIcon-${row.id}`}
+              />
+            </EuiFlexItem>
+            <EuiFlexItem>
+              <EuiLink
+                href={`#/slos/${encodeURIComponent(row.id)}`}
+                data-test-subj={`slosLink-${row.id}`}
+              >
+                <EuiText size="s">
+                  <strong>{row.name}</strong>
+                </EuiText>
+              </EuiLink>
+            </EuiFlexItem>
+          </EuiFlexGroup>
         ),
       },
       {
