@@ -42,6 +42,7 @@ import type {
   SloListFilters,
   SloSummary,
 } from '../../../../../common/slo/slo_types';
+import { SLO_HEALTH_COLOR } from '../../../../../common/slo/state';
 
 export interface SloListingPageProps {
   apiClient: SloApiClient;
@@ -49,16 +50,6 @@ export interface SloListingPageProps {
   notifications: NotificationsStart;
   parentBreadcrumb: { text: string; href: string };
 }
-
-/** Health-state colour mapping for the status column. */
-const STATE_COLOR: Record<SloHealthState, string> = {
-  breached: 'danger',
-  warning: 'warning',
-  ok: 'success',
-  no_data: 'subdued',
-  stale: 'subdued',
-  disabled: 'default',
-};
 
 function formatTargetPct(target: number): string {
   return `${(target * 100).toFixed(target >= 0.999 ? 2 : 1)}%`;
@@ -269,7 +260,7 @@ export const SloListingPage: React.FC<SloListingPageProps> = ({
         name: 'Status',
         align: 'center',
         render: (row: SloSummary) => (
-          <EuiHealth color={STATE_COLOR[row.status.state]}>{row.status.state}</EuiHealth>
+          <EuiHealth color={SLO_HEALTH_COLOR[row.status.state]}>{row.status.state}</EuiHealth>
         ),
       },
       {

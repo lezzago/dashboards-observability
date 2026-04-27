@@ -31,11 +31,8 @@ import { TimeRange } from '../../common/types/service_types';
 import { SloVisualizations } from './slo_visualizations';
 import { SloMetadataPanel } from './slo_metadata_panel';
 import type { SloApiClient } from './slo_api_client';
-import type {
-  SloDocument,
-  SloHealthState,
-  SloLiveStatus,
-} from '../../../../../common/slo/slo_types';
+import type { SloDocument, SloLiveStatus } from '../../../../../common/slo/slo_types';
+import { SLO_HEALTH_COLOR } from '../../../../../common/slo/state';
 
 export interface SloDetailPageProps {
   apiClient: SloApiClient;
@@ -43,15 +40,6 @@ export interface SloDetailPageProps {
   notifications: NotificationsStart;
   parentBreadcrumb: { text: string; href: string };
 }
-
-const STATE_COLOR: Record<SloHealthState, string> = {
-  breached: 'danger',
-  warning: 'warning',
-  ok: 'success',
-  no_data: 'subdued',
-  stale: 'subdued',
-  disabled: 'default',
-};
 
 type FullDoc = SloDocument & { liveStatus: SloLiveStatus };
 
@@ -216,7 +204,7 @@ export const SloDetailPage: React.FC<SloDetailPageProps> = ({
                   )}
                 </EuiFlexItem>
                 <EuiFlexItem grow={false}>
-                  <EuiHealth color={STATE_COLOR[doc.liveStatus.state]}>
+                  <EuiHealth color={SLO_HEALTH_COLOR[doc.liveStatus.state]}>
                     {doc.liveStatus.state}
                   </EuiHealth>
                 </EuiFlexItem>

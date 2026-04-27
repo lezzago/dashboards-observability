@@ -32,6 +32,7 @@ import {
 } from '@elastic/eui';
 import { euiThemeVars } from '@osd/ui-shared-deps/theme';
 import type { SloHealthState, SloSummary } from '../../../../../common/slo/slo_types';
+import { SLO_HEALTH_COLOR, SLO_HEALTH_ORDER } from '../../../../../common/slo/state';
 
 export interface SloOverviewPanelProps {
   items: SloSummary[];
@@ -40,15 +41,6 @@ export interface SloOverviewPanelProps {
   /** Callback when a KPI tile is clicked. Pass null to clear. */
   onStateFilterChange?: (filter: SloHealthState | 'firing' | null) => void;
 }
-
-const STATE_COLOR: Record<SloHealthState, string> = {
-  breached: 'danger',
-  warning: 'warning',
-  ok: 'success',
-  no_data: 'subdued',
-  stale: 'subdued',
-  disabled: 'default',
-};
 
 function segmentHex(state: SloHealthState): string {
   switch (state) {
@@ -64,8 +56,6 @@ function segmentHex(state: SloHealthState): string {
       return euiThemeVars.euiColorLightShade;
   }
 }
-
-const STATE_ORDER: SloHealthState[] = ['breached', 'warning', 'ok', 'no_data', 'stale', 'disabled'];
 
 interface TierRow {
   tier: string;
@@ -451,7 +441,7 @@ export const SloOverviewPanel: React.FC<SloOverviewPanelProps> = ({
                             <EuiIcon type="bell" size="s" /> {s.status.firingCount}
                           </span>
                         ) : (
-                          <EuiHealth color={STATE_COLOR[s.status.state]}>
+                          <EuiHealth color={SLO_HEALTH_COLOR[s.status.state]}>
                             {s.status.state}
                           </EuiHealth>
                         )}
@@ -523,7 +513,7 @@ const TierStackBar: React.FC<{ row: TierRow }> = ({ row }) => {
         background: euiThemeVars.euiColorLightestShade,
       }}
     >
-      {STATE_ORDER.map((state) => {
+      {SLO_HEALTH_ORDER.map((state) => {
         const count = row.counts[state];
         if (count === 0) return null;
         const pct = (count / total) * 100;

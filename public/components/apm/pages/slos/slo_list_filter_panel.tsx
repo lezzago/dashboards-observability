@@ -32,11 +32,11 @@ import type {
   SloListFilters,
   SloSummary,
 } from '../../../../../common/slo/slo_types';
+import { SLO_HEALTH_COLOR, SLO_HEALTH_ORDER } from '../../../../../common/slo/state';
 
 type SliBackend = 'prometheus' | 'opensearch';
 type SloMode = 'active' | 'shadow';
 
-const STATE_ORDER: SloHealthState[] = ['breached', 'warning', 'ok', 'no_data', 'stale', 'disabled'];
 const STATE_LABEL: Record<SloHealthState, string> = {
   breached: 'Breached',
   warning: 'Warning',
@@ -44,14 +44,6 @@ const STATE_LABEL: Record<SloHealthState, string> = {
   no_data: 'No data',
   stale: 'Stale',
   disabled: 'Disabled',
-};
-const STATE_COLOR: Record<SloHealthState, string> = {
-  breached: 'danger',
-  warning: 'warning',
-  ok: 'success',
-  no_data: 'subdued',
-  stale: 'subdued',
-  disabled: 'default',
 };
 
 const SLI_BACKEND_LABEL: Record<SliBackend, string> = {
@@ -253,11 +245,11 @@ export const SloListFilterPanel: React.FC<SloListFilterPanelProps> = ({
           <FacetPopover
             label="State"
             dataTestSubj="state"
-            options={toSelectOptions(STATE_ORDER, filters.state ?? [], STATE_LABEL)}
+            options={toSelectOptions(SLO_HEALTH_ORDER, filters.state ?? [], STATE_LABEL)}
             onChange={(keys) =>
               patch({ state: keys.length ? (keys as SloHealthState[]) : undefined })
             }
-            healthColor={STATE_COLOR}
+            healthColor={SLO_HEALTH_COLOR}
           />
           <FacetPopover
             label="SLI backend"
