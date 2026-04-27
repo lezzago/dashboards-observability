@@ -9,11 +9,9 @@
  * Derives everything from the SloSummary[] the listing already fetches — no
  * extra network calls.
  *
- * Layout:
- *   Row 1: six KPI tiles (Total / Breached / Warning / Healthy / Firing / No-data)
- *          — each tile (except Total) doubles as a quick filter when clicked.
- *   Row 2: health-by-tier stacked bars · error-budget leaderboard
- *   Row 3: SLI backend/type mix (compact chip row)
+ * Layout (dense, one EuiPanel, no nested panels padding each section):
+ *   Row 1: KPI strip — six stats on one line, active tile highlighted.
+ *   Row 2: donut (health distribution) · tier stacked bars · leaderboard.
  */
 
 import React, { useMemo } from 'react';
@@ -26,13 +24,15 @@ import {
   EuiLink,
   EuiPanel,
   EuiSpacer,
-  EuiStat,
   EuiText,
   EuiToolTip,
 } from '@elastic/eui';
 import { euiThemeVars } from '@osd/ui-shared-deps/theme';
+import type { EChartsOption } from 'echarts';
+import { EchartsRender } from '../../../alerting/echarts_render';
 import type { SloHealthState, SloSummary } from '../../../../../common/slo/slo_types';
 import { SLO_HEALTH_COLOR, SLO_HEALTH_ORDER } from '../../../../../common/slo/state';
+import { formatPct } from '../../../../../common/slo/format';
 
 export interface SloOverviewPanelProps {
   items: SloSummary[];
@@ -42,20 +42,14 @@ export interface SloOverviewPanelProps {
   onStateFilterChange?: (filter: SloHealthState | 'firing' | null) => void;
 }
 
-function segmentHex(state: SloHealthState): string {
-  switch (state) {
-    case 'breached':
-      return euiThemeVars.euiColorDanger;
-    case 'warning':
-      return euiThemeVars.euiColorWarning;
-    case 'ok':
-      return euiThemeVars.euiColorSuccess;
-    case 'disabled':
-      return euiThemeVars.euiColorDarkShade;
-    default:
-      return euiThemeVars.euiColorLightShade;
-  }
-}
+const STATE_DISPLAY: Record<SloHealthState, { label: string; color: string }> = {
+  breached: { label: 'Breached', color: euiThemeVars.euiColorDanger },
+  warning: { label: 'Warning', color: euiThemeVars.euiColorWarning },
+  ok: { label: 'Healthy', color: euiThemeVars.euiColorSuccess },
+  no_data: { label: 'No data', color: euiThemeVars.euiColorMediumShade },
+  stale: { label: 'Stale', color: euiThemeVars.euiColorLightShade },
+  disabled: { label: 'Disabled', color: euiThemeVars.euiColorDarkShade },
+};
 
 interface TierRow {
   tier: string;
@@ -104,10 +98,24 @@ function worstBudgetRemaining(summary: SloSummary): number {
   return objectives.reduce((acc, o) => Math.min(acc, o.errorBudgetRemaining), 1);
 }
 
+/** True iff this SLO is actually producing samples — not no-data and not disabled. */
+function isReporting(summary: SloSummary): boolean {
+  const state = summary.status.state;
+  return state !== 'no_data' && state !== 'stale' && state !== 'disabled';
+}
+
 /**
- * Compact budget bar used inside the leaderboard. Same visual language as the
- * detail-page `BudgetBar` but smaller and stateless.
+ * Color the aggregate-budget tile by how much headroom is left — this is the
+ * first thing an operator sees on the page, so the gradient has to match the
+ * same success/warning/danger thresholds used on the listing's budget column.
  */
+function aggregateBudgetAccent(avgRemaining: number): string {
+  if (avgRemaining >= 0.8) return euiThemeVars.euiColorSuccess;
+  if (avgRemaining >= 0.4) return euiThemeVars.euiColorWarning;
+  return euiThemeVars.euiColorDanger;
+}
+
+/** Compact budget bar used inside the leaderboard. */
 const MiniBudgetBar: React.FC<{ remaining: number }> = ({ remaining }) => {
   const consumed = Math.max(0, 1 - remaining);
   const consumedPct = Math.min(100, consumed * 100);
@@ -116,9 +124,9 @@ const MiniBudgetBar: React.FC<{ remaining: number }> = ({ remaining }) => {
     <div
       style={{
         position: 'relative',
-        height: 6,
+        height: 4,
         background: euiThemeVars.euiColorLightestShade,
-        borderRadius: 3,
+        borderRadius: 2,
         overflow: 'hidden',
         width: '100%',
       }}
@@ -138,38 +146,176 @@ const MiniBudgetBar: React.FC<{ remaining: number }> = ({ remaining }) => {
 };
 
 /**
- * Wraps an `EuiStat` so clicking it toggles the state filter. We render the
- * tile inside a button-styled EuiPanel (rather than an EuiStat inside a button)
- * because nesting a button inside EuiStat's title breaks its typography.
+ * Compact KPI cell. Renders as a single line: big number + label, with a
+ * narrow colored rail on the left to signal severity. Clicking toggles a
+ * state filter; the active tile gets a tinted background.
  */
-const KpiTile: React.FC<{
-  title: number | string;
-  description: string;
-  color?: 'danger' | 'accent' | 'success' | 'subdued' | 'default';
+const KpiCell: React.FC<{
+  value: number | string;
+  label: string;
+  accent: string;
   tooltip?: string;
   onClick?: () => void;
   active?: boolean;
   dataTestSubj?: string;
-}> = ({ title, description, color, tooltip, onClick, active, dataTestSubj }) => {
+}> = ({ value, label, accent, tooltip, onClick, active, dataTestSubj }) => {
   const clickable = Boolean(onClick);
   const content = (
-    <EuiPanel
-      paddingSize="s"
-      hasBorder
-      hasShadow={false}
+    <div
+      role={clickable ? 'button' : undefined}
+      tabIndex={clickable ? 0 : undefined}
       onClick={onClick}
+      onKeyDown={(e) => {
+        if (!clickable) return;
+        if (e.key === 'Enter' || e.key === ' ') onClick?.();
+      }}
       data-test-subj={dataTestSubj}
       style={{
+        display: 'flex',
+        alignItems: 'stretch',
+        gap: 8,
+        padding: '6px 10px',
+        borderRadius: 4,
         cursor: clickable ? 'pointer' : 'default',
-        borderColor: active ? euiThemeVars.euiColorPrimary : undefined,
-        borderWidth: active ? 2 : undefined,
+        background: active ? euiThemeVars.euiColorLightestShade : 'transparent',
+        outline: active ? `1px solid ${euiThemeVars.euiColorPrimary}` : 'none',
+        minWidth: 96,
       }}
     >
-      <EuiStat title={title} description={description} titleSize="m" titleColor={color} reverse />
-    </EuiPanel>
+      <span
+        style={{
+          width: 3,
+          borderRadius: 2,
+          background: accent,
+          flexShrink: 0,
+        }}
+      />
+      <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+        <span
+          style={{
+            fontSize: 20,
+            fontWeight: 600,
+            lineHeight: 1.1,
+            color: accent,
+          }}
+        >
+          {value}
+        </span>
+        <span
+          style={{
+            fontSize: 11,
+            color: euiThemeVars.euiColorDarkShade,
+            whiteSpace: 'nowrap',
+          }}
+        >
+          {label}
+        </span>
+      </div>
+    </div>
   );
   return tooltip ? <EuiToolTip content={tooltip}>{content}</EuiToolTip> : content;
 };
+
+function buildHealthDonutOption(counts: {
+  breached: number;
+  warning: number;
+  ok: number;
+  noData: number;
+  disabled: number;
+}): EChartsOption {
+  const total = counts.breached + counts.warning + counts.ok + counts.noData + counts.disabled;
+  const slices = [
+    { name: 'Breached', value: counts.breached, color: STATE_DISPLAY.breached.color },
+    { name: 'Warning', value: counts.warning, color: STATE_DISPLAY.warning.color },
+    { name: 'Healthy', value: counts.ok, color: STATE_DISPLAY.ok.color },
+    { name: 'No data', value: counts.noData, color: STATE_DISPLAY.no_data.color },
+    { name: 'Disabled', value: counts.disabled, color: STATE_DISPLAY.disabled.color },
+  ].filter((s) => s.value > 0);
+
+  return {
+    tooltip: { trigger: 'item', formatter: '{b}: {c} ({d}%)' },
+    legend: {
+      show: false,
+    },
+    series: [
+      {
+        type: 'pie',
+        radius: ['58%', '82%'],
+        center: ['50%', '50%'],
+        avoidLabelOverlap: true,
+        label: { show: false },
+        labelLine: { show: false },
+        data: slices.map((s) => ({
+          value: s.value,
+          name: s.name,
+          itemStyle: { color: s.color, borderWidth: 2, borderColor: '#fff' },
+        })),
+      },
+    ],
+    graphic: [
+      {
+        type: 'text',
+        left: 'center',
+        top: '42%',
+        style: {
+          text: total.toString(),
+          fontSize: 22,
+          fontWeight: 700,
+          fill: euiThemeVars.euiTextColor,
+          textAlign: 'center',
+        },
+      },
+      {
+        type: 'text',
+        left: 'center',
+        top: '58%',
+        style: {
+          text: total === 1 ? 'SLO' : 'SLOs',
+          fontSize: 11,
+          fill: euiThemeVars.euiColorDarkShade,
+          textAlign: 'center',
+        },
+      },
+    ],
+  };
+}
+
+function buildTierBarOption(rows: TierRow[]): EChartsOption {
+  const categories = rows.map((r) => r.tier);
+  const series = SLO_HEALTH_ORDER.filter((s) => s !== 'stale').map((state) => ({
+    name: STATE_DISPLAY[state].label,
+    type: 'bar' as const,
+    stack: 'tier',
+    barMaxWidth: 18,
+    itemStyle: { color: STATE_DISPLAY[state].color },
+    emphasis: { focus: 'series' as const },
+    data: rows.map((r) => r.counts[state] + (state === 'no_data' ? r.counts.stale : 0)),
+  }));
+
+  return {
+    tooltip: {
+      trigger: 'axis',
+      axisPointer: { type: 'shadow' },
+    },
+    legend: { show: false },
+    grid: { left: 8, right: 8, top: 6, bottom: 18, containLabel: true },
+    xAxis: {
+      type: 'value',
+      minInterval: 1,
+      axisLabel: { color: euiThemeVars.euiColorDarkShade, fontSize: 10 },
+      splitLine: { lineStyle: { color: euiThemeVars.euiColorLightestShade } },
+    },
+    yAxis: {
+      type: 'category',
+      data: categories,
+      inverse: true,
+      axisLabel: { color: euiThemeVars.euiColorDarkShade, fontSize: 11 },
+      axisLine: { show: false },
+      axisTick: { show: false },
+    },
+    series,
+  };
+}
 
 export const SloOverviewPanel: React.FC<SloOverviewPanelProps> = ({
   items,
@@ -183,6 +329,8 @@ export const SloOverviewPanel: React.FC<SloOverviewPanelProps> = ({
     let noData = 0;
     let disabled = 0;
     let firing = 0;
+    let reportingCount = 0;
+    let budgetSum = 0;
     for (const s of items) {
       firing += s.status.firingCount;
       switch (s.status.state) {
@@ -203,15 +351,32 @@ export const SloOverviewPanel: React.FC<SloOverviewPanelProps> = ({
           noData++;
           break;
       }
+      if (isReporting(s)) {
+        // Weight each SLO equally; the worst-objective budget is the one
+        // users already see in the listing, so reuse it as the contribution.
+        reportingCount++;
+        budgetSum += worstBudgetRemaining(s);
+      }
     }
-    return { total: items.length, breached, warning, ok, noData, disabled, firing };
+    const avgBudgetRemaining = reportingCount > 0 ? budgetSum / reportingCount : NaN;
+    return {
+      total: items.length,
+      breached,
+      warning,
+      ok,
+      noData,
+      disabled,
+      firing,
+      reportingCount,
+      avgBudgetRemaining,
+    };
   }, [items]);
 
   const tierRows = useMemo(() => groupByTier(items), [items]);
 
   /**
-   * Leaderboard — worst budget remaining first, cut off at 8. This is the most
-   * actionable list on the page: these are the SLOs about to pop.
+   * Leaderboard — worst budget remaining first, cut off at 6. These are the
+   * SLOs about to pop: the most actionable list on the page.
    */
   const leaderboard = useMemo(
     () =>
@@ -219,26 +384,12 @@ export const SloOverviewPanel: React.FC<SloOverviewPanelProps> = ({
         .map((s) => ({ summary: s, remaining: worstBudgetRemaining(s) }))
         .filter(({ summary }) => summary.enabled)
         .sort((a, b) => a.remaining - b.remaining)
-        .slice(0, 8),
+        .slice(0, 6),
     [items]
   );
 
-  /** SLI backend/type mix — small chip row for the "what kind of SLOs do we have?" question. */
-  const sliMix = useMemo(() => {
-    const byLeaf = new Map<string, number>();
-    const byBackend = new Map<string, number>();
-    const byMode = new Map<string, number>();
-    for (const s of items) {
-      byMode.set(s.mode, (byMode.get(s.mode) ?? 0) + 1);
-      if (s.sliNodeType === 'composite') {
-        byLeaf.set('composite', (byLeaf.get('composite') ?? 0) + 1);
-        continue;
-      }
-      if (s.sliBackend) byBackend.set(s.sliBackend, (byBackend.get(s.sliBackend) ?? 0) + 1);
-      if (s.sliLeafType) byLeaf.set(s.sliLeafType, (byLeaf.get(s.sliLeafType) ?? 0) + 1);
-    }
-    return { byLeaf, byBackend, byMode };
-  }, [items]);
+  const donutSpec = useMemo(() => buildHealthDonutOption(stats), [stats]);
+  const tierSpec = useMemo(() => buildTierBarOption(tierRows), [tierRows]);
 
   if (items.length === 0) return null;
 
@@ -248,21 +399,27 @@ export const SloOverviewPanel: React.FC<SloOverviewPanelProps> = ({
       : undefined;
 
   return (
-    <EuiPanel data-test-subj="slosOverviewPanel">
-      <EuiFlexGroup alignItems="center">
+    <EuiPanel paddingSize="s" data-test-subj="slosOverviewPanel">
+      {/* Header: title on the left, clear-filter on the right */}
+      <EuiFlexGroup alignItems="center" gutterSize="s" responsive={false}>
         <EuiFlexItem>
-          <EuiText size="m">
-            <h4>SLO health overview</h4>
-          </EuiText>
-          <EuiText size="xs" color="subdued">
-            Aggregate view across every SLO in this workspace. Click a tile to filter the catalog
-            below.
-          </EuiText>
+          <EuiFlexGroup alignItems="baseline" gutterSize="s" responsive={false}>
+            <EuiFlexItem grow={false}>
+              <EuiText size="s">
+                <h4 style={{ margin: 0 }}>SLO health overview</h4>
+              </EuiText>
+            </EuiFlexItem>
+            <EuiFlexItem grow={false}>
+              <EuiText size="xs" color="subdued">
+                Click a tile to filter the catalog below.
+              </EuiText>
+            </EuiFlexItem>
+          </EuiFlexGroup>
         </EuiFlexItem>
         {activeStateFilter && onStateFilterChange && (
           <EuiFlexItem grow={false}>
             <EuiButtonEmpty
-              size="s"
+              size="xs"
               iconType="cross"
               onClick={() => onStateFilterChange(null)}
               data-test-subj="slosOverview-clearFilter"
@@ -273,67 +430,90 @@ export const SloOverviewPanel: React.FC<SloOverviewPanelProps> = ({
         )}
       </EuiFlexGroup>
 
-      <EuiSpacer size="s" />
+      <EuiSpacer size="xs" />
 
-      {/* Row 1: KPI tiles — clickable filters */}
-      <EuiFlexGroup gutterSize="s" responsive>
-        <EuiFlexItem>
-          <KpiTile
-            title={stats.total}
-            description="Total SLOs"
-            tooltip="All SLOs in this workspace"
-            dataTestSubj="slosOverview-total"
+      {/* Row 1: KPI strip — budget leads, no-data demoted to the right end. */}
+      <EuiFlexGroup
+        gutterSize="none"
+        responsive={false}
+        wrap
+        alignItems="stretch"
+        style={{
+          border: `1px solid ${euiThemeVars.euiColorLightShade}`,
+          borderRadius: 4,
+          padding: 2,
+          background: euiThemeVars.euiColorEmptyShade,
+        }}
+      >
+        <EuiFlexItem grow={false}>
+          <KpiCell
+            value={
+              stats.reportingCount > 0 ? formatPct(stats.avgBudgetRemaining, { decimals: 1 }) : '—'
+            }
+            label={stats.reportingCount > 0 ? 'Aggregate budget' : 'No reporting SLOs'}
+            accent={
+              stats.reportingCount > 0
+                ? aggregateBudgetAccent(stats.avgBudgetRemaining)
+                : euiThemeVars.euiColorMediumShade
+            }
+            tooltip={`Weighted-average error budget remaining across SLOs that are reporting samples (${stats.reportingCount} of ${stats.total}).`}
+            dataTestSubj="slosOverviewBudget"
           />
         </EuiFlexItem>
-        <EuiFlexItem>
-          <KpiTile
-            title={stats.breached}
-            description="Breached"
-            color="danger"
+        <EuiFlexItem grow={false}>
+          <KpiCell
+            value={stats.breached}
+            label="Breached"
+            accent={STATE_DISPLAY.breached.color}
             tooltip="SLOs where error ratio exceeded the budget"
             onClick={toggle('breached')}
             active={activeStateFilter === 'breached'}
             dataTestSubj="slosOverview-breached"
           />
         </EuiFlexItem>
-        <EuiFlexItem>
-          <KpiTile
-            title={stats.warning}
-            description="Warning"
-            color="accent"
+        <EuiFlexItem grow={false}>
+          <KpiCell
+            value={stats.warning}
+            label="Warning"
+            accent={STATE_DISPLAY.warning.color}
             tooltip="SLOs where short-window burn has tripped a warning tier"
             onClick={toggle('warning')}
             active={activeStateFilter === 'warning'}
             dataTestSubj="slosOverview-warning"
           />
         </EuiFlexItem>
-        <EuiFlexItem>
-          <KpiTile
-            title={stats.ok}
-            description="Healthy"
-            color="success"
+        <EuiFlexItem grow={false}>
+          <KpiCell
+            value={stats.ok}
+            label="Healthy"
+            accent={STATE_DISPLAY.ok.color}
             tooltip="SLOs meeting their objective"
             onClick={toggle('ok')}
             active={activeStateFilter === 'ok'}
             dataTestSubj="slosOverview-ok"
           />
         </EuiFlexItem>
-        <EuiFlexItem>
-          <KpiTile
-            title={stats.firing}
-            description="Firing alerts"
-            color={stats.firing > 0 ? 'danger' : 'subdued'}
+        <EuiFlexItem grow={false}>
+          <KpiCell
+            value={stats.firing}
+            label="Firing"
+            accent={
+              stats.firing > 0 ? euiThemeVars.euiColorDanger : euiThemeVars.euiColorMediumShade
+            }
             tooltip="Total MWMBR burn-rate alerts currently firing"
             onClick={toggle('firing')}
             active={activeStateFilter === 'firing'}
             dataTestSubj="slosOverview-firing"
           />
         </EuiFlexItem>
-        <EuiFlexItem>
-          <KpiTile
-            title={stats.noData + stats.disabled}
-            description="No data / disabled"
-            color="subdued"
+        {/* Spacer pushes no-data/disabled to the right end — it's background
+            state (most dev clusters are mostly no_data), not a leading signal. */}
+        <EuiFlexItem />
+        <EuiFlexItem grow={false}>
+          <KpiCell
+            value={stats.noData + stats.disabled}
+            label="No data / disabled"
+            accent={euiThemeVars.euiColorMediumShade}
             tooltip="SLOs with no recent samples or explicitly disabled"
             onClick={toggle('no_data')}
             active={activeStateFilter === 'no_data'}
@@ -342,58 +522,110 @@ export const SloOverviewPanel: React.FC<SloOverviewPanelProps> = ({
         </EuiFlexItem>
       </EuiFlexGroup>
 
-      <EuiSpacer size="m" />
+      <EuiSpacer size="s" />
 
-      {/* Row 2: health-by-tier stacked bars + error-budget leaderboard */}
-      <EuiFlexGroup gutterSize="m" responsive>
-        <EuiFlexItem>
-          <EuiPanel paddingSize="s" hasBorder hasShadow={false}>
-            <EuiText size="s">
-              <strong>Health by tier</strong>
+      {/* Row 2: donut + tier bars + leaderboard */}
+      <EuiFlexGroup gutterSize="s" responsive alignItems="stretch">
+        <EuiFlexItem grow={2} style={{ minWidth: 200 }}>
+          <div
+            style={{
+              border: `1px solid ${euiThemeVars.euiColorLightShade}`,
+              borderRadius: 4,
+              padding: 8,
+              height: '100%',
+              display: 'flex',
+              flexDirection: 'column',
+            }}
+            data-test-subj="slosOverview-donut"
+          >
+            <EuiText size="xs">
+              <strong>Health mix</strong>
             </EuiText>
-            <EuiSpacer size="xs" />
-            <EuiText size="xs" color="subdued">
-              Stacked counts of SLOs in each state, grouped by tier.
-            </EuiText>
-            <EuiSpacer size="s" />
-            {tierRows.map((row) => (
-              <div key={row.tier} style={{ marginBottom: 10 }}>
-                <EuiFlexGroup
-                  gutterSize="s"
-                  alignItems="center"
-                  responsive={false}
-                  justifyContent="spaceBetween"
-                >
-                  <EuiFlexItem grow={false}>
-                    <EuiText size="xs">
-                      <strong>{row.tier}</strong>
-                    </EuiText>
-                  </EuiFlexItem>
-                  <EuiFlexItem grow={false}>
-                    <EuiText size="xs" color="subdued">
-                      {row.total}
-                    </EuiText>
-                  </EuiFlexItem>
-                </EuiFlexGroup>
-                <EuiSpacer size="xs" />
-                <TierStackBar row={row} />
-              </div>
-            ))}
-            <EuiSpacer size="xs" />
-            <Legend />
-          </EuiPanel>
+            <div style={{ flex: 1, minHeight: 140 }}>
+              <EchartsRender spec={donutSpec} height={140} />
+            </div>
+            <EuiFlexGroup gutterSize="xs" responsive={false} wrap>
+              {(['breached', 'warning', 'ok', 'no_data', 'disabled'] as const).map((s) => (
+                <EuiFlexItem key={s} grow={false}>
+                  <span
+                    style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: 4,
+                      fontSize: 10,
+                      color: euiThemeVars.euiColorDarkShade,
+                    }}
+                  >
+                    <span
+                      style={{
+                        width: 8,
+                        height: 8,
+                        borderRadius: 2,
+                        background: STATE_DISPLAY[s].color,
+                        display: 'inline-block',
+                      }}
+                    />
+                    {STATE_DISPLAY[s].label}
+                  </span>
+                </EuiFlexItem>
+              ))}
+            </EuiFlexGroup>
+          </div>
         </EuiFlexItem>
 
-        <EuiFlexItem>
-          <EuiPanel paddingSize="s" hasBorder hasShadow={false}>
-            <EuiText size="s">
-              <strong>Error-budget leaderboard</strong>
-            </EuiText>
+        <EuiFlexItem grow={3} style={{ minWidth: 260 }}>
+          <div
+            style={{
+              border: `1px solid ${euiThemeVars.euiColorLightShade}`,
+              borderRadius: 4,
+              padding: 8,
+              height: '100%',
+              display: 'flex',
+              flexDirection: 'column',
+            }}
+            data-test-subj="slosOverview-tierBars"
+          >
+            <EuiFlexGroup gutterSize="s" alignItems="baseline" responsive={false}>
+              <EuiFlexItem grow={false}>
+                <EuiText size="xs">
+                  <strong>Health by tier</strong>
+                </EuiText>
+              </EuiFlexItem>
+              <EuiFlexItem grow={false}>
+                <EuiText size="xs" color="subdued">
+                  counts per state
+                </EuiText>
+              </EuiFlexItem>
+            </EuiFlexGroup>
+            <div style={{ flex: 1, minHeight: 160 }}>
+              <EchartsRender spec={tierSpec} height={Math.max(130, tierRows.length * 28 + 30)} />
+            </div>
+          </div>
+        </EuiFlexItem>
+
+        <EuiFlexItem grow={3} style={{ minWidth: 280 }}>
+          <div
+            style={{
+              border: `1px solid ${euiThemeVars.euiColorLightShade}`,
+              borderRadius: 4,
+              padding: 8,
+              height: '100%',
+            }}
+            data-test-subj="slosOverview-leaderboard"
+          >
+            <EuiFlexGroup gutterSize="s" alignItems="baseline" responsive={false}>
+              <EuiFlexItem grow={false}>
+                <EuiText size="xs">
+                  <strong>Error-budget leaderboard</strong>
+                </EuiText>
+              </EuiFlexItem>
+              <EuiFlexItem grow={false}>
+                <EuiText size="xs" color="subdued">
+                  worst remaining budget first
+                </EuiText>
+              </EuiFlexItem>
+            </EuiFlexGroup>
             <EuiSpacer size="xs" />
-            <EuiText size="xs" color="subdued">
-              Enabled SLOs ranked by the objective with the least budget remaining.
-            </EuiText>
-            <EuiSpacer size="s" />
             {leaderboard.length === 0 ? (
               <EuiText size="s" color="subdued">
                 Nothing enabled yet.
@@ -403,7 +635,7 @@ export const SloOverviewPanel: React.FC<SloOverviewPanelProps> = ({
                 <div
                   key={s.id}
                   style={{
-                    padding: '6px 0',
+                    padding: '4px 0',
                     borderBottom: `1px solid ${euiThemeVars.euiColorLightestShade}`,
                   }}
                 >
@@ -413,9 +645,9 @@ export const SloOverviewPanel: React.FC<SloOverviewPanelProps> = ({
                     responsive={false}
                     justifyContent="spaceBetween"
                   >
-                    <EuiFlexItem>
+                    <EuiFlexItem style={{ minWidth: 0 }}>
                       <EuiLink href={`#/slos/${encodeURIComponent(s.id)}`}>
-                        <EuiText size="s">
+                        <EuiText size="xs" style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>
                           <strong>{s.name}</strong>
                         </EuiText>
                       </EuiLink>
@@ -424,15 +656,13 @@ export const SloOverviewPanel: React.FC<SloOverviewPanelProps> = ({
                         {s.tier ? ` · ${s.tier}` : ''} · {s.owner.teams[0] ?? '—'}
                       </EuiText>
                     </EuiFlexItem>
-                    <EuiFlexItem grow={false} style={{ minWidth: 90, textAlign: 'right' }}>
+                    <EuiFlexItem grow={false} style={{ minWidth: 72, textAlign: 'right' }}>
                       <EuiText
-                        size="s"
+                        size="xs"
                         color={remaining <= 0 ? 'danger' : remaining < 0.25 ? 'accent' : 'success'}
                       >
                         <strong>
-                          {remaining <= 0
-                            ? 'over budget'
-                            : `${Math.max(0, remaining * 100).toFixed(0)}%`}
+                          {remaining <= 0 ? 'over' : `${Math.max(0, remaining * 100).toFixed(0)}%`}
                         </strong>
                       </EuiText>
                       <EuiText size="xs" color="subdued">
@@ -442,152 +672,21 @@ export const SloOverviewPanel: React.FC<SloOverviewPanelProps> = ({
                           </span>
                         ) : (
                           <EuiHealth color={SLO_HEALTH_COLOR[s.status.state]}>
-                            {s.status.state}
+                            <span style={{ fontSize: 10 }}>{s.status.state}</span>
                           </EuiHealth>
                         )}
                       </EuiText>
                     </EuiFlexItem>
                   </EuiFlexGroup>
-                  <EuiSpacer size="xs" />
-                  <MiniBudgetBar remaining={remaining} />
+                  <div style={{ marginTop: 3 }}>
+                    <MiniBudgetBar remaining={remaining} />
+                  </div>
                 </div>
               ))
             )}
-          </EuiPanel>
+          </div>
         </EuiFlexItem>
       </EuiFlexGroup>
-
-      <EuiSpacer size="m" />
-
-      {/* Row 3: SLI backend/type mix — chips on a single line */}
-      <EuiPanel paddingSize="s" hasBorder hasShadow={false}>
-        <EuiFlexGroup gutterSize="s" alignItems="center" responsive={false} wrap>
-          <EuiFlexItem grow={false}>
-            <EuiText size="xs" color="subdued">
-              <strong>Mix</strong>
-            </EuiText>
-          </EuiFlexItem>
-          {[...sliMix.byLeaf.entries()]
-            .sort((a, b) => b[1] - a[1])
-            .map(([key, count]) => (
-              <EuiFlexItem key={`leaf-${key}`} grow={false}>
-                <Chip icon="stats" label={`${key} · ${count}`} />
-              </EuiFlexItem>
-            ))}
-          {[...sliMix.byBackend.entries()]
-            .sort((a, b) => b[1] - a[1])
-            .map(([key, count]) => (
-              <EuiFlexItem key={`backend-${key}`} grow={false}>
-                <Chip icon="database" label={`${key} · ${count}`} />
-              </EuiFlexItem>
-            ))}
-          {[...sliMix.byMode.entries()]
-            .sort((a, b) => b[1] - a[1])
-            .map(([key, count]) => (
-              <EuiFlexItem key={`mode-${key}`} grow={false}>
-                <Chip
-                  icon={key === 'shadow' ? 'eye' : 'play'}
-                  label={`${key} · ${count}`}
-                  color={key === 'shadow' ? 'subdued' : undefined}
-                />
-              </EuiFlexItem>
-            ))}
-        </EuiFlexGroup>
-      </EuiPanel>
     </EuiPanel>
   );
 };
-
-/** Stacked proportional bar for one tier. */
-const TierStackBar: React.FC<{ row: TierRow }> = ({ row }) => {
-  const total = row.total;
-  if (total === 0) return null;
-  return (
-    <div
-      style={{
-        display: 'flex',
-        width: '100%',
-        height: 10,
-        borderRadius: 2,
-        overflow: 'hidden',
-        background: euiThemeVars.euiColorLightestShade,
-      }}
-    >
-      {SLO_HEALTH_ORDER.map((state) => {
-        const count = row.counts[state];
-        if (count === 0) return null;
-        const pct = (count / total) * 100;
-        return (
-          <EuiToolTip key={state} content={`${state}: ${count}`}>
-            <div
-              style={{
-                width: `${pct}%`,
-                background: segmentHex(state),
-                height: '100%',
-              }}
-            />
-          </EuiToolTip>
-        );
-      })}
-    </div>
-  );
-};
-
-const Legend: React.FC = () => {
-  const items: Array<{ state: SloHealthState; label: string }> = [
-    { state: 'breached', label: 'Breached' },
-    { state: 'warning', label: 'Warning' },
-    { state: 'ok', label: 'Healthy' },
-    { state: 'no_data', label: 'No data' },
-    { state: 'disabled', label: 'Disabled' },
-  ];
-  return (
-    <EuiFlexGroup gutterSize="m" responsive={false} wrap>
-      {items.map((i) => (
-        <EuiFlexItem key={i.state} grow={false}>
-          <EuiFlexGroup gutterSize="xs" alignItems="center" responsive={false}>
-            <EuiFlexItem grow={false}>
-              <span
-                style={{
-                  display: 'inline-block',
-                  width: 10,
-                  height: 10,
-                  borderRadius: 2,
-                  background: segmentHex(i.state),
-                }}
-              />
-            </EuiFlexItem>
-            <EuiFlexItem grow={false}>
-              <EuiText size="xs" color="subdued">
-                {i.label}
-              </EuiText>
-            </EuiFlexItem>
-          </EuiFlexGroup>
-        </EuiFlexItem>
-      ))}
-    </EuiFlexGroup>
-  );
-};
-
-/** Tiny pill used in the SLI mix row. */
-const Chip: React.FC<{ icon: string; label: string; color?: 'subdued' }> = ({
-  icon,
-  label,
-  color,
-}) => (
-  <span
-    style={{
-      display: 'inline-flex',
-      alignItems: 'center',
-      gap: 4,
-      padding: '2px 8px',
-      borderRadius: 10,
-      background: euiThemeVars.euiColorLightestShade,
-      fontSize: 11,
-      color: color === 'subdued' ? euiThemeVars.euiColorDarkShade : euiThemeVars.euiTextColor,
-    }}
-  >
-    <EuiIcon type={icon} size="s" color={color === 'subdued' ? 'subdued' : undefined} />
-    {label}
-  </span>
-);
