@@ -17,14 +17,16 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   EuiAccordion,
   EuiBadge,
+  EuiBasicTable,
+  EuiBasicTableColumn,
   EuiButton,
   EuiButtonEmpty,
   EuiButtonGroup,
+  EuiButtonIcon,
   EuiCallOut,
   EuiCheckbox,
   EuiCode,
   EuiCodeBlock,
-  EuiDescriptionList,
   EuiFieldNumber,
   EuiFieldText,
   EuiFlexGroup,
@@ -338,15 +340,77 @@ export const SloSuggestPage: React.FC<SloSuggestPageProps> = ({
   const coveredCount = decoratedSuggestions.filter((s) => s.existingRuleMatch).length;
   // The service list comes from APM discovery but an OTel-only service (one
   // that emits direct metrics without span-derived RED) can still surface a
-  // draft. Union both sources so those services render their own accordion.
-  const serviceNameSet = new Set<string>();
-  for (const s of services ?? []) {
-    if (s.serviceName) serviceNameSet.add(s.serviceName);
-  }
-  for (const s of decoratedSuggestions) {
-    if (s.input.spec.service) serviceNameSet.add(s.input.spec.service);
-  }
-  const uniqueServices = Array.from(serviceNameSet);
+  // draft. Union both sources so every service that owns drafts gets a row.
+  const uniqueServices = useMemo(() => {
+    const set = new Set<string>();
+    for (const s of services ?? []) {
+      if (s.serviceName) set.add(s.serviceName);
+    }
+    for (const s of decoratedSuggestions) {
+      if (s.input.spec.service) set.add(s.input.spec.service);
+    }
+    return Array.from(set);
+    // decoratedSuggestions is recomputed every render (it's `.map(applyOverrides)`),
+    // so the closest stable key is the underlying suggestions + override inputs.
+    // services comes straight from the query hook and is referentially stable
+    // between fetches.
+  }, [services, decoratedSuggestions]);
+
+  const serviceRows: ServiceRowShape[] = useMemo(() => {
+    return uniqueServices
+      .map<ServiceRowShape>((serviceName) => {
+        const drafts = decoratedSuggestions.filter((s) => s.input.spec.service === serviceName);
+        const kinds: string[] = [];
+        for (const d of drafts) {
+          if (!kinds.includes(d.kind)) kinds.push(d.kind);
+        }
+        return {
+          serviceName,
+          environment: drafts[0]?.detected.environment,
+          drafts,
+          selectedCount: drafts.filter((s) => selected.has(s.key)).length,
+          totalRules: drafts.reduce((acc, s) => acc + s.estimatedRuleCount, 0),
+          coveredCount: drafts.filter((s) => s.existingRuleMatch).length,
+          kinds,
+        };
+      })
+      .filter((row) => row.drafts.length > 0);
+  }, [uniqueServices, decoratedSuggestions, selected]);
+
+  const [expandedMap, setExpandedMap] = useState<Record<string, boolean>>({});
+  /** Re-seed expansion to "all expanded" whenever the set of services changes. */
+  useEffect(() => {
+    setExpandedMap((prev) => {
+      const next: Record<string, boolean> = {};
+      for (const row of serviceRows) {
+        // Preserve any explicit collapse the user performed.
+        next[row.serviceName] = prev[row.serviceName] ?? true;
+      }
+      return next;
+    });
+    // serviceRows identity changes every render, but the service-name list is
+    // what actually matters. Key the effect on the joined service names.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [serviceRows.map((r) => r.serviceName).join('|')]);
+
+  const toggleExpand = useCallback((serviceName: string) => {
+    setExpandedMap((prev) => ({ ...prev, [serviceName]: !prev[serviceName] }));
+  }, []);
+
+  const toggleServiceSelection = useCallback(
+    (row: ServiceRowShape) => {
+      const allSelected = row.selectedCount === row.drafts.length;
+      setSelected((prev) => {
+        const next = new Set(prev);
+        for (const d of row.drafts) {
+          if (allSelected) next.delete(d.key);
+          else next.add(d.key);
+        }
+        return next;
+      });
+    },
+    [setSelected]
+  );
 
   const loading = configLoading || servicesLoading || discoveryLoading;
 
@@ -527,71 +591,16 @@ export const SloSuggestPage: React.FC<SloSuggestPageProps> = ({
                     <EuiSpacer size="m" />
                   </>
                 )}
-                {/* Group cards by service so availability + latency render together.
-                    Each service collapses into an accordion — users expand only
-                    the services they want to review in detail. */}
-                {uniqueServices.map((serviceName) => {
-                  const perService = decoratedSuggestions.filter(
-                    (s) => s.input.spec.service === serviceName
-                  );
-                  if (perService.length === 0) return null;
-                  const environment = perService[0].detected.environment;
-                  const serviceSelected = perService.filter((s) => selected.has(s.key)).length;
-                  const selectionColor =
-                    serviceSelected === perService.length
-                      ? 'primary'
-                      : serviceSelected === 0
-                      ? 'hollow'
-                      : 'accent';
-                  const accordionButton = (
-                    <EuiFlexGroup alignItems="center" gutterSize="s" responsive={false} wrap>
-                      <EuiFlexItem grow={false}>
-                        <EuiText size="s">
-                          <strong>{serviceName}</strong>
-                        </EuiText>
-                      </EuiFlexItem>
-                      {environment && (
-                        <EuiFlexItem grow={false}>
-                          <EuiBadge color="hollow">{environment}</EuiBadge>
-                        </EuiFlexItem>
-                      )}
-                      <EuiFlexItem grow={false}>
-                        <EuiBadge color={selectionColor}>
-                          {serviceSelected} / {perService.length} selected
-                        </EuiBadge>
-                      </EuiFlexItem>
-                    </EuiFlexGroup>
-                  );
-                  return (
-                    <EuiAccordion
-                      key={serviceName}
-                      id={`slosSuggestService-${serviceName}`}
-                      buttonContent={accordionButton}
-                      paddingSize="s"
-                      initialIsOpen={false}
-                      data-test-subj={`slosSuggestServiceAccordion-${serviceName}`}
-                    >
-                      <EuiFlexGroup wrap gutterSize="m">
-                        {perService.map((s) => (
-                          <EuiFlexItem
-                            key={s.key}
-                            grow={false}
-                            style={{ minWidth: 360, maxWidth: 460 }}
-                          >
-                            <SuggestionCard
-                              suggestion={s}
-                              selected={selected.has(s.key)}
-                              onToggle={() => toggle(s.key)}
-                              overrides={overrides[s.key] ?? {}}
-                              onOverrideChange={(patch) => setOverride(s.key, patch)}
-                            />
-                          </EuiFlexItem>
-                        ))}
-                      </EuiFlexGroup>
-                      <EuiSpacer size="s" />
-                    </EuiAccordion>
-                  );
-                })}
+                <ServiceTreeTable
+                  serviceRows={serviceRows}
+                  expandedMap={expandedMap}
+                  onToggleExpand={toggleExpand}
+                  onToggleServiceSelection={toggleServiceSelection}
+                  selected={selected}
+                  overrides={overrides}
+                  onToggleDraft={toggle}
+                  onOverrideChange={setOverride}
+                />
               </>
             )}
           </EuiPageContentBody>
@@ -815,165 +824,240 @@ export const SuggestionInlineRow: React.FC<SuggestionInlineRowProps> = ({
 };
 
 // ============================================================================
-// Card
+// Service tree table
+//
+// Replaces the previous per-service accordion list. Each row is a service;
+// expanded rows render `SuggestionInlineRow` for every draft that service
+// owns. Built on EuiBasicTable (no pagination / filtering needed at this
+// scale — 19 services is the target) with `itemIdToExpandedRowMap`. Rows
+// default to expanded so the user sees ~38 drafts on first paint.
 // ============================================================================
 
-const SuggestionCard: React.FC<{
-  suggestion: Suggestion;
-  selected: boolean;
-  onToggle: () => void;
-  overrides: { ownerTeam?: string; tier?: string; target?: string; latencyThreshold?: string };
-  onOverrideChange: (
-    patch: Partial<{
-      ownerTeam: string;
-      tier: string;
-      target: string;
-      latencyThreshold: string;
-    }>
-  ) => void;
-}> = ({ suggestion, selected, onToggle, overrides, onOverrideChange }) => {
-  const spec = suggestion.input.spec;
-  const objective = spec.objectives[0];
-  const isLatency = objective?.latencyThreshold !== undefined;
-  const unit =
-    spec.sli.type === 'single' &&
-    spec.sli.definition.backend === 'prometheus' &&
-    spec.sli.definition.type === 'latency_threshold'
-      ? spec.sli.definition.latencyThresholdUnit ?? 'seconds'
-      : 'seconds';
+const SLI_MIX_VISIBLE_CAP = 4;
 
-  return (
-    <EuiPanel
-      color={selected ? 'primary' : 'plain'}
-      hasBorder
-      style={{ height: '100%' }}
-      data-test-subj={`slosSuggestCard-${suggestion.key}`}
-    >
-      <EuiFlexGroup gutterSize="s" alignItems="flexStart" responsive={false}>
-        <EuiFlexItem grow={false}>
-          <EuiCheckbox
-            id={`slosSuggestSelect-${suggestion.key}`}
-            checked={selected}
-            onChange={onToggle}
-            data-test-subj={`slosSuggestSelect-${suggestion.key}`}
+interface ServiceRowShape {
+  serviceName: string;
+  environment?: string;
+  drafts: Suggestion[];
+  selectedCount: number;
+  totalRules: number;
+  coveredCount: number;
+  kinds: string[];
+}
+
+interface ServiceTreeTableProps {
+  serviceRows: ServiceRowShape[];
+  expandedMap: Record<string, boolean>;
+  onToggleExpand: (serviceName: string) => void;
+  onToggleServiceSelection: (row: ServiceRowShape) => void;
+  selected: Set<string>;
+  overrides: Record<string, OverrideValues>;
+  onToggleDraft: (key: string) => void;
+  onOverrideChange: (key: string, patch: OverridePatch) => void;
+  /** Optional per-draft status for the in-flight batch create. */
+  rowStatusMap?: Record<
+    string,
+    { status: 'pending' | 'creating' | 'success' | 'error'; message?: string }
+  >;
+}
+
+const ServiceTreeTable: React.FC<ServiceTreeTableProps> = ({
+  serviceRows,
+  expandedMap,
+  onToggleExpand,
+  onToggleServiceSelection,
+  selected,
+  overrides,
+  onToggleDraft,
+  onOverrideChange,
+  rowStatusMap,
+}) => {
+  const itemIdToExpandedRowMap = useMemo(() => {
+    const map: Record<string, React.ReactNode> = {};
+    for (const row of serviceRows) {
+      if (!expandedMap[row.serviceName]) continue;
+      map[row.serviceName] = (
+        <EuiPanel
+          color="subdued"
+          paddingSize="s"
+          hasShadow={false}
+          data-test-subj={`slosSuggestServiceExpanded-${row.serviceName}`}
+        >
+          {row.drafts.map((draft) => (
+            <SuggestionInlineRow
+              key={draft.key}
+              suggestion={draft}
+              selected={selected.has(draft.key)}
+              onToggle={() => onToggleDraft(draft.key)}
+              overrides={overrides[draft.key] ?? {}}
+              onOverrideChange={(patch) => onOverrideChange(draft.key, patch)}
+              rowStatus={rowStatusMap?.[draft.key]?.status}
+              rowStatusMessage={rowStatusMap?.[draft.key]?.message}
+            />
+          ))}
+        </EuiPanel>
+      );
+    }
+    return map;
+  }, [
+    serviceRows,
+    expandedMap,
+    selected,
+    overrides,
+    onToggleDraft,
+    onOverrideChange,
+    rowStatusMap,
+  ]);
+
+  const columns: Array<EuiBasicTableColumn<ServiceRowShape>> = useMemo(
+    () => [
+      {
+        width: '40px',
+        isExpander: true,
+        render: (row: ServiceRowShape) => (
+          <EuiButtonIcon
+            aria-label={
+              expandedMap[row.serviceName]
+                ? `Collapse ${row.serviceName}`
+                : `Expand ${row.serviceName}`
+            }
+            iconType={expandedMap[row.serviceName] ? 'arrowDown' : 'arrowRight'}
+            onClick={() => onToggleExpand(row.serviceName)}
+            data-test-subj={`slosSuggestServiceExpand-${row.serviceName}`}
           />
-        </EuiFlexItem>
-        <EuiFlexItem>
-          <EuiText size="s">
-            <strong>{spec.name}</strong>
-          </EuiText>
-          <EuiSpacer size="xs" />
-          <EuiFlexGroup gutterSize="xs" responsive={false} wrap>
-            <EuiFlexItem grow={false}>
-              <EuiBadge color="hollow">{suggestion.kind}</EuiBadge>
-            </EuiFlexItem>
-            <EuiFlexItem grow={false}>
-              <EuiBadge color="hollow">{suggestion.estimatedRuleCount} rules</EuiBadge>
-            </EuiFlexItem>
-            {suggestion.existingRuleMatch && (
+        ),
+      },
+      {
+        width: '36px',
+        render: (row: ServiceRowShape) => {
+          const allSelected = row.selectedCount === row.drafts.length && row.drafts.length > 0;
+          const someSelected = row.selectedCount > 0 && !allSelected;
+          return (
+            <EuiCheckbox
+              id={`slosSuggestServiceSelect-${row.serviceName}`}
+              data-test-subj={`slosSuggestServiceSelect-${row.serviceName}`}
+              checked={allSelected}
+              indeterminate={someSelected}
+              onChange={() => onToggleServiceSelection(row)}
+              aria-label={`Select all drafts for ${row.serviceName}`}
+            />
+          );
+        },
+      },
+      {
+        name: 'Service',
+        field: 'serviceName',
+        render: (_value: string, row: ServiceRowShape) => {
+          const allSelected = row.selectedCount === row.drafts.length && row.drafts.length > 0;
+          const selectionColor = allSelected
+            ? 'primary'
+            : row.selectedCount === 0
+            ? 'hollow'
+            : 'accent';
+          return (
+            <EuiFlexGroup gutterSize="s" alignItems="center" responsive={false} wrap>
+              <EuiFlexItem grow={false}>
+                <EuiText size="s">
+                  <strong>{row.serviceName}</strong>
+                </EuiText>
+              </EuiFlexItem>
+              {row.environment && (
+                <EuiFlexItem grow={false}>
+                  <EuiBadge color="hollow">{row.environment}</EuiBadge>
+                </EuiFlexItem>
+              )}
               <EuiFlexItem grow={false}>
                 <EuiBadge
-                  color="warning"
-                  iconType="check"
-                  title={`Matching recording rule: ${suggestion.existingRuleMatch.groupName} / ${suggestion.existingRuleMatch.ruleName}`}
-                  data-test-subj={`slosSuggestCovered-${suggestion.key}`}
+                  color={selectionColor}
+                  data-test-subj={`slosSuggestSelectionBadge-${row.serviceName}`}
                 >
-                  covered by existing rule
+                  {row.selectedCount} / {row.drafts.length} selected
                 </EuiBadge>
               </EuiFlexItem>
-            )}
-          </EuiFlexGroup>
-        </EuiFlexItem>
-      </EuiFlexGroup>
+            </EuiFlexGroup>
+          );
+        },
+      },
+      {
+        name: 'SLI mix',
+        render: (row: ServiceRowShape) => {
+          const visible = row.kinds.slice(0, SLI_MIX_VISIBLE_CAP);
+          const overflow = row.kinds.length - visible.length;
+          const iconByKind = new Map<string, string>();
+          for (const draft of row.drafts) {
+            if (!iconByKind.has(draft.kind)) iconByKind.set(draft.kind, suggestionIconType(draft));
+          }
+          return (
+            <EuiFlexGroup gutterSize="xs" responsive={false} wrap>
+              {visible.map((kind) => (
+                <EuiFlexItem grow={false} key={kind}>
+                  <EuiBadge color="hollow" iconType={iconByKind.get(kind) ?? 'bullseye'}>
+                    {kind}
+                  </EuiBadge>
+                </EuiFlexItem>
+              ))}
+              {overflow > 0 && (
+                <EuiFlexItem grow={false}>
+                  <EuiToolTip
+                    content={row.kinds.slice(SLI_MIX_VISIBLE_CAP).join(', ')}
+                    position="top"
+                  >
+                    <EuiBadge color="hollow">+{overflow} more</EuiBadge>
+                  </EuiToolTip>
+                </EuiFlexItem>
+              )}
+            </EuiFlexGroup>
+          );
+        },
+      },
+      {
+        name: 'Drafts',
+        render: (row: ServiceRowShape) => (
+          <EuiText size="xs" color="subdued">
+            {row.drafts.length} draft{row.drafts.length === 1 ? '' : 's'} · ~{row.totalRules} rules
+          </EuiText>
+        ),
+      },
+      {
+        name: 'Covered',
+        render: (row: ServiceRowShape) =>
+          row.coveredCount > 0 ? (
+            <EuiFlexGroup gutterSize="xs" alignItems="center" responsive={false}>
+              <EuiFlexItem grow={false}>
+                <EuiText size="xs" color="danger">
+                  {row.coveredCount}
+                </EuiText>
+              </EuiFlexItem>
+              <EuiFlexItem grow={false}>
+                <EuiIconTip
+                  type="questionInCircle"
+                  color="subdued"
+                  position="top"
+                  content={`${row.coveredCount} draft${
+                    row.coveredCount === 1 ? '' : 's'
+                  } for this service ${
+                    row.coveredCount === 1 ? 'is' : 'are'
+                  } already provisioned by existing recording rules. They're unchecked by default to avoid dual-writing.`}
+                />
+              </EuiFlexItem>
+            </EuiFlexGroup>
+          ) : null,
+      },
+    ],
+    [expandedMap, onToggleExpand, onToggleServiceSelection]
+  );
 
-      <EuiSpacer size="s" />
-      <EuiText size="xs" color="subdued">
-        {suggestion.reason}
-        {suggestion.existingRuleMatch && (
-          <>
-            {' '}
-            Already covered by <EuiCode>{suggestion.existingRuleMatch.ruleName}</EuiCode> in rule
-            group <EuiCode>{suggestion.existingRuleMatch.groupName}</EuiCode>
-            {suggestion.existingRuleMatch.sloId
-              ? ` (SLO ${suggestion.existingRuleMatch.sloId})`
-              : ''}
-            . Leave unchecked to avoid dual-writing.
-          </>
-        )}
-      </EuiText>
-      <EuiSpacer size="s" />
-      <EuiDescriptionList
-        compressed
-        type="column"
-        listItems={[
-          { title: 'Metric', description: <EuiCode>{suggestion.sourceMetric}</EuiCode> },
-          {
-            title: 'Dimensions',
-            description:
-              Object.entries(suggestion.detected)
-                .map(([k, v]) => `${k}=${v}`)
-                .join(', ') || '—',
-          },
-        ]}
-      />
-
-      <EuiSpacer size="s" />
-      <EuiFlexGroup gutterSize="s">
-        <EuiFlexItem>
-          <EuiFieldText
-            compressed
-            prepend="Owner"
-            value={overrides.ownerTeam ?? spec.owner.teams[0] ?? ''}
-            onChange={(e) => onOverrideChange({ ownerTeam: e.target.value })}
-            placeholder="team"
-            aria-label="Owner team"
-          />
-        </EuiFlexItem>
-        <EuiFlexItem>
-          <EuiFieldText
-            compressed
-            prepend="Tier"
-            value={overrides.tier ?? spec.tier ?? ''}
-            onChange={(e) => onOverrideChange({ tier: e.target.value })}
-            placeholder="tier-1"
-            aria-label="Tier"
-          />
-        </EuiFlexItem>
-      </EuiFlexGroup>
-      <EuiSpacer size="xs" />
-      <EuiFlexGroup gutterSize="s">
-        <EuiFlexItem>
-          <EuiFieldNumber
-            compressed
-            prepend="Target"
-            append="%"
-            value={
-              overrides.target ??
-              (objective ? (objective.target * 100).toFixed(2).replace(/\.?0+$/, '') : '99')
-            }
-            onChange={(e) => onOverrideChange({ target: String(Number(e.target.value) / 100) })}
-            min={50}
-            max={99.999}
-            step={0.01}
-            aria-label="Target percentage"
-          />
-        </EuiFlexItem>
-        {isLatency && (
-          <EuiFlexItem>
-            <EuiFieldNumber
-              compressed
-              prepend="p95 ≤"
-              append={unit === 'milliseconds' ? 'ms' : 's'}
-              value={overrides.latencyThreshold ?? String(objective.latencyThreshold)}
-              onChange={(e) => onOverrideChange({ latencyThreshold: e.target.value })}
-              min={0}
-              step={unit === 'milliseconds' ? 10 : 0.01}
-              aria-label="Latency threshold"
-            />
-          </EuiFlexItem>
-        )}
-      </EuiFlexGroup>
-    </EuiPanel>
+  return (
+    <EuiBasicTable<ServiceRowShape>
+      data-test-subj="slosSuggestTable"
+      items={serviceRows}
+      itemId="serviceName"
+      columns={columns}
+      isExpandable
+      hasActions={false}
+      itemIdToExpandedRowMap={itemIdToExpandedRowMap}
+      rowProps={(row) => ({ 'data-test-subj': `slosSuggestServiceRow-${row.serviceName}` })}
+    />
   );
 };
 
