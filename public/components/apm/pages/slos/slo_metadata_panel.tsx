@@ -47,6 +47,13 @@ import type {
 
 export interface SloMetadataPanelProps {
   slo: SloDocument;
+  /**
+   * When true, render without the outer EuiPanel wrapper and flatten the
+   * inner "Advanced details" accordion into sequential sections. Used when
+   * the panel is embedded inside another accordion on the detail page, so
+   * we don't end up with panel-in-accordion-in-panel nesting.
+   */
+  inline?: boolean;
 }
 
 interface LabelRow {
@@ -259,7 +266,7 @@ const ProvisioningBlock: React.FC<ProvisioningBlockProps> = ({ provisioning }) =
   );
 };
 
-export const SloMetadataPanel: React.FC<SloMetadataPanelProps> = ({ slo }) => {
+export const SloMetadataPanel: React.FC<SloMetadataPanelProps> = ({ slo, inline = false }) => {
   const labels = labelRows(slo.spec.labels ?? {});
   const annotations = annotationRows(slo.spec.annotations ?? {});
   const burnRates = slo.spec.alerting.strategy === 'mwmbr' ? slo.spec.alerting.burnRates : [];
@@ -267,8 +274,8 @@ export const SloMetadataPanel: React.FC<SloMetadataPanelProps> = ({ slo }) => {
   const exclusionWindows = slo.spec.exclusionWindows ?? [];
   const prov = slo.status.provisioning.backend === 'prometheus' ? slo.status.provisioning : null;
 
-  return (
-    <EuiPanel data-test-subj="slosDetailMetadataPanel">
+  const body = (
+    <>
       <EuiFlexGroup>
         <EuiFlexItem>
           <EuiText size="m">
@@ -365,9 +372,64 @@ export const SloMetadataPanel: React.FC<SloMetadataPanelProps> = ({ slo }) => {
           )}
         </EuiFlexItem>
       </EuiFlexGroup>
+    </>
+  );
+
+  const supplementalBody = (
+    <>
+      <EuiText size="s">
+        <strong>Supplemental alarms</strong>
+      </EuiText>
+      <EuiSpacer size="xs" />
+      <AlarmChecklist alarms={slo.spec.alarms} />
 
       <EuiSpacer size="m" />
 
+      <EuiText size="s">
+        <strong>Exclusion windows</strong>
+      </EuiText>
+      <EuiSpacer size="xs" />
+      {exclusionWindows.length === 0 ? (
+        <EuiText size="s" color="subdued" data-test-subj="slosDetailMetadataExclusionEmpty">
+          No exclusion windows configured.
+        </EuiText>
+      ) : (
+        <ExclusionWindowTable windows={exclusionWindows} />
+      )}
+
+      <EuiSpacer size="m" />
+
+      <EuiText size="s">
+        <strong>Provisioning</strong>
+      </EuiText>
+      <EuiSpacer size="xs" />
+      {prov ? (
+        <ProvisioningBlock provisioning={prov} />
+      ) : (
+        <EuiText size="s" color="subdued" data-test-subj="slosDetailMetadataProvisioningEmpty">
+          Non-Prometheus provisioning — no rule names available.
+        </EuiText>
+      )}
+    </>
+  );
+
+  // Inline: the detail page already wraps us in its own "Advanced details"
+  // accordion — render bare sections so we don't nest accordion-in-accordion
+  // and don't stack an outer EuiPanel inside a panel-less accordion body.
+  if (inline) {
+    return (
+      <div data-test-subj="slosDetailMetadataPanel">
+        {body}
+        <EuiSpacer size="m" />
+        {supplementalBody}
+      </div>
+    );
+  }
+
+  return (
+    <EuiPanel data-test-subj="slosDetailMetadataPanel">
+      {body}
+      <EuiSpacer size="m" />
       <EuiAccordion
         id="slosDetailMetadataAdvanced"
         buttonContent={
@@ -381,39 +443,7 @@ export const SloMetadataPanel: React.FC<SloMetadataPanelProps> = ({ slo }) => {
         initialIsOpen={false}
       >
         <EuiSpacer size="s" />
-        <EuiText size="s">
-          <strong>Supplemental alarms</strong>
-        </EuiText>
-        <EuiSpacer size="xs" />
-        <AlarmChecklist alarms={slo.spec.alarms} />
-
-        <EuiSpacer size="m" />
-
-        <EuiText size="s">
-          <strong>Exclusion windows</strong>
-        </EuiText>
-        <EuiSpacer size="xs" />
-        {exclusionWindows.length === 0 ? (
-          <EuiText size="s" color="subdued" data-test-subj="slosDetailMetadataExclusionEmpty">
-            No exclusion windows configured.
-          </EuiText>
-        ) : (
-          <ExclusionWindowTable windows={exclusionWindows} />
-        )}
-
-        <EuiSpacer size="m" />
-
-        <EuiText size="s">
-          <strong>Provisioning</strong>
-        </EuiText>
-        <EuiSpacer size="xs" />
-        {prov ? (
-          <ProvisioningBlock provisioning={prov} />
-        ) : (
-          <EuiText size="s" color="subdued" data-test-subj="slosDetailMetadataProvisioningEmpty">
-            Non-Prometheus provisioning — no rule names available.
-          </EuiText>
-        )}
+        {supplementalBody}
       </EuiAccordion>
     </EuiPanel>
   );
