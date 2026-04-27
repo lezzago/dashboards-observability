@@ -27,6 +27,7 @@ import {
   EuiCheckbox,
   EuiCode,
   EuiCodeBlock,
+  EuiConfirmModal,
   EuiFieldNumber,
   EuiFieldText,
   EuiFlexGroup,
@@ -36,12 +37,14 @@ import {
   EuiFlyoutHeader,
   EuiIcon,
   EuiIconTip,
+  EuiLink,
   EuiLoadingSpinner,
   EuiPage,
   EuiPageBody,
   EuiPageContent,
   EuiPageContentBody,
   EuiPanel,
+  EuiProgress,
   EuiSpacer,
   EuiStat,
   EuiTitle,
@@ -50,6 +53,7 @@ import {
 } from '@elastic/eui';
 import { useHistory } from 'react-router-dom';
 import { ChromeStart, HttpStart, NotificationsStart } from '../../../../../../../src/core/public';
+import { toMountPoint } from '../../../../../../../src/plugins/opensearch_dashboards_react/public';
 import { HeaderControlledComponentsWrapper } from '../../../../plugin_helpers/plugin_headerControl';
 import { useApmConfig } from '../../config/apm_config_context';
 import { useServices } from '../../shared/hooks/use_services';
@@ -305,30 +309,77 @@ export const SloSuggestPage: React.FC<SloSuggestPageProps> = ({
     [overrides]
   );
 
-  const createSelected = useCallback(async () => {
-    setCreating(true);
+  /**
+   * Per-draft status for the in-flight batch create. Renders inside each
+   * inline row (spinner while creating, check on success, alert on error)
+   * and gates the progress strip at the top of the page.
+   */
+  const [rowStatusMap, setRowStatusMap] = useState<
+    Record<string, { status: 'pending' | 'creating' | 'success' | 'error'; message?: string }>
+  >({});
+  /** Cumulative counters while the bounded-concurrency loop runs. */
+  const [progress, setProgress] = useState<{ done: number; failed: number; total: number } | null>(
+    null
+  );
+  const [confirmOpen, setConfirmOpen] = useState(false);
+
+  const runCreateSelected = useCallback(async () => {
     const picks = suggestions.filter((s) => selected.has(s.key)).map(applyOverrides);
+    if (picks.length === 0) return;
+    setCreating(true);
+    // Seed row status so each inline row renders a pending spinner slot
+    // immediately — the user can see which rows are in the work queue.
+    setRowStatusMap((prev) => {
+      const next = { ...prev };
+      for (const p of picks) next[p.key] = { status: 'pending' };
+      return next;
+    });
+    setProgress({ done: 0, failed: 0, total: picks.length });
+
     const results: Array<{ key: string; ok: boolean; message?: string }> = [];
-    for (const s of picks) {
+    let done = 0;
+    let failed = 0;
+    // Bounded concurrency: ruler writes are safe concurrent, but four
+    // in-flight at a time keeps server load sensible and preserves per-row
+    // error isolation.
+    await withConcurrency(4, picks, async (s) => {
+      setRowStatusMap((prev) => ({ ...prev, [s.key]: { status: 'creating' } }));
       try {
         await apiClient.create(s.input);
         results.push({ key: s.key, ok: true });
+        setRowStatusMap((prev) => ({ ...prev, [s.key]: { status: 'success' } }));
       } catch (e) {
-        results.push({
-          key: s.key,
-          ok: false,
-          message: e instanceof Error ? e.message : String(e),
-        });
+        const message = e instanceof Error ? e.message : String(e);
+        results.push({ key: s.key, ok: false, message });
+        setRowStatusMap((prev) => ({ ...prev, [s.key]: { status: 'error', message } }));
+        failed += 1;
+      } finally {
+        done += 1;
+        setProgress({ done, failed, total: picks.length });
       }
-    }
+    });
+
     setCreating(false);
+    setProgress(null);
     const failures = results.filter((r) => !r.ok);
     if (failures.length === 0) {
       notifications.toasts.addSuccess({
         title: `Created ${results.length} SLO${results.length === 1 ? '' : 's'}`,
-        text: 'Alerting rules are provisioned and will begin evaluating on the next ruler cycle.',
+        // A mount-point so the "View in listing" action stays clickable;
+        // auto-redirect is removed so the user keeps the row feedback they
+        // just earned and can inspect any partial failure before leaving.
+        text: toMountPoint(
+          <EuiText size="s">
+            <p>Alerting rules are provisioned and will begin evaluating on the next ruler cycle.</p>
+            <EuiLink
+              onClick={() => history.push('/slos')}
+              data-test-subj="slosSuggestCreateViewListing"
+            >
+              View in listing
+            </EuiLink>
+          </EuiText>
+        ),
       });
-      history.push('/slos');
     } else {
       notifications.toasts.addDanger({
         title: `${failures.length} of ${results.length} failed`,
@@ -336,6 +387,17 @@ export const SloSuggestPage: React.FC<SloSuggestPageProps> = ({
       });
     }
   }, [apiClient, applyOverrides, history, notifications, selected, suggestions]);
+
+  const createSelected = useCallback(() => {
+    // Already-open preview means the user has seen the full rule/SLI
+    // picture; skip the second confirmation. Otherwise gate behind the
+    // modal so accidental clicks don't provision dozens of rules.
+    if (showPreview) {
+      runCreateSelected();
+    } else {
+      setConfirmOpen(true);
+    }
+  }, [runCreateSelected, showPreview]);
 
   const decoratedSuggestions = suggestions.map(applyOverrides);
   const selectedCount = decoratedSuggestions.filter((s) => selected.has(s.key)).length;
@@ -592,6 +654,30 @@ export const SloSuggestPage: React.FC<SloSuggestPageProps> = ({
                 </EuiText>
                 <EuiSpacer size="m" />
 
+                {progress && (
+                  <>
+                    <EuiPanel paddingSize="s" hasBorder data-test-subj="slosSuggestProgressStrip">
+                      <EuiFlexGroup alignItems="center" gutterSize="s" responsive={false}>
+                        <EuiFlexItem grow={false}>
+                          <EuiText size="xs">
+                            Creating SLO {progress.done}/{progress.total} ·{' '}
+                            <strong>{progress.failed}</strong> failed so far
+                          </EuiText>
+                        </EuiFlexItem>
+                        <EuiFlexItem>
+                          <EuiProgress
+                            color={progress.failed > 0 ? 'warning' : 'primary'}
+                            value={progress.done}
+                            max={progress.total}
+                            size="xs"
+                          />
+                        </EuiFlexItem>
+                      </EuiFlexGroup>
+                    </EuiPanel>
+                    <EuiSpacer size="s" />
+                  </>
+                )}
+
                 <ServiceTreeTable
                   serviceRows={serviceRows}
                   expandedMap={expandedMap}
@@ -601,6 +687,7 @@ export const SloSuggestPage: React.FC<SloSuggestPageProps> = ({
                   overrides={overrides}
                   onToggleDraft={toggle}
                   onOverrideChange={setOverride}
+                  rowStatusMap={rowStatusMap}
                 />
               </>
             )}
@@ -640,9 +727,61 @@ export const SloSuggestPage: React.FC<SloSuggestPageProps> = ({
           </EuiFlyoutBody>
         </EuiFlyout>
       )}
+      {confirmOpen && (
+        <EuiConfirmModal
+          title={`Create ${selectedCount} SLO${selectedCount === 1 ? '' : 's'}?`}
+          onCancel={() => setConfirmOpen(false)}
+          onConfirm={() => {
+            setConfirmOpen(false);
+            runCreateSelected();
+          }}
+          cancelButtonText="Cancel"
+          confirmButtonText="Create"
+          defaultFocusedButton="confirm"
+          data-test-subj="slosSuggestConfirmModal"
+          cancelButtonProps={{ 'data-test-subj': 'slosSuggestConfirmCancel' }}
+          confirmButtonProps={{ 'data-test-subj': 'slosSuggestConfirmCreate' }}
+        >
+          <EuiText size="s">
+            <p>
+              This provisions <strong>{totalRules}</strong> Prometheus rules in namespace{' '}
+              <EuiCode>slo-generated</EuiCode>. Rules begin evaluating on the next ruler cycle;
+              alerts do not fire until data accumulates.
+            </p>
+          </EuiText>
+        </EuiConfirmModal>
+      )}
     </EuiPage>
   );
 };
+
+// ============================================================================
+// Bounded-concurrency helper — runs `worker(item)` over `items` with at most
+// `n` in flight. Uses Promise.allSettled-style semantics: every item runs
+// to completion; the caller captures per-item errors inside `worker`.
+// ============================================================================
+
+async function withConcurrency<T>(
+  n: number,
+  items: T[],
+  worker: (item: T) => Promise<void>
+): Promise<void> {
+  if (items.length === 0) return;
+  const limit = Math.max(1, n);
+  let idx = 0;
+  const runners: Array<Promise<void>> = [];
+  const runNext = async (): Promise<void> => {
+    while (idx < items.length) {
+      const current = idx;
+      idx += 1;
+      await worker(items[current]);
+    }
+  };
+  for (let i = 0; i < Math.min(limit, items.length); i += 1) {
+    runners.push(runNext());
+  }
+  await Promise.all(runners);
+}
 
 // ============================================================================
 // Inline suggestion row — a compact, single-line-ish layout used inside the
