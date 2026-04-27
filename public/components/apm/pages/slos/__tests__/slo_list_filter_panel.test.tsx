@@ -47,14 +47,14 @@ describe('SloListFilterPanel', () => {
         items={[makeSummary()]}
       />
     );
-    const input = screen.getByTestId('slos-listing-filter-search') as HTMLInputElement;
+    const input = screen.getByTestId('slosListingFilterSearch') as HTMLInputElement;
     expect(input.value).toBe('checkout');
   });
 
   it('emits a search-delta onChange when the user types', () => {
     const onChange = jest.fn();
     render(<SloListFilterPanel filters={{}} onChange={onChange} items={[makeSummary()]} />);
-    fireEvent.change(screen.getByTestId('slos-listing-filter-search'), {
+    fireEvent.change(screen.getByTestId('slosListingFilterSearch'), {
       target: { value: 'cart' },
     });
     expect(onChange).toHaveBeenCalledWith({ search: 'cart' });
@@ -65,13 +65,13 @@ describe('SloListFilterPanel', () => {
     const { rerender } = render(
       <SloListFilterPanel filters={{}} onChange={onChange} items={[makeSummary()]} />
     );
-    fireEvent.click(screen.getByTestId('slos-listing-filter-enabled-button'));
+    fireEvent.click(screen.getByTestId('slosListingFilter-enabled-button'));
     expect(onChange).toHaveBeenLastCalledWith({ enabled: true });
 
     rerender(
       <SloListFilterPanel filters={{ enabled: true }} onChange={onChange} items={[makeSummary()]} />
     );
-    fireEvent.click(screen.getByTestId('slos-listing-filter-enabled-button'));
+    fireEvent.click(screen.getByTestId('slosListingFilter-enabled-button'));
     expect(onChange).toHaveBeenLastCalledWith({ enabled: false });
 
     rerender(
@@ -81,7 +81,7 @@ describe('SloListFilterPanel', () => {
         items={[makeSummary()]}
       />
     );
-    fireEvent.click(screen.getByTestId('slos-listing-filter-enabled-button'));
+    fireEvent.click(screen.getByTestId('slosListingFilter-enabled-button'));
     expect(onChange).toHaveBeenLastCalledWith({ enabled: undefined });
   });
 
@@ -93,12 +93,12 @@ describe('SloListFilterPanel', () => {
         items={[makeSummary()]}
       />
     );
-    expect(screen.getByTestId('slos-listing-filter-active-count')).toHaveTextContent('2 active');
+    expect(screen.getByTestId('slosListingFilterActiveCount')).toHaveTextContent('2 active');
   });
 
   it('hides the active-count when no filters are applied', () => {
     render(<SloListFilterPanel filters={{}} onChange={jest.fn()} items={[makeSummary()]} />);
-    expect(screen.queryByTestId('slos-listing-filter-active-count')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('slosListingFilterActiveCount')).not.toBeInTheDocument();
   });
 
   it('renders a facet button for state with an active-count badge when pre-applied', () => {
@@ -111,7 +111,7 @@ describe('SloListFilterPanel', () => {
     );
     // EuiFilterButton renders its label text directly, so a straight regex
     // query works without opening the popover.
-    const stateBtn = screen.getByTestId('slos-listing-filter-state-button');
+    const stateBtn = screen.getByTestId('slosListingFilter-state-button');
     expect(stateBtn).toHaveTextContent('State');
   });
 });

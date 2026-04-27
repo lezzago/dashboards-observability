@@ -355,7 +355,7 @@ export const SloSuggestPage: React.FC<SloSuggestPageProps> = ({
         setDiscoveryEpoch((n) => n + 1);
       }}
       isLoading={loading}
-      data-test-subj="slos-suggest-discover"
+      data-test-subj="slosSuggestDiscover"
     >
       Rediscover
     </EuiButton>,
@@ -368,7 +368,7 @@ export const SloSuggestPage: React.FC<SloSuggestPageProps> = ({
       onClick={createSelected}
       isLoading={creating}
       isDisabled={selectedCount === 0 || loading}
-      data-test-subj="slos-suggest-create"
+      data-test-subj="slosSuggestCreate"
     >
       Create {selectedCount} selected
     </EuiButton>,
@@ -497,7 +497,7 @@ export const SloSuggestPage: React.FC<SloSuggestPageProps> = ({
                             iconType={showPreview ? 'eyeClosed' : 'eye'}
                             onClick={() => setShowPreview((v) => !v)}
                             isDisabled={selectedCount === 0}
-                            data-test-subj="slos-suggest-preview-toggle"
+                            data-test-subj="slosSuggestPreviewToggle"
                           >
                             {showPreview ? 'Hide preview' : `Preview ${selectedCount} selected`}
                           </EuiButton>
@@ -557,11 +557,11 @@ export const SloSuggestPage: React.FC<SloSuggestPageProps> = ({
                   return (
                     <EuiAccordion
                       key={serviceName}
-                      id={`slos-suggest-service-${serviceName}`}
+                      id={`slosSuggestService-${serviceName}`}
                       buttonContent={accordionButton}
                       paddingSize="s"
                       initialIsOpen={false}
-                      data-test-subj={`slos-suggest-service-accordion-${serviceName}`}
+                      data-test-subj={`slosSuggestServiceAccordion-${serviceName}`}
                     >
                       <EuiFlexGroup wrap gutterSize="m">
                         {perService.map((s) => (
@@ -626,15 +626,15 @@ const SuggestionCard: React.FC<{
       color={selected ? 'primary' : 'plain'}
       hasBorder
       style={{ height: '100%' }}
-      data-test-subj={`slos-suggest-card-${suggestion.key}`}
+      data-test-subj={`slosSuggestCard-${suggestion.key}`}
     >
       <EuiFlexGroup gutterSize="s" alignItems="flexStart" responsive={false}>
         <EuiFlexItem grow={false}>
           <EuiCheckbox
-            id={`slos-suggest-select-${suggestion.key}`}
+            id={`slosSuggestSelect-${suggestion.key}`}
             checked={selected}
             onChange={onToggle}
-            data-test-subj={`slos-suggest-select-${suggestion.key}`}
+            data-test-subj={`slosSuggestSelect-${suggestion.key}`}
           />
         </EuiFlexItem>
         <EuiFlexItem>
@@ -655,7 +655,7 @@ const SuggestionCard: React.FC<{
                   color="warning"
                   iconType="check"
                   title={`Matching recording rule: ${suggestion.existingRuleMatch.groupName} / ${suggestion.existingRuleMatch.ruleName}`}
-                  data-test-subj={`slos-suggest-covered-${suggestion.key}`}
+                  data-test-subj={`slosSuggestCovered-${suggestion.key}`}
                 >
                   covered by existing rule
                 </EuiBadge>
@@ -941,7 +941,7 @@ const BatchPreviewSection: React.FC<{
   }, 0);
 
   return (
-    <EuiPanel data-test-subj="slos-suggest-preview">
+    <EuiPanel data-test-subj="slosSuggestPreview">
       <EuiFlexGroup alignItems="flexStart" responsive={false} gutterSize="s">
         <EuiFlexItem grow={true}>
           <EuiText size="m">
@@ -967,7 +967,7 @@ const BatchPreviewSection: React.FC<{
                 onChange={(id) => setWindowChoice(id as WindowOption)}
                 options={[...WINDOW_OPTIONS]}
                 buttonSize="compressed"
-                data-test-subj="slos-suggest-preview-window"
+                data-test-subj="slosSuggestPreviewWindow"
               />
             </EuiFlexItem>
           </EuiFlexGroup>
@@ -1049,7 +1049,7 @@ const PreviewRow: React.FC<{
       paddingSize="s"
       hasBorder
       style={{ marginBottom: 8 }}
-      data-test-subj={`slos-suggest-preview-row-${suggestion.key}`}
+      data-test-subj={`slosSuggestPreviewRow-${suggestion.key}`}
     >
       <EuiFlexGroup gutterSize="s" alignItems="center" responsive={false} wrap>
         <EuiFlexItem grow={true}>
@@ -1091,7 +1091,7 @@ const PreviewRow: React.FC<{
             alignItems="center"
             responsive={false}
             wrap
-            data-test-subj={`slos-suggest-preview-live-${suggestion.key}`}
+            data-test-subj={`slosSuggestPreviewLive-${suggestion.key}`}
           >
             <EuiFlexItem grow={false}>
               <EuiText size="xs" color="subdued">
@@ -1169,7 +1169,7 @@ const PreviewRow: React.FC<{
             color="warning"
             iconType="alert"
             title="Preview unavailable"
-            data-test-subj={`slos-suggest-preview-error-${suggestion.key}`}
+            data-test-subj={`slosSuggestPreviewError-${suggestion.key}`}
           >
             <EuiText size="xs">{error ?? 'Unable to generate preview.'}</EuiText>
           </EuiCallOut>
@@ -1179,7 +1179,7 @@ const PreviewRow: React.FC<{
         <>
           <EuiSpacer size="xs" />
           <EuiAccordion
-            id={`slos-suggest-preview-yaml-${suggestion.key}`}
+            id={`slosSuggestPreviewYaml-${suggestion.key}`}
             buttonContent={
               <EuiText size="xs">
                 Show rule group <EuiCode>{group.groupName}</EuiCode> (eval interval {group.interval}
@@ -1187,14 +1187,14 @@ const PreviewRow: React.FC<{
               </EuiText>
             }
             paddingSize="s"
-            data-test-subj={`slos-suggest-preview-yaml-toggle-${suggestion.key}`}
+            data-test-subj={`slosSuggestPreviewYamlToggle-${suggestion.key}`}
           >
             <EuiCodeBlock
               language="yaml"
               paddingSize="s"
               isCopyable
               overflowHeight={320}
-              data-test-subj={`slos-suggest-preview-yaml-${suggestion.key}`}
+              data-test-subj={`slosSuggestPreviewYaml-${suggestion.key}`}
             >
               {group.yaml}
             </EuiCodeBlock>

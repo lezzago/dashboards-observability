@@ -191,7 +191,7 @@ export const SloBudgetPanel: React.FC<SloBudgetPanelProps> = ({
   const remainingColor = remaining > 0.25 ? 'success' : remaining > 0 ? 'accent' : 'danger';
 
   return (
-    <EuiPanel data-test-subj="slos-budget-panel">
+    <EuiPanel data-test-subj="slosBudgetPanel">
       <EuiFlexGroup alignItems="center">
         <EuiFlexItem>
           <EuiText size="m">
@@ -224,7 +224,7 @@ export const SloBudgetPanel: React.FC<SloBudgetPanelProps> = ({
                 {formatPct(attainment, { decimals: 3 }).replace(/\.?0+%$/, '%')}
               </span>
             }
-            data-test-subj="slos-budget-attainment"
+            data-test-subj="slosBudgetAttainment"
           />
           <EuiText size="xs" color="subdued">
             target {formatPct(target, { decimals: 3 }).replace(/\.?0+%$/, '%')}
@@ -242,7 +242,7 @@ export const SloBudgetPanel: React.FC<SloBudgetPanelProps> = ({
               </EuiToolTip>
             }
             title={formatPct(remaining, { decimals: 1 })}
-            data-test-subj="slos-budget-remaining"
+            data-test-subj="slosBudgetRemaining"
           />
           <EuiText size="xs" color="subdued">
             budget {formatPct(errorBudget, { decimals: 3 }).replace(/\.?0+%$/, '%')} total
@@ -272,7 +272,7 @@ export const SloBudgetPanel: React.FC<SloBudgetPanelProps> = ({
                 ? 'accent'
                 : 'subdued'
             }
-            data-test-subj="slos-budget-exhaustion"
+            data-test-subj="slosBudgetExhaustion"
           />
           <EuiText size="xs" color="subdued">
             based on 1h burn
@@ -290,7 +290,7 @@ export const SloBudgetPanel: React.FC<SloBudgetPanelProps> = ({
             }
             title={liveStatus.ruleCount ?? 0}
             titleColor="subdued"
-            data-test-subj="slos-budget-rules"
+            data-test-subj="slosBudgetRules"
           />
           <EuiText size="xs" color="subdued">
             {liveStatus.firingCount > 0 ? (

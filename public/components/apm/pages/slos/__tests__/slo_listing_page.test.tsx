@@ -18,7 +18,7 @@ jest.mock('../../../../../plugin_helpers/plugin_headerControl', () => ({
   ),
 }));
 jest.mock('../slo_overview_panel', () => ({
-  SloOverviewPanel: () => <div data-test-subj="slos-overview-stub" />,
+  SloOverviewPanel: () => <div data-test-subj="slosOverviewStub" />,
 }));
 
 function makeSummary(overrides: Partial<SloSummary> = {}): SloSummary {
@@ -85,8 +85,8 @@ describe('SloListingPage — filter integration', () => {
     await act(async () => {
       renderPage(list);
     });
-    expect(await screen.findByTestId('slos-empty-no-slos')).toBeInTheDocument();
-    expect(screen.queryByTestId('slos-empty-filtered-zero')).not.toBeInTheDocument();
+    expect(await screen.findByTestId('slosEmptyNoSlos')).toBeInTheDocument();
+    expect(screen.queryByTestId('slosEmptyFilteredZero')).not.toBeInTheDocument();
   });
 
   it('shows the "no matches" empty state with Clear-filters CTA when filtered to zero', async () => {
@@ -112,7 +112,7 @@ describe('SloListingPage — filter integration', () => {
     });
 
     // Wait for the unfiltered fetch to complete and the table to mount.
-    await screen.findByTestId('slos-table');
+    await screen.findByTestId('slosTable');
 
     // Apply an impossible filter via the URL-params round-trip: this exercises
     // the same code path as a facet click without depending on popover
@@ -137,19 +137,19 @@ describe('SloListingPage — filter integration', () => {
     });
 
     await act(async () => {
-      fireEvent.change(screen.getByTestId('slos-listing-filter-search'), {
+      fireEvent.change(screen.getByTestId('slosListingFilterSearch'), {
         target: { value: 'no-such-thing' },
       });
     });
 
     await waitFor(() => {
-      expect(screen.getByTestId('slos-empty-filtered-zero')).toBeInTheDocument();
+      expect(screen.getByTestId('slosEmptyFilteredZero')).toBeInTheDocument();
     });
-    expect(screen.getByTestId('slos-empty-filtered-clear')).toBeInTheDocument();
+    expect(screen.getByTestId('slosEmptyFilteredClear')).toBeInTheDocument();
 
     // Clicking the clear CTA should re-fetch without filters.
     await act(async () => {
-      fireEvent.click(screen.getByTestId('slos-empty-filtered-clear'));
+      fireEvent.click(screen.getByTestId('slosEmptyFilteredClear'));
     });
     await waitFor(() => {
       expect(list).toHaveBeenCalledWith(expect.not.objectContaining({ search: 'no-such-thing' }));
@@ -194,9 +194,9 @@ describe('SloListingPage — filter integration', () => {
       renderPage(list, '?state=breached,warning&tier=tier-1');
     });
 
-    await screen.findByTestId('slos-table');
-    expect(screen.getByTestId('slos-listing-filter-chip-state-breached')).toBeInTheDocument();
-    expect(screen.getByTestId('slos-listing-filter-chip-state-warning')).toBeInTheDocument();
-    expect(screen.getByTestId('slos-listing-filter-chip-tier-tier-1')).toBeInTheDocument();
+    await screen.findByTestId('slosTable');
+    expect(screen.getByTestId('slosListingFilterChip-state-breached')).toBeInTheDocument();
+    expect(screen.getByTestId('slosListingFilterChip-state-warning')).toBeInTheDocument();
+    expect(screen.getByTestId('slosListingFilterChip-tier-tier-1')).toBeInTheDocument();
   });
 });

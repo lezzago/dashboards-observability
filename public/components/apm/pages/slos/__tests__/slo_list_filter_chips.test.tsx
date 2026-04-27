@@ -24,18 +24,18 @@ describe('SloListFilterChips', () => {
       search: 'api',
     };
     render(<SloListFilterChips filters={filters} onChange={jest.fn()} onClearAll={jest.fn()} />);
-    expect(screen.getByTestId('slos-listing-filter-chip-state-breached')).toBeInTheDocument();
-    expect(screen.getByTestId('slos-listing-filter-chip-state-warning')).toBeInTheDocument();
-    expect(screen.getByTestId('slos-listing-filter-chip-tier-tier-1')).toBeInTheDocument();
-    expect(screen.getByTestId('slos-listing-filter-chip-enabled-false')).toBeInTheDocument();
-    expect(screen.getByTestId('slos-listing-filter-chip-search-api')).toBeInTheDocument();
+    expect(screen.getByTestId('slosListingFilterChip-state-breached')).toBeInTheDocument();
+    expect(screen.getByTestId('slosListingFilterChip-state-warning')).toBeInTheDocument();
+    expect(screen.getByTestId('slosListingFilterChip-tier-tier-1')).toBeInTheDocument();
+    expect(screen.getByTestId('slosListingFilterChip-enabled-false')).toBeInTheDocument();
+    expect(screen.getByTestId('slosListingFilterChip-search-api')).toBeInTheDocument();
   });
 
   it('emits filter patch with the value removed when a chip is clicked', () => {
     const onChange = jest.fn();
     const filters: SloListFilters = { state: ['breached', 'warning'] };
     render(<SloListFilterChips filters={filters} onChange={onChange} onClearAll={jest.fn()} />);
-    fireEvent.click(screen.getByTestId('slos-listing-filter-chip-state-breached'));
+    fireEvent.click(screen.getByTestId('slosListingFilterChip-state-breached'));
     expect(onChange).toHaveBeenCalledWith({ state: ['warning'] });
   });
 
@@ -48,7 +48,7 @@ describe('SloListFilterChips', () => {
         onClearAll={jest.fn()}
       />
     );
-    fireEvent.click(screen.getByTestId('slos-listing-filter-chip-state-breached'));
+    fireEvent.click(screen.getByTestId('slosListingFilterChip-state-breached'));
     expect(onChange).toHaveBeenCalledWith({ state: undefined });
   });
 
@@ -57,7 +57,7 @@ describe('SloListFilterChips', () => {
     render(
       <SloListFilterChips filters={{ enabled: true }} onChange={onChange} onClearAll={jest.fn()} />
     );
-    fireEvent.click(screen.getByTestId('slos-listing-filter-chip-enabled-true'));
+    fireEvent.click(screen.getByTestId('slosListingFilterChip-enabled-true'));
     expect(onChange).toHaveBeenCalledWith({ enabled: undefined });
   });
 
@@ -70,7 +70,7 @@ describe('SloListFilterChips', () => {
         onClearAll={onClearAll}
       />
     );
-    fireEvent.click(screen.getByTestId('slos-listing-filter-clear-all'));
+    fireEvent.click(screen.getByTestId('slosListingFilterClearAll'));
     expect(onClearAll).toHaveBeenCalled();
   });
 });

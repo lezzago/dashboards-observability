@@ -86,7 +86,7 @@ describe('GeneratedRulesPreview', () => {
   it('renders an idle hint when no input is provided', () => {
     const preview = jest.fn();
     render(<GeneratedRulesPreview apiClient={{ preview }} input={null} />);
-    expect(screen.getByTestId('slos-wizard-preview-idle')).toBeInTheDocument();
+    expect(screen.getByTestId('slosWizardPreviewIdle')).toBeInTheDocument();
     expect(preview).not.toHaveBeenCalled();
   });
 
@@ -117,13 +117,11 @@ describe('GeneratedRulesPreview', () => {
     await waitFor(() => expect(preview).toHaveBeenCalled());
 
     // Rule count badge
-    expect(await screen.findByTestId('slos-wizard-preview-rule-count')).toHaveTextContent(
-      '2 rules'
-    );
+    expect(await screen.findByTestId('slosWizardPreviewRuleCount')).toHaveTextContent('2 rules');
     // Group name
-    expect(screen.getByTestId('slos-wizard-preview-group-name')).toHaveTextContent(group.groupName);
+    expect(screen.getByTestId('slosWizardPreviewGroupName')).toHaveTextContent(group.groupName);
     // YAML from server response is rendered verbatim.
-    expect(screen.getByTestId('slos-wizard-preview-yaml')).toHaveTextContent(
+    expect(screen.getByTestId('slosWizardPreviewYaml')).toHaveTextContent(
       'slo:sli_error:ratio_rate_5m'
     );
   });
@@ -134,7 +132,7 @@ describe('GeneratedRulesPreview', () => {
     act(() => {
       jest.advanceTimersByTime(PREVIEW_DEBOUNCE_MS);
     });
-    const cb = await screen.findByTestId('slos-wizard-preview-error');
+    const cb = await screen.findByTestId('slosWizardPreviewError');
     expect(cb).toHaveTextContent('boom');
   });
 

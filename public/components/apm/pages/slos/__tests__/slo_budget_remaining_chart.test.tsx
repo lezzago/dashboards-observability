@@ -193,7 +193,7 @@ describe('SloBudgetRemainingChart', () => {
         {...baseProps}
       />
     );
-    expect(screen.getByTestId('slos-budget-remaining-empty')).toBeInTheDocument();
+    expect(screen.getByTestId('slosBudgetRemainingEmpty')).toBeInTheDocument();
   });
 
   it('renders the exhausted banner when the latest budget sample is <= 0', () => {
@@ -220,7 +220,7 @@ describe('SloBudgetRemainingChart', () => {
         {...baseProps}
       />
     );
-    expect(screen.getByTestId('slos-budget-remaining-exhausted')).toBeInTheDocument();
+    expect(screen.getByTestId('slosBudgetRemainingExhausted')).toBeInTheDocument();
   });
 
   it('shows the unavailable callout when the SLI cannot produce a PromQL query', () => {

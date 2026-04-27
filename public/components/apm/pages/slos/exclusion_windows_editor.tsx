@@ -47,26 +47,26 @@ export const ExclusionWindowsEditor: React.FC<ExclusionWindowsEditorProps> = ({
 }) => (
   <EuiPanel>
     <EuiAccordion
-      id="slos-wizard-exclusion-windows"
+      id="slosWizardExclusionWindows"
       buttonContent="Exclusion windows (maintenance / deploy freezes)"
       paddingSize="s"
-      data-test-subj="slos-wizard-exclusion-windows-toggle"
+      data-test-subj="slosWizardExclusionWindowsToggle"
     >
       <EuiCallOut
         color="primary"
         size="s"
         iconType="iInCircle"
         title="Saved with the SLO; attainment exclusion enforcement ships post-GA."
-        data-test-subj="slos-wizard-exclusion-windows-notice"
+        data-test-subj="slosWizardExclusionWindowsNotice"
       />
       <EuiSpacer size="s" />
       {exclusionWindows.length === 0 && (
-        <EuiText size="s" color="subdued" data-test-subj="slos-wizard-exclusion-windows-empty">
+        <EuiText size="s" color="subdued" data-test-subj="slosWizardExclusionWindowsEmpty">
           No exclusion windows configured.
         </EuiText>
       )}
       {exclusionWindows.map((ew, i) => (
-        <div key={i} style={{ marginBottom: 12 }} data-test-subj={`slos-wizard-exclusion-row-${i}`}>
+        <div key={i} style={{ marginBottom: 12 }} data-test-subj={`slosWizardExclusionRow-${i}`}>
           <EuiFlexGroup gutterSize="s" alignItems="flexEnd">
             <EuiFlexItem>
               <EuiFormRow label="Name">
@@ -81,7 +81,7 @@ export const ExclusionWindowsEditor: React.FC<ExclusionWindowsEditorProps> = ({
                     })
                   }
                   compressed
-                  data-test-subj={`slos-wizard-exclusion-name-${i}`}
+                  data-test-subj={`slosWizardExclusionName-${i}`}
                 />
               </EuiFormRow>
             </EuiFlexItem>
@@ -98,7 +98,7 @@ export const ExclusionWindowsEditor: React.FC<ExclusionWindowsEditorProps> = ({
                     })
                   }
                   compressed
-                  data-test-subj={`slos-wizard-exclusion-reason-${i}`}
+                  data-test-subj={`slosWizardExclusionReason-${i}`}
                 />
               </EuiFormRow>
             </EuiFlexItem>
@@ -109,7 +109,7 @@ export const ExclusionWindowsEditor: React.FC<ExclusionWindowsEditorProps> = ({
                 iconType="trash"
                 aria-label={`Remove exclusion window ${i}`}
                 size="s"
-                data-test-subj={`slos-wizard-exclusion-remove-${i}`}
+                data-test-subj={`slosWizardExclusionRemove-${i}`}
               />
             </EuiFlexItem>
           </EuiFlexGroup>
@@ -125,7 +125,7 @@ export const ExclusionWindowsEditor: React.FC<ExclusionWindowsEditorProps> = ({
               })
             }
             options={SCHEDULE_OPTIONS}
-            data-test-subj={`slos-wizard-exclusion-schedule-type-${i}`}
+            data-test-subj={`slosWizardExclusionScheduleType-${i}`}
           />
           <EuiSpacer size="xs" />
           {ew.schedule.type === 'cron' ? (
@@ -143,7 +143,7 @@ export const ExclusionWindowsEditor: React.FC<ExclusionWindowsEditorProps> = ({
                       })
                     }
                     compressed
-                    data-test-subj={`slos-wizard-exclusion-cron-expression-${i}`}
+                    data-test-subj={`slosWizardExclusionCronExpression-${i}`}
                   />
                 </EuiFormRow>
               </EuiFlexItem>
@@ -160,7 +160,7 @@ export const ExclusionWindowsEditor: React.FC<ExclusionWindowsEditorProps> = ({
                       })
                     }
                     compressed
-                    data-test-subj={`slos-wizard-exclusion-cron-timezone-${i}`}
+                    data-test-subj={`slosWizardExclusionCronTimezone-${i}`}
                   />
                 </EuiFormRow>
               </EuiFlexItem>
@@ -177,7 +177,7 @@ export const ExclusionWindowsEditor: React.FC<ExclusionWindowsEditorProps> = ({
                       })
                     }
                     compressed
-                    data-test-subj={`slos-wizard-exclusion-cron-duration-${i}`}
+                    data-test-subj={`slosWizardExclusionCronDuration-${i}`}
                   />
                 </EuiFormRow>
               </EuiFlexItem>
@@ -197,7 +197,7 @@ export const ExclusionWindowsEditor: React.FC<ExclusionWindowsEditorProps> = ({
                       })
                     }
                     compressed
-                    data-test-subj={`slos-wizard-exclusion-oneoff-start-${i}`}
+                    data-test-subj={`slosWizardExclusionOneoffStart-${i}`}
                   />
                 </EuiFormRow>
               </EuiFlexItem>
@@ -214,7 +214,7 @@ export const ExclusionWindowsEditor: React.FC<ExclusionWindowsEditorProps> = ({
                       })
                     }
                     compressed
-                    data-test-subj={`slos-wizard-exclusion-oneoff-end-${i}`}
+                    data-test-subj={`slosWizardExclusionOneoffEnd-${i}`}
                   />
                 </EuiFormRow>
               </EuiFlexItem>
@@ -226,7 +226,7 @@ export const ExclusionWindowsEditor: React.FC<ExclusionWindowsEditorProps> = ({
         iconType="plusInCircle"
         size="s"
         onClick={() => dispatch({ kind: 'addExclusionWindow' })}
-        data-test-subj="slos-wizard-exclusion-add"
+        data-test-subj="slosWizardExclusionAdd"
       >
         Add exclusion window
       </EuiButtonEmpty>

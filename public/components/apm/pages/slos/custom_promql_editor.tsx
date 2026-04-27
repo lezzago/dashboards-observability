@@ -53,7 +53,7 @@ export const CustomPromqlEditor: React.FC<CustomPromqlEditorProps> = ({
   const anyCustomExprError = errors['spec.sli.definition.customExpr'];
 
   return (
-    <EuiPanel data-test-subj="slos-wizard-custom-promql">
+    <EuiPanel data-test-subj="slosWizardCustomPromql">
       <EuiText size="m">
         <h4>Custom PromQL</h4>
       </EuiText>
@@ -71,7 +71,7 @@ export const CustomPromqlEditor: React.FC<CustomPromqlEditorProps> = ({
           })
         }
         options={MODE_OPTIONS}
-        data-test-subj="slos-wizard-custom-promql-mode"
+        data-test-subj="slosWizardCustomPromqlMode"
       />
       <EuiSpacer size="s" />
       {anyCustomExprError && (
@@ -80,7 +80,7 @@ export const CustomPromqlEditor: React.FC<CustomPromqlEditorProps> = ({
             color="warning"
             size="s"
             title={anyCustomExprError}
-            data-test-subj="slos-wizard-custom-promql-missing"
+            data-test-subj="slosWizardCustomPromqlMissing"
           />
           <EuiSpacer size="s" />
         </>
@@ -103,7 +103,7 @@ export const CustomPromqlEditor: React.FC<CustomPromqlEditorProps> = ({
               style={MONO_STYLE}
               fullWidth
               placeholder={`sum(rate(http_requests_total{status_code!~"5.."}[5m]))`}
-              data-test-subj="slos-wizard-custom-promql-good"
+              data-test-subj="slosWizardCustomPromqlGood"
             />
           </EuiFormRow>
           <EuiFormRow
@@ -122,7 +122,7 @@ export const CustomPromqlEditor: React.FC<CustomPromqlEditorProps> = ({
               style={MONO_STYLE}
               fullWidth
               placeholder={`sum(rate(http_requests_total[5m]))`}
-              data-test-subj="slos-wizard-custom-promql-total"
+              data-test-subj="slosWizardCustomPromqlTotal"
             />
           </EuiFormRow>
         </>
@@ -143,7 +143,7 @@ export const CustomPromqlEditor: React.FC<CustomPromqlEditorProps> = ({
             style={MONO_STYLE}
             fullWidth
             placeholder={`(sum(rate(errors[5m])) / sum(rate(requests[5m])))`}
-            data-test-subj="slos-wizard-custom-promql-raw"
+            data-test-subj="slosWizardCustomPromqlRaw"
           />
         </EuiFormRow>
       )}

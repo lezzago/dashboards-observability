@@ -97,21 +97,21 @@ function makeSlo(overrides: Partial<SloDocument['spec']> = {}): SloDocument {
 describe('SloMetadataPanel', () => {
   it('shows labels with the slo_label_<key> propagation hint', () => {
     render(<SloMetadataPanel slo={makeSlo()} />);
-    const badges = screen.getAllByTestId('slos-detail-metadata-label-propagation');
+    const badges = screen.getAllByTestId('slosDetailMetadataLabelPropagation');
     const texts = badges.map((b) => b.textContent);
     expect(texts).toEqual(expect.arrayContaining(['slo_label_team', 'slo_label_env']));
   });
 
   it('renders the exclusion-window row with the deferred-enforcement badge', () => {
     render(<SloMetadataPanel slo={makeSlo()} />);
-    const deferred = screen.getByTestId('slos-detail-metadata-exclusion-deferred');
+    const deferred = screen.getByTestId('slosDetailMetadataExclusionDeferred');
     expect(deferred).toBeInTheDocument();
     expect(deferred).toHaveTextContent(/deferred/i);
   });
 
   it('renders the Advanced accordion collapsed by default', () => {
     render(<SloMetadataPanel slo={makeSlo()} />);
-    const accordion = screen.getByTestId('slos-detail-metadata-advanced');
+    const accordion = screen.getByTestId('slosDetailMetadataAdvanced');
     // EuiAccordion places aria-expanded on the trigger button.
     const button = accordion.querySelector('button[aria-expanded]');
     expect(button).not.toBeNull();
@@ -122,9 +122,9 @@ describe('SloMetadataPanel', () => {
     render(
       <SloMetadataPanel slo={makeSlo({ labels: {}, annotations: {}, exclusionWindows: [] })} />
     );
-    expect(screen.getByTestId('slos-detail-metadata-labels-empty')).toBeInTheDocument();
-    expect(screen.getByTestId('slos-detail-metadata-annotations-empty')).toBeInTheDocument();
+    expect(screen.getByTestId('slosDetailMetadataLabelsEmpty')).toBeInTheDocument();
+    expect(screen.getByTestId('slosDetailMetadataAnnotationsEmpty')).toBeInTheDocument();
     // Exclusion empty state lives inside the (collapsed) accordion DOM.
-    expect(screen.getByTestId('slos-detail-metadata-exclusion-empty')).toBeInTheDocument();
+    expect(screen.getByTestId('slosDetailMetadataExclusionEmpty')).toBeInTheDocument();
   });
 });

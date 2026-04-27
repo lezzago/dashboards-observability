@@ -132,7 +132,7 @@ const FacetPopover: React.FC<{
       isSelected={open}
       hasActiveFilters={activeCount > 0}
       numActiveFilters={activeCount > 0 ? activeCount : undefined}
-      data-test-subj={`slos-listing-filter-${dataTestSubj}-button`}
+      data-test-subj={`slosListingFilter-${dataTestSubj}-button`}
     >
       {label}
     </EuiFilterButton>
@@ -172,7 +172,7 @@ const FacetPopover: React.FC<{
               )
             : undefined
         }
-        data-test-subj={`slos-listing-filter-${dataTestSubj}-selectable`}
+        data-test-subj={`slosListingFilter-${dataTestSubj}-selectable`}
       >
         {(list, search) => (
           <div style={{ width: 260 }}>
@@ -200,7 +200,7 @@ const EnabledTriStateButton: React.FC<{
     <EuiFilterButton
       onClick={cycle}
       hasActiveFilters={value !== undefined}
-      data-test-subj="slos-listing-filter-enabled-button"
+      data-test-subj="slosListingFilter-enabled-button"
     >
       {label}
     </EuiFilterButton>
@@ -227,7 +227,7 @@ export const SloListFilterPanel: React.FC<SloListFilterPanelProps> = ({
       alignItems="center"
       responsive={false}
       wrap
-      data-test-subj="slos-listing-filter-panel"
+      data-test-subj="slosListingFilterPanel"
     >
       <EuiFlexItem grow={false} style={{ minWidth: 280, flexGrow: 1 }}>
         <EuiFieldSearch
@@ -237,7 +237,7 @@ export const SloListFilterPanel: React.FC<SloListFilterPanelProps> = ({
           isClearable
           compressed
           fullWidth
-          data-test-subj="slos-listing-filter-search"
+          data-test-subj="slosListingFilterSearch"
         />
       </EuiFlexItem>
       <EuiFlexItem grow={false}>
@@ -308,7 +308,7 @@ export const SloListFilterPanel: React.FC<SloListFilterPanelProps> = ({
       {activeCount > 0 ? (
         <EuiFlexItem grow={false}>
           <span
-            data-test-subj="slos-listing-filter-active-count"
+            data-test-subj="slosListingFilterActiveCount"
             style={{ fontSize: 12, color: '#69707D' }}
           >
             {activeCount} active

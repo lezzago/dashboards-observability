@@ -262,7 +262,7 @@ export const SloBurnRateChart: React.FC<SloBurnRateChartProps> = ({
   );
 
   return (
-    <EuiPanel data-test-subj="slos-burn-rate-chart">
+    <EuiPanel data-test-subj="slosBurnRateChart">
       <EuiText size="m">
         <h4>Burn rate by tier</h4>
       </EuiText>
@@ -293,7 +293,7 @@ export const SloBurnRateChart: React.FC<SloBurnRateChartProps> = ({
           color="warning"
           iconType="iInCircle"
           title="No burn-rate tiers configured"
-          data-test-subj="slos-burn-rate-empty-tiers"
+          data-test-subj="slosBurnRateEmptyTiers"
         >
           <EuiText size="s">
             Configure MWMBR tiers in the Advanced section of the SLO wizard to populate this chart.
@@ -306,7 +306,7 @@ export const SloBurnRateChart: React.FC<SloBurnRateChartProps> = ({
           color="danger"
           iconType="alert"
           title="Failed to load burn-rate series"
-          data-test-subj="slos-burn-rate-error"
+          data-test-subj="slosBurnRateError"
         >
           <EuiText size="s">{firstError.message}</EuiText>
         </EuiCallOut>
@@ -317,7 +317,7 @@ export const SloBurnRateChart: React.FC<SloBurnRateChartProps> = ({
           color="primary"
           iconType="iInCircle"
           title="Waiting for data"
-          data-test-subj="slos-burn-rate-empty"
+          data-test-subj="slosBurnRateEmpty"
         >
           <EuiText size="s">
             The burn-rate recording rules have not evaluated yet. The chart will populate once

@@ -213,7 +213,7 @@ export const SloBudgetRemainingChart: React.FC<SloBudgetRemainingChartProps> = (
 
   if (!query) {
     return (
-      <EuiPanel data-test-subj="slos-budget-remaining-chart">
+      <EuiPanel data-test-subj="slosBudgetRemainingChart">
         <EuiText size="m">
           <h4>Error budget remaining</h4>
         </EuiText>
@@ -228,7 +228,7 @@ export const SloBudgetRemainingChart: React.FC<SloBudgetRemainingChartProps> = (
   }
 
   return (
-    <EuiPanel data-test-subj="slos-budget-remaining-chart">
+    <EuiPanel data-test-subj="slosBudgetRemainingChart">
       <EuiText size="m">
         <h4>Error budget remaining</h4>
       </EuiText>
@@ -243,7 +243,7 @@ export const SloBudgetRemainingChart: React.FC<SloBudgetRemainingChartProps> = (
           color="danger"
           iconType="alert"
           title="Failed to load budget series"
-          data-test-subj="slos-budget-remaining-error"
+          data-test-subj="slosBudgetRemainingError"
         >
           <EuiText size="s">{error.message}</EuiText>
         </EuiCallOut>
@@ -254,7 +254,7 @@ export const SloBudgetRemainingChart: React.FC<SloBudgetRemainingChartProps> = (
           color="primary"
           iconType="iInCircle"
           title="Waiting for data"
-          data-test-subj="slos-budget-remaining-empty"
+          data-test-subj="slosBudgetRemainingEmpty"
         >
           <EuiText size="s">
             The recording rules for this SLO have not evaluated yet. The chart will populate once
@@ -266,7 +266,7 @@ export const SloBudgetRemainingChart: React.FC<SloBudgetRemainingChartProps> = (
       {hasData && atZero && (
         <>
           <EuiSpacer size="xs" />
-          <EuiText size="xs" color="danger" data-test-subj="slos-budget-remaining-exhausted">
+          <EuiText size="xs" color="danger" data-test-subj="slosBudgetRemainingExhausted">
             <EuiIcon type="alert" size="s" /> Budget exhausted — any further bad events push the SLO
             further into breach.
           </EuiText>

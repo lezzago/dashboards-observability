@@ -53,19 +53,19 @@ function renderWizard(apiClient: Partial<SloApiClient>, templateId = 'http-avail
  * is actually reached. Validator exits early on any missing field.
  */
 function fillMinimumRequiredFields() {
-  fireEvent.change(screen.getByTestId('slos-wizard-datasourceId'), {
+  fireEvent.change(screen.getByTestId('slosWizardDatasourceId'), {
     target: { value: 'ds-2' },
   });
-  fireEvent.change(screen.getByTestId('slos-wizard-name'), {
+  fireEvent.change(screen.getByTestId('slosWizardName'), {
     target: { value: 'my-api-availability' },
   });
-  fireEvent.change(screen.getByTestId('slos-wizard-service'), {
+  fireEvent.change(screen.getByTestId('slosWizardService'), {
     target: { value: 'my-api' },
   });
-  fireEvent.change(screen.getByTestId('slos-wizard-ownerTeam'), {
+  fireEvent.change(screen.getByTestId('slosWizardOwnerTeam'), {
     target: { value: 'sre' },
   });
-  fireEvent.change(screen.getByTestId('slos-wizard-dim-value-0'), {
+  fireEvent.change(screen.getByTestId('slosWizardDimValue-0'), {
     target: { value: 'my-api' },
   });
 }
@@ -85,12 +85,12 @@ describe('SloWizardPage — Wave 2 additions', () => {
       }),
     };
     renderWizard(apiClient);
-    const windowSelect = screen.getByTestId('slos-wizard-window');
+    const windowSelect = screen.getByTestId('slosWizardWindow');
     fireEvent.change(windowSelect, { target: { value: '7d' } });
     await waitFor(() => {
-      expect(screen.getByTestId('slos-wizard-window-warning')).toBeInTheDocument();
+      expect(screen.getByTestId('slosWizardWindowWarning')).toBeInTheDocument();
     });
-    expect(screen.getByTestId('slos-wizard-window-warning')).toHaveTextContent('approximation');
+    expect(screen.getByTestId('slosWizardWindowWarning')).toHaveTextContent('approximation');
   });
 
   it('renders the approximation warning for the default 28d window on mount', () => {
@@ -103,7 +103,7 @@ describe('SloWizardPage — Wave 2 additions', () => {
       }),
     };
     renderWizard(apiClient);
-    expect(screen.getByTestId('slos-wizard-window-warning')).toBeInTheDocument();
+    expect(screen.getByTestId('slosWizardWindowWarning')).toBeInTheDocument();
   });
 
   it('renders the ruler-error envelope when apiClient.create rejects with RULER_VALIDATION_FAILED', async () => {
@@ -131,7 +131,7 @@ describe('SloWizardPage — Wave 2 additions', () => {
     fillMinimumRequiredFields();
 
     await act(async () => {
-      fireEvent.click(screen.getByTestId('slos-wizard-submit'));
+      fireEvent.click(screen.getByTestId('slosWizardSubmit'));
     });
     // Flush any pending microtasks + timers the error path may queue.
     await act(async () => {
@@ -139,11 +139,11 @@ describe('SloWizardPage — Wave 2 additions', () => {
     });
 
     await waitFor(() => {
-      expect(screen.getByTestId('slos-wizard-ruler-error')).toBeInTheDocument();
+      expect(screen.getByTestId('slosWizardRulerError')).toBeInTheDocument();
     });
     // The raw Cortex diagnostic is surfaced verbatim — not swallowed into a
     // generic "Create failed" toast.
-    expect(screen.getByTestId('slos-wizard-ruler-error-body')).toHaveTextContent(
+    expect(screen.getByTestId('slosWizardRulerErrorBody')).toHaveTextContent(
       'invalid PromQL: parse error at char 42'
     );
     expect(apiClient.create).toHaveBeenCalledTimes(1);
@@ -188,7 +188,7 @@ describe('SloWizardPage — Wave 2 additions', () => {
     fillMinimumRequiredFields();
 
     await act(async () => {
-      fireEvent.click(screen.getByTestId('slos-wizard-submit'));
+      fireEvent.click(screen.getByTestId('slosWizardSubmit'));
     });
     await act(async () => {
       jest.runOnlyPendingTimers();
@@ -200,7 +200,7 @@ describe('SloWizardPage — Wave 2 additions', () => {
       );
     });
     // Ruler error callout should NOT appear for plain Errors.
-    expect(screen.queryByTestId('slos-wizard-ruler-error')).toBeNull();
+    expect(screen.queryByTestId('slosWizardRulerError')).toBeNull();
   });
 
   it('submits multiple objectives when the user adds rows in the wizard', async () => {
@@ -222,16 +222,16 @@ describe('SloWizardPage — Wave 2 additions', () => {
     fillMinimumRequiredFields();
 
     // Add a second objective + rename it. First objective keeps its default.
-    fireEvent.click(screen.getByTestId('slos-wizard-objective-add'));
-    fireEvent.change(screen.getByTestId('slos-wizard-objective-name-1'), {
+    fireEvent.click(screen.getByTestId('slosWizardObjectiveAdd'));
+    fireEvent.change(screen.getByTestId('slosWizardObjectiveName-1'), {
       target: { value: 'availability-99-0' },
     });
-    fireEvent.change(screen.getByTestId('slos-wizard-objective-target-1'), {
+    fireEvent.change(screen.getByTestId('slosWizardObjectiveTarget-1'), {
       target: { value: '99.0' },
     });
 
     await act(async () => {
-      fireEvent.click(screen.getByTestId('slos-wizard-submit'));
+      fireEvent.click(screen.getByTestId('slosWizardSubmit'));
     });
     await act(async () => {
       jest.runOnlyPendingTimers();
@@ -262,24 +262,24 @@ describe('SloWizardPage — Wave 2 additions', () => {
 
     // Non-custom template: editor should not be present.
     const { unmount } = renderWizard(apiClient, 'http-availability');
-    expect(screen.queryByTestId('slos-wizard-custom-promql')).toBeNull();
+    expect(screen.queryByTestId('slosWizardCustomPromql')).toBeNull();
     unmount();
 
     renderWizard(apiClient, 'custom');
-    expect(screen.getByTestId('slos-wizard-custom-promql')).toBeInTheDocument();
+    expect(screen.getByTestId('slosWizardCustomPromql')).toBeInTheDocument();
     fillMinimumRequiredFields();
     // Dimension is optional for custom but required when names/values are given —
     // the min-fields helper seeds it, which is fine.
 
-    fireEvent.change(screen.getByTestId('slos-wizard-custom-promql-good'), {
+    fireEvent.change(screen.getByTestId('slosWizardCustomPromqlGood'), {
       target: { value: 'sum(rate(good[5m]))' },
     });
-    fireEvent.change(screen.getByTestId('slos-wizard-custom-promql-total'), {
+    fireEvent.change(screen.getByTestId('slosWizardCustomPromqlTotal'), {
       target: { value: 'sum(rate(total[5m]))' },
     });
 
     await act(async () => {
-      fireEvent.click(screen.getByTestId('slos-wizard-submit'));
+      fireEvent.click(screen.getByTestId('slosWizardSubmit'));
     });
     await act(async () => {
       jest.runOnlyPendingTimers();
@@ -309,18 +309,18 @@ describe('SloWizardPage — Wave 2 additions', () => {
     };
     renderWizard(apiClient);
     fillMinimumRequiredFields();
-    fireEvent.change(screen.getByTestId('slos-wizard-labels'), {
+    fireEvent.change(screen.getByTestId('slosWizardLabels'), {
       target: { value: 'env=550e8400-e29b-41d4-a716-446655440000' },
     });
 
     await act(async () => {
-      fireEvent.click(screen.getByTestId('slos-wizard-submit'));
+      fireEvent.click(screen.getByTestId('slosWizardSubmit'));
     });
     await act(async () => {
       jest.runOnlyPendingTimers();
     });
 
-    const labelsRow = screen.getByTestId('slos-wizard-labels-row');
+    const labelsRow = screen.getByTestId('slosWizardLabelsRow');
     await waitFor(() => {
       expect(labelsRow.textContent).toMatch(/Label values must not be UUIDs/);
     });
@@ -344,18 +344,18 @@ describe('SloWizardPage — Wave 2 additions', () => {
     renderWizard(apiClient);
     fillMinimumRequiredFields();
     // 4 KiB cap — 5 KiB of x's trips the validator.
-    fireEvent.change(screen.getByTestId('slos-wizard-annotations'), {
+    fireEvent.change(screen.getByTestId('slosWizardAnnotations'), {
       target: { value: `runbook=${'x'.repeat(5120)}` },
     });
 
     await act(async () => {
-      fireEvent.click(screen.getByTestId('slos-wizard-submit'));
+      fireEvent.click(screen.getByTestId('slosWizardSubmit'));
     });
     await act(async () => {
       jest.runOnlyPendingTimers();
     });
 
-    const annotationsRow = screen.getByTestId('slos-wizard-annotations-row');
+    const annotationsRow = screen.getByTestId('slosWizardAnnotationsRow');
     await waitFor(() => {
       expect(annotationsRow.textContent).toMatch(/Annotations exceed/);
     });

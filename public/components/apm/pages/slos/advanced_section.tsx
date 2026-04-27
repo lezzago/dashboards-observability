@@ -59,10 +59,10 @@ export const AdvancedSection: React.FC<AdvancedSectionProps> = ({
 }) => (
   <EuiPanel>
     <EuiAccordion
-      id="slos-wizard-advanced"
+      id="slosWizardAdvanced"
       buttonContent="Advanced — burn rates, budget warnings, supplemental alarms"
       paddingSize="s"
-      data-test-subj="slos-wizard-advanced-toggle"
+      data-test-subj="slosWizardAdvancedToggle"
     >
       <BurnRatesEditor burnRates={burnRates} errors={errors} dispatch={dispatch} />
       <EuiSpacer size="m" />
@@ -80,7 +80,7 @@ const BurnRatesEditor: React.FC<{
   errors: Record<string, string>;
   dispatch: React.Dispatch<Action>;
 }> = ({ burnRates, errors, dispatch }) => (
-  <div data-test-subj="slos-wizard-burnrates">
+  <div data-test-subj="slosWizardBurnrates">
     <EuiText size="s">
       <h5>Burn-rate tiers (MWMBR)</h5>
     </EuiText>
@@ -96,7 +96,7 @@ const BurnRatesEditor: React.FC<{
           gutterSize="s"
           alignItems="flexEnd"
           style={{ marginBottom: 6 }}
-          data-test-subj={`slos-wizard-burnrate-row-${i}`}
+          data-test-subj={`slosWizardBurnrateRow-${i}`}
           wrap
         >
           <EuiFlexItem>
@@ -116,7 +116,7 @@ const BurnRatesEditor: React.FC<{
                   })
                 }
                 compressed
-                data-test-subj={`slos-wizard-burnrate-short-${i}`}
+                data-test-subj={`slosWizardBurnrateShort-${i}`}
               />
             </EuiFormRow>
           </EuiFlexItem>
@@ -137,7 +137,7 @@ const BurnRatesEditor: React.FC<{
                   })
                 }
                 compressed
-                data-test-subj={`slos-wizard-burnrate-long-${i}`}
+                data-test-subj={`slosWizardBurnrateLong-${i}`}
               />
             </EuiFormRow>
           </EuiFlexItem>
@@ -160,7 +160,7 @@ const BurnRatesEditor: React.FC<{
                   })
                 }
                 compressed
-                data-test-subj={`slos-wizard-burnrate-multiplier-${i}`}
+                data-test-subj={`slosWizardBurnrateMultiplier-${i}`}
               />
             </EuiFormRow>
           </EuiFlexItem>
@@ -177,7 +177,7 @@ const BurnRatesEditor: React.FC<{
                   })
                 }
                 compressed
-                data-test-subj={`slos-wizard-burnrate-for-${i}`}
+                data-test-subj={`slosWizardBurnrateFor-${i}`}
               />
             </EuiFormRow>
           </EuiFlexItem>
@@ -195,13 +195,13 @@ const BurnRatesEditor: React.FC<{
                 }
                 options={SEVERITY_OPTIONS}
                 compressed
-                data-test-subj={`slos-wizard-burnrate-severity-${i}`}
+                data-test-subj={`slosWizardBurnrateSeverity-${i}`}
               />
             </EuiFormRow>
           </EuiFlexItem>
           <EuiFlexItem grow={false}>
             <EuiCheckbox
-              id={`slos-wizard-burnrate-alarm-${i}`}
+              id={`slosWizardBurnrateAlarm-${i}`}
               label="Alarm"
               checked={tier.createAlarm}
               onChange={(e) =>
@@ -212,7 +212,7 @@ const BurnRatesEditor: React.FC<{
                   value: e.target.checked,
                 })
               }
-              data-test-subj={`slos-wizard-burnrate-alarm-${i}`}
+              data-test-subj={`slosWizardBurnrateAlarm-${i}`}
             />
           </EuiFlexItem>
           <EuiFlexItem grow={false}>
@@ -222,7 +222,7 @@ const BurnRatesEditor: React.FC<{
               iconType="trash"
               aria-label={`Remove burn-rate tier ${i}`}
               size="s"
-              data-test-subj={`slos-wizard-burnrate-remove-${i}`}
+              data-test-subj={`slosWizardBurnrateRemove-${i}`}
             />
           </EuiFlexItem>
         </EuiFlexGroup>
@@ -232,7 +232,7 @@ const BurnRatesEditor: React.FC<{
       iconType="plusInCircle"
       size="s"
       onClick={() => dispatch({ kind: 'addBurnRate' })}
-      data-test-subj="slos-wizard-burnrate-add"
+      data-test-subj="slosWizardBurnrateAdd"
     >
       Add burn-rate tier
     </EuiButtonEmpty>
@@ -246,7 +246,7 @@ const BudgetWarningsEditor: React.FC<{
   errors: Record<string, string>;
   dispatch: React.Dispatch<Action>;
 }> = ({ budgetWarnings, errors, dispatch }) => (
-  <div data-test-subj="slos-wizard-budget-warnings">
+  <div data-test-subj="slosWizardBudgetWarnings">
     <EuiText size="s">
       <h5>Budget-warning thresholds</h5>
     </EuiText>
@@ -263,7 +263,7 @@ const BudgetWarningsEditor: React.FC<{
           gutterSize="s"
           alignItems="flexEnd"
           style={{ marginBottom: 6 }}
-          data-test-subj={`slos-wizard-budget-warning-row-${i}`}
+          data-test-subj={`slosWizardBudgetWarningRow-${i}`}
         >
           <EuiFlexItem>
             <EuiFormRow
@@ -285,7 +285,7 @@ const BudgetWarningsEditor: React.FC<{
                   })
                 }
                 compressed
-                data-test-subj={`slos-wizard-budget-warning-threshold-${i}`}
+                data-test-subj={`slosWizardBudgetWarningThreshold-${i}`}
               />
             </EuiFormRow>
           </EuiFlexItem>
@@ -303,7 +303,7 @@ const BudgetWarningsEditor: React.FC<{
                 }
                 options={SEVERITY_OPTIONS}
                 compressed
-                data-test-subj={`slos-wizard-budget-warning-severity-${i}`}
+                data-test-subj={`slosWizardBudgetWarningSeverity-${i}`}
               />
             </EuiFormRow>
           </EuiFlexItem>
@@ -314,7 +314,7 @@ const BudgetWarningsEditor: React.FC<{
               iconType="trash"
               aria-label={`Remove budget warning ${i}`}
               size="s"
-              data-test-subj={`slos-wizard-budget-warning-remove-${i}`}
+              data-test-subj={`slosWizardBudgetWarningRemove-${i}`}
             />
           </EuiFlexItem>
         </EuiFlexGroup>
@@ -324,7 +324,7 @@ const BudgetWarningsEditor: React.FC<{
       iconType="plusInCircle"
       size="s"
       onClick={() => dispatch({ kind: 'addBudgetWarning' })}
-      data-test-subj="slos-wizard-budget-warning-add"
+      data-test-subj="slosWizardBudgetWarningAdd"
     >
       Add budget-warning threshold
     </EuiButtonEmpty>
@@ -366,7 +366,7 @@ const AlarmsEditor: React.FC<{
   alarms: FormState['alarms'];
   dispatch: React.Dispatch<Action>;
 }> = ({ alarms, dispatch }) => (
-  <div data-test-subj="slos-wizard-supplemental-alarms">
+  <div data-test-subj="slosWizardSupplementalAlarms">
     <EuiText size="s">
       <h5>Supplemental alarms</h5>
     </EuiText>
@@ -374,13 +374,13 @@ const AlarmsEditor: React.FC<{
     {ALARM_TOGGLES.map((a) => (
       <div key={a.id} style={{ marginBottom: 8 }}>
         <EuiCheckbox
-          id={`slos-wizard-alarm-${a.id}`}
+          id={`slosWizardAlarm-${a.id}`}
           label={a.label}
           checked={alarms[a.id].enabled}
           onChange={(e) =>
             dispatch({ kind: 'setAlarmToggle', alarm: a.id, enabled: e.target.checked })
           }
-          data-test-subj={`slos-wizard-alarm-${a.id}`}
+          data-test-subj={`slosWizardAlarm-${a.id}`}
         />
         <EuiText size="xs" color="subdued">
           {a.caption}
@@ -390,13 +390,13 @@ const AlarmsEditor: React.FC<{
     <EuiFlexGroup gutterSize="s" alignItems="center">
       <EuiFlexItem grow={false}>
         <EuiCheckbox
-          id="slos-wizard-alarm-noData"
+          id="slosWizardAlarmNoData"
           label="No-data alert"
           checked={alarms.noData.enabled}
           onChange={(e) =>
             dispatch({ kind: 'setAlarmToggle', alarm: 'noData', enabled: e.target.checked })
           }
-          data-test-subj="slos-wizard-alarm-noData"
+          data-test-subj="slosWizardAlarmNoData"
         />
       </EuiFlexItem>
       <EuiFlexItem>
@@ -406,7 +406,7 @@ const AlarmsEditor: React.FC<{
             onChange={(e) => dispatch({ kind: 'setNoDataDuration', forDuration: e.target.value })}
             disabled={!alarms.noData.enabled}
             compressed
-            data-test-subj="slos-wizard-alarm-noData-duration"
+            data-test-subj="slosWizardAlarmNoDataDuration"
           />
         </EuiFormRow>
       </EuiFlexItem>

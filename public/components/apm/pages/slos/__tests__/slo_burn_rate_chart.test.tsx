@@ -169,7 +169,7 @@ describe('SloBurnRateChart', () => {
     const slo = baseSlo();
     slo.spec.alerting.burnRates = [];
     render(<SloBurnRateChart slo={slo} objective={slo.spec.objectives[0]} {...baseProps} />);
-    expect(screen.getByTestId('slos-burn-rate-empty-tiers')).toBeInTheDocument();
+    expect(screen.getByTestId('slosBurnRateEmptyTiers')).toBeInTheDocument();
   });
 
   it('renders the waiting-for-data callout when every tier returns zero samples', () => {
@@ -182,6 +182,6 @@ describe('SloBurnRateChart', () => {
     });
     const slo = baseSlo();
     render(<SloBurnRateChart slo={slo} objective={slo.spec.objectives[0]} {...baseProps} />);
-    expect(screen.getByTestId('slos-burn-rate-empty')).toBeInTheDocument();
+    expect(screen.getByTestId('slosBurnRateEmpty')).toBeInTheDocument();
   });
 });

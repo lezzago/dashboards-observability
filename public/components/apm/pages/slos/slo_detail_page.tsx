@@ -159,7 +159,7 @@ export const SloDetailPage: React.FC<SloDetailPageProps> = ({
       iconType="arrowLeft"
       href="#/slos"
       size="s"
-      data-test-subj="slos-back"
+      data-test-subj="slosBack"
     >
       Back to SLOs
     </EuiButtonEmpty>,
@@ -170,7 +170,7 @@ export const SloDetailPage: React.FC<SloDetailPageProps> = ({
       onRefresh={onRefresh}
       compressed
     />,
-    <EuiButton key="toggle" size="s" onClick={onToggleEnabled} data-test-subj="slos-detail-toggle">
+    <EuiButton key="toggle" size="s" onClick={onToggleEnabled} data-test-subj="slosDetailToggle">
       {doc.spec.enabled ? 'Disable' : 'Enable'}
     </EuiButton>,
     <EuiButton
@@ -178,7 +178,7 @@ export const SloDetailPage: React.FC<SloDetailPageProps> = ({
       size="s"
       color="danger"
       onClick={() => setConfirmDelete(true)}
-      data-test-subj="slos-detail-delete"
+      data-test-subj="slosDetailDelete"
     >
       Delete
     </EuiButton>,

@@ -212,7 +212,7 @@ export const SloListingPage: React.FC<SloListingPageProps> = ({
         render: (row: SloSummary) => (
           <EuiLink
             href={`#/slos/${encodeURIComponent(row.id)}`}
-            data-test-subj={`slos-link-${row.id}`}
+            data-test-subj={`slosLink-${row.id}`}
           >
             <EuiText size="s">
               <strong>{row.name}</strong>
@@ -310,7 +310,7 @@ export const SloListingPage: React.FC<SloListingPageProps> = ({
     <EuiButton
       fill
       href="#/slos/create"
-      data-test-subj="slos-create"
+      data-test-subj="slosCreate"
       size="s"
       iconType="plusInCircle"
     >
@@ -319,7 +319,7 @@ export const SloListingPage: React.FC<SloListingPageProps> = ({
   );
 
   const suggestButton = (
-    <EuiButton href="#/slos/suggest" data-test-subj="slos-suggest" size="s" iconType="wand">
+    <EuiButton href="#/slos/suggest" data-test-subj="slosSuggest" size="s" iconType="wand">
       Suggest SLOs
     </EuiButton>
   );
@@ -327,7 +327,7 @@ export const SloListingPage: React.FC<SloListingPageProps> = ({
   const refreshButton = (
     <EuiButtonEmpty
       onClick={load}
-      data-test-subj="slos-refresh"
+      data-test-subj="slosRefresh"
       size="s"
       iconType="refresh"
       isLoading={loading}
@@ -374,7 +374,7 @@ export const SloListingPage: React.FC<SloListingPageProps> = ({
                 />
               </EuiPanel>
             ) : noSlosExist ? (
-              <EuiPanel style={{ marginTop: '8px' }} data-test-subj="slos-empty-no-slos">
+              <EuiPanel style={{ marginTop: '8px' }} data-test-subj="slosEmptyNoSlos">
                 <EuiEmptyPrompt
                   iconType="visualizeApp"
                   title={<h2>No SLOs yet</h2>}
@@ -390,14 +390,14 @@ export const SloListingPage: React.FC<SloListingPageProps> = ({
                       key="suggest"
                       fill
                       href="#/slos/suggest"
-                      data-test-subj="slos-suggest-empty"
+                      data-test-subj="slosSuggestEmpty"
                     >
                       Suggest SLOs
                     </EuiButton>,
                     <EuiButtonEmpty
                       key="create"
                       href="#/slos/create"
-                      data-test-subj="slos-create-empty"
+                      data-test-subj="slosCreateEmpty"
                     >
                       Start from a template
                     </EuiButtonEmpty>,
@@ -428,7 +428,7 @@ export const SloListingPage: React.FC<SloListingPageProps> = ({
                 <EuiSpacer size="s" />
 
                 {filteredToZero ? (
-                  <EuiPanel data-test-subj="slos-empty-filtered-zero">
+                  <EuiPanel data-test-subj="slosEmptyFilteredZero">
                     <EuiEmptyPrompt
                       iconType="search"
                       title={<h2>No SLOs match your filters</h2>}
@@ -441,7 +441,7 @@ export const SloListingPage: React.FC<SloListingPageProps> = ({
                       actions={
                         <EuiButton
                           onClick={clearAllFilters}
-                          data-test-subj="slos-empty-filtered-clear"
+                          data-test-subj="slosEmptyFilteredClear"
                         >
                           Clear filters
                         </EuiButton>
@@ -457,11 +457,7 @@ export const SloListingPage: React.FC<SloListingPageProps> = ({
                         </EuiText>
                       </EuiFlexItem>
                       <EuiFlexItem grow={false}>
-                        <EuiText
-                          size="s"
-                          color="subdued"
-                          data-test-subj="slos-listing-result-count"
-                        >
+                        <EuiText size="s" color="subdued" data-test-subj="slosListingResultCount">
                           {items.length} SLO{items.length === 1 ? '' : 's'}
                         </EuiText>
                       </EuiFlexItem>
@@ -476,7 +472,7 @@ export const SloListingPage: React.FC<SloListingPageProps> = ({
                       }}
                       sorting={{ sort: { field: 'name', direction: 'asc' } }}
                       loading={loading}
-                      data-test-subj="slos-table"
+                      data-test-subj="slosTable"
                     />
                   </EuiPanel>
                 )}

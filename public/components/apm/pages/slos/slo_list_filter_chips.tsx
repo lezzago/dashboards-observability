@@ -69,7 +69,7 @@ export const SloListFilterChips: React.FC<SloListFilterChipsProps> = ({
       key: `${facet}:${value}`,
       facet,
       label: display,
-      testSubj: `slos-listing-filter-chip-${facet}-${value}`,
+      testSubj: `slosListingFilterChip-${facet}-${value}`,
       onRemove,
     });
   };
@@ -128,7 +128,7 @@ export const SloListFilterChips: React.FC<SloListFilterChipsProps> = ({
       alignItems="center"
       responsive={false}
       wrap
-      data-test-subj="slos-listing-filter-chips"
+      data-test-subj="slosListingFilterChips"
     >
       {chips.map((chip) => (
         <EuiFlexItem key={chip.key} grow={false}>
@@ -151,7 +151,7 @@ export const SloListFilterChips: React.FC<SloListFilterChipsProps> = ({
           size="xs"
           iconType="cross"
           onClick={onClearAll}
-          data-test-subj="slos-listing-filter-clear-all"
+          data-test-subj="slosListingFilterClearAll"
         >
           Clear all
         </EuiButtonEmpty>

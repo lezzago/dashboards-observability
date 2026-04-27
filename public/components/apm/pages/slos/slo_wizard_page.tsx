@@ -99,7 +99,7 @@ const TemplateSelector: React.FC<{ onPick: (id: string) => void }> = ({ onPick }
                   title={t.name}
                   description={t.description}
                   onClick={() => onPick(t.id)}
-                  data-test-subj={`slos-template-${t.id}`}
+                  data-test-subj={`slosTemplate-${t.id}`}
                 />
               </EuiFlexItem>
             ))}
@@ -220,7 +220,7 @@ export const SloWizardPage: React.FC<SloWizardPageProps> = ({
         iconType="arrowLeft"
         href="#/slos"
         size="s"
-        data-test-subj="slos-cancel"
+        data-test-subj="slosCancel"
       >
         Back to SLOs
       </EuiButtonEmpty>,
@@ -245,11 +245,11 @@ export const SloWizardPage: React.FC<SloWizardPageProps> = ({
       iconType="arrowLeft"
       onClick={() => history.replace('/slos/create')}
       size="s"
-      data-test-subj="slos-template-back"
+      data-test-subj="slosTemplateBack"
     >
       Change template
     </EuiButtonEmpty>,
-    <EuiButtonEmpty key="cancel" href="#/slos" size="s" data-test-subj="slos-wizard-cancel">
+    <EuiButtonEmpty key="cancel" href="#/slos" size="s" data-test-subj="slosWizardCancel">
       Cancel
     </EuiButtonEmpty>,
     <EuiButton
@@ -258,7 +258,7 @@ export const SloWizardPage: React.FC<SloWizardPageProps> = ({
       size="s"
       isLoading={submitting}
       onClick={onSubmit}
-      data-test-subj="slos-wizard-submit"
+      data-test-subj="slosWizardSubmit"
     >
       Create SLO
     </EuiButton>,
@@ -291,7 +291,7 @@ export const SloWizardPage: React.FC<SloWizardPageProps> = ({
                     color="primary"
                     iconType="iInCircle"
                     title={template.note}
-                    data-test-subj="slos-wizard-template-note"
+                    data-test-subj="slosWizardTemplateNote"
                   />
                   <EuiSpacer size="m" />
                 </>
@@ -356,10 +356,10 @@ export const SloWizardPage: React.FC<SloWizardPageProps> = ({
                     title={rulerErrorTitle(rulerError)}
                     color="danger"
                     iconType="alert"
-                    data-test-subj="slos-wizard-ruler-error"
+                    data-test-subj="slosWizardRulerError"
                   >
                     <EuiText size="s">
-                      <p data-test-subj="slos-wizard-ruler-error-body">{rulerError.rawBody}</p>
+                      <p data-test-subj="slosWizardRulerErrorBody">{rulerError.rawBody}</p>
                       <p>
                         <small>
                           Code: <code>{rulerError.code}</code> · upstream HTTP{' '}
@@ -413,7 +413,7 @@ const IdentityPanel: React.FC<PanelProps & { template: string }> = ({
         onChange={(e) =>
           dispatch({ kind: 'setField', field: 'datasourceId', value: e.target.value })
         }
-        data-test-subj="slos-wizard-datasourceId"
+        data-test-subj="slosWizardDatasourceId"
         placeholder="ds-2"
       />
     </EuiFormRow>
@@ -421,7 +421,7 @@ const IdentityPanel: React.FC<PanelProps & { template: string }> = ({
       <EuiFieldText
         value={state.name}
         onChange={(e) => dispatch({ kind: 'setField', field: 'name', value: e.target.value })}
-        data-test-subj="slos-wizard-name"
+        data-test-subj="slosWizardName"
       />
     </EuiFormRow>
     <EuiFormRow label="Description">
@@ -431,7 +431,7 @@ const IdentityPanel: React.FC<PanelProps & { template: string }> = ({
         onChange={(e) =>
           dispatch({ kind: 'setField', field: 'description', value: e.target.value })
         }
-        data-test-subj="slos-wizard-description"
+        data-test-subj="slosWizardDescription"
       />
     </EuiFormRow>
   </EuiPanel>
@@ -447,7 +447,7 @@ const OwnerPanel: React.FC<PanelProps> = ({ state, errors, dispatch }) => (
       <EuiFieldText
         value={state.service}
         onChange={(e) => dispatch({ kind: 'setField', field: 'service', value: e.target.value })}
-        data-test-subj="slos-wizard-service"
+        data-test-subj="slosWizardService"
       />
     </EuiFormRow>
     <EuiFormRow
@@ -458,7 +458,7 @@ const OwnerPanel: React.FC<PanelProps> = ({ state, errors, dispatch }) => (
       <EuiFieldText
         value={state.ownerTeam}
         onChange={(e) => dispatch({ kind: 'setField', field: 'ownerTeam', value: e.target.value })}
-        data-test-subj="slos-wizard-ownerTeam"
+        data-test-subj="slosWizardOwnerTeam"
       />
     </EuiFormRow>
     <EuiFormRow label="Primary user (optional)">
@@ -467,14 +467,14 @@ const OwnerPanel: React.FC<PanelProps> = ({ state, errors, dispatch }) => (
         onChange={(e) =>
           dispatch({ kind: 'setField', field: 'ownerPrimaryUser', value: e.target.value })
         }
-        data-test-subj="slos-wizard-ownerPrimaryUser"
+        data-test-subj="slosWizardOwnerPrimaryUser"
       />
     </EuiFormRow>
     <EuiFormRow label="Tier (optional)">
       <EuiFieldText
         value={state.tier}
         onChange={(e) => dispatch({ kind: 'setField', field: 'tier', value: e.target.value })}
-        data-test-subj="slos-wizard-tier"
+        data-test-subj="slosWizardTier"
       />
     </EuiFormRow>
   </EuiPanel>
@@ -498,7 +498,7 @@ const SliPanel: React.FC<
           onChange={(e) =>
             dispatch({ kind: 'setField', field: 'goodEventsFilter', value: e.target.value })
           }
-          data-test-subj="slos-wizard-goodEventsFilter"
+          data-test-subj="slosWizardGoodEventsFilter"
         />
       </EuiFormRow>
     )}
@@ -522,7 +522,7 @@ const SliPanel: React.FC<
                     dim: { ...dim, name: e.target.value },
                   })
                 }
-                data-test-subj={`slos-wizard-dim-name-${i}`}
+                data-test-subj={`slosWizardDimName-${i}`}
                 compressed
               />
             </EuiFlexItem>
@@ -537,7 +537,7 @@ const SliPanel: React.FC<
                     dim: { ...dim, value: e.target.value },
                   })
                 }
-                data-test-subj={`slos-wizard-dim-value-${i}`}
+                data-test-subj={`slosWizardDimValue-${i}`}
                 compressed
               />
             </EuiFlexItem>
@@ -549,7 +549,7 @@ const SliPanel: React.FC<
                 iconType="trash"
                 aria-label="Remove dimension"
                 size="s"
-                data-test-subj={`slos-wizard-dim-remove-${i}`}
+                data-test-subj={`slosWizardDimRemove-${i}`}
               />
             </EuiFlexItem>
           </EuiFlexGroup>
@@ -558,7 +558,7 @@ const SliPanel: React.FC<
           iconType="plusInCircle"
           size="s"
           onClick={() => dispatch({ kind: 'addDimension' })}
-          data-test-subj="slos-wizard-dim-add"
+          data-test-subj="slosWizardDimAdd"
         >
           Add dimension
         </EuiButtonEmpty>
@@ -593,7 +593,7 @@ const WindowPanel: React.FC<{
           { value: '28d', text: '28 days (recommended)' },
           { value: '30d', text: '30 days' },
         ]}
-        data-test-subj="slos-wizard-window"
+        data-test-subj="slosWizardWindow"
       />
     </EuiFormRow>
     {warnings['spec.window.duration'] && (
@@ -604,18 +604,18 @@ const WindowPanel: React.FC<{
           color="warning"
           iconType="iInCircle"
           size="s"
-          data-test-subj="slos-wizard-window-warning"
+          data-test-subj="slosWizardWindowWarning"
         >
           <EuiText size="s">{warnings['spec.window.duration']}</EuiText>
         </EuiCallOut>
       </>
     )}
     <EuiCheckbox
-      id="slos-wizard-shadow"
+      id="slosWizardShadow"
       label="Shadow mode (deploy recording rules only; suppress alerts)"
       checked={state.shadow}
       onChange={(e) => dispatch({ kind: 'setField', field: 'shadow', value: e.target.checked })}
-      data-test-subj="slos-wizard-shadow"
+      data-test-subj="slosWizardShadow"
     />
   </EuiPanel>
 );
@@ -650,7 +650,7 @@ const LabelsAnnotationsPanel: React.FC<{
         label="Labels"
         isInvalid={labelErrors.length > 0}
         error={labelErrors}
-        data-test-subj="slos-wizard-labels-row"
+        data-test-subj="slosWizardLabelsRow"
       >
         <EuiTextArea
           rows={3}
@@ -659,7 +659,7 @@ const LabelsAnnotationsPanel: React.FC<{
           onChange={(e) =>
             dispatch({ kind: 'setField', field: 'labelsRaw', value: e.target.value })
           }
-          data-test-subj="slos-wizard-labels"
+          data-test-subj="slosWizardLabels"
           placeholder={'compliance=pci\nregion=us-west-2'}
         />
       </EuiFormRow>
@@ -667,7 +667,7 @@ const LabelsAnnotationsPanel: React.FC<{
         label="Annotations"
         isInvalid={!!annotationError}
         error={annotationError}
-        data-test-subj="slos-wizard-annotations-row"
+        data-test-subj="slosWizardAnnotationsRow"
       >
         <EuiTextArea
           rows={2}
@@ -676,7 +676,7 @@ const LabelsAnnotationsPanel: React.FC<{
           onChange={(e) =>
             dispatch({ kind: 'setField', field: 'annotationsRaw', value: e.target.value })
           }
-          data-test-subj="slos-wizard-annotations"
+          data-test-subj="slosWizardAnnotations"
           placeholder="runbook=https://wiki/slo/..."
         />
       </EuiFormRow>

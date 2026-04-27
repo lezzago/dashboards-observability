@@ -170,7 +170,7 @@ export const SloVisualizations: React.FC<SloVisualizationsProps> = ({
                       .replace(/\.?0+$/, '')}%`,
                   }))}
                   buttonSize="compressed"
-                  data-test-subj="slos-objective-selector"
+                  data-test-subj="slosObjectiveSelector"
                 />
               </EuiFlexItem>
             </EuiFlexGroup>

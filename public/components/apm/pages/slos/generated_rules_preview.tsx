@@ -95,7 +95,7 @@ export const GeneratedRulesPreview: React.FC<GeneratedRulesPreviewProps> = ({
   }, [apiClient, debouncedSerialized]);
 
   return (
-    <EuiPanel data-test-subj="slos-wizard-preview">
+    <EuiPanel data-test-subj="slosWizardPreview">
       <EuiText size="m">
         <h4>Rule preview</h4>
       </EuiText>
@@ -111,7 +111,7 @@ export const GeneratedRulesPreview: React.FC<GeneratedRulesPreviewProps> = ({
 function renderBody(state: PreviewState): JSX.Element {
   if (state.status === 'idle') {
     return (
-      <EuiText size="s" color="subdued" data-test-subj="slos-wizard-preview-idle">
+      <EuiText size="s" color="subdued" data-test-subj="slosWizardPreviewIdle">
         Fill in the required fields to see the generated rules.
       </EuiText>
     );
@@ -120,7 +120,7 @@ function renderBody(state: PreviewState): JSX.Element {
     return (
       <EuiFlexGroup alignItems="center" gutterSize="s" responsive={false}>
         <EuiFlexItem grow={false}>
-          <EuiLoadingSpinner size="m" data-test-subj="slos-wizard-preview-loading" />
+          <EuiLoadingSpinner size="m" data-test-subj="slosWizardPreviewLoading" />
         </EuiFlexItem>
         <EuiFlexItem grow={false}>
           <EuiText size="s" color="subdued">
@@ -137,7 +137,7 @@ function renderBody(state: PreviewState): JSX.Element {
         color="warning"
         iconType="alert"
         size="s"
-        data-test-subj="slos-wizard-preview-error"
+        data-test-subj="slosWizardPreviewError"
       >
         <EuiText size="s">{state.error ?? 'Unable to generate preview.'}</EuiText>
       </EuiCallOut>
@@ -145,15 +145,15 @@ function renderBody(state: PreviewState): JSX.Element {
   }
   const group = state.group!;
   return (
-    <div data-test-subj="slos-wizard-preview-success">
+    <div data-test-subj="slosWizardPreviewSuccess">
       <EuiFlexGroup gutterSize="s" alignItems="center" responsive={false} wrap>
         <EuiFlexItem grow={false}>
-          <EuiBadge color="primary" data-test-subj="slos-wizard-preview-rule-count">
+          <EuiBadge color="primary" data-test-subj="slosWizardPreviewRuleCount">
             {group.rules.length} {group.rules.length === 1 ? 'rule' : 'rules'}
           </EuiBadge>
         </EuiFlexItem>
         <EuiFlexItem grow={false}>
-          <EuiText size="s" data-test-subj="slos-wizard-preview-group-name">
+          <EuiText size="s" data-test-subj="slosWizardPreviewGroupName">
             <code>{group.groupName}</code>
           </EuiText>
         </EuiFlexItem>
@@ -165,17 +165,17 @@ function renderBody(state: PreviewState): JSX.Element {
       </EuiFlexGroup>
       <EuiSpacer size="s" />
       <EuiAccordion
-        id="slos-wizard-preview-yaml"
+        id="slosWizardPreviewYaml"
         buttonContent="Show rule-group YAML"
         paddingSize="s"
-        data-test-subj="slos-wizard-preview-yaml-toggle"
+        data-test-subj="slosWizardPreviewYamlToggle"
       >
         <EuiCodeBlock
           language="yaml"
           paddingSize="s"
           isCopyable
           overflowHeight={320}
-          data-test-subj="slos-wizard-preview-yaml"
+          data-test-subj="slosWizardPreviewYaml"
         >
           {group.yaml}
         </EuiCodeBlock>

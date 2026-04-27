@@ -41,7 +41,7 @@ export const ObjectivesSection: React.FC<ObjectivesSectionProps> = ({
 }) => {
   const showLatency = template.sli.type === 'latency_threshold';
   return (
-    <EuiPanel data-test-subj="slos-wizard-objectives">
+    <EuiPanel data-test-subj="slosWizardObjectives">
       <EuiText size="m">
         <h4>Objectives</h4>
       </EuiText>
@@ -60,7 +60,7 @@ export const ObjectivesSection: React.FC<ObjectivesSectionProps> = ({
             gutterSize="s"
             alignItems="flexEnd"
             style={{ marginBottom: 8 }}
-            data-test-subj={`slos-wizard-objective-row-${i}`}
+            data-test-subj={`slosWizardObjectiveRow-${i}`}
           >
             <EuiFlexItem>
               <EuiFormRow label="Objective name" isInvalid={!!nameError} error={nameError}>
@@ -75,7 +75,7 @@ export const ObjectivesSection: React.FC<ObjectivesSectionProps> = ({
                     })
                   }
                   compressed
-                  data-test-subj={`slos-wizard-objective-name-${i}`}
+                  data-test-subj={`slosWizardObjectiveName-${i}`}
                 />
               </EuiFormRow>
             </EuiFlexItem>
@@ -100,7 +100,7 @@ export const ObjectivesSection: React.FC<ObjectivesSectionProps> = ({
                     })
                   }
                   compressed
-                  data-test-subj={`slos-wizard-objective-target-${i}`}
+                  data-test-subj={`slosWizardObjectiveTarget-${i}`}
                 />
               </EuiFormRow>
             </EuiFlexItem>
@@ -124,7 +124,7 @@ export const ObjectivesSection: React.FC<ObjectivesSectionProps> = ({
                       })
                     }
                     compressed
-                    data-test-subj={`slos-wizard-objective-latency-${i}`}
+                    data-test-subj={`slosWizardObjectiveLatency-${i}`}
                   />
                 </EuiFormRow>
               </EuiFlexItem>
@@ -137,7 +137,7 @@ export const ObjectivesSection: React.FC<ObjectivesSectionProps> = ({
                 iconType="trash"
                 aria-label={`Remove objective ${i}`}
                 size="s"
-                data-test-subj={`slos-wizard-objective-remove-${i}`}
+                data-test-subj={`slosWizardObjectiveRemove-${i}`}
               />
             </EuiFlexItem>
           </EuiFlexGroup>
@@ -147,7 +147,7 @@ export const ObjectivesSection: React.FC<ObjectivesSectionProps> = ({
         iconType="plusInCircle"
         size="s"
         onClick={() => dispatch({ kind: 'addObjective' })}
-        data-test-subj="slos-wizard-objective-add"
+        data-test-subj="slosWizardObjectiveAdd"
       >
         Add objective
       </EuiButtonEmpty>

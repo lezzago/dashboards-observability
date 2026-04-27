@@ -82,7 +82,7 @@ const LABEL_COLUMNS: Array<EuiBasicTableColumn<LabelRow>> = [
     width: '35%',
     render: (value: string) => (
       <EuiToolTip content="User labels are re-emitted on every generated rule under this key.">
-        <EuiBadge color="hollow" data-test-subj="slos-detail-metadata-label-propagation">
+        <EuiBadge color="hollow" data-test-subj="slosDetailMetadataLabelPropagation">
           {value}
         </EuiBadge>
       </EuiToolTip>
@@ -103,7 +103,7 @@ const BURN_RATE_COLUMNS: Array<EuiBasicTableColumn<BurnRateConfig>> = [
     render: (severity: string, row: BurnRateConfig) => (
       <EuiHealth
         color={row.createAlarm ? 'danger' : 'default'}
-        data-test-subj="slos-detail-metadata-burn-rate-severity"
+        data-test-subj="slosDetailMetadataBurnRateSeverity"
       >
         {severity}
       </EuiHealth>
@@ -176,18 +176,13 @@ const AlarmChecklist: React.FC<AlarmChecklistProps> = ({ alarms }) => {
   ];
 
   return (
-    <EuiFlexGroup
-      wrap
-      gutterSize="s"
-      data-test-subj="slos-detail-metadata-alarms"
-      responsive={false}
-    >
+    <EuiFlexGroup wrap gutterSize="s" data-test-subj="slosDetailMetadataAlarms" responsive={false}>
       {rows.map((r) => (
         <EuiFlexItem grow={false} key={r.key}>
           <EuiBadge
             color={r.enabled ? 'success' : 'hollow'}
             iconType={r.enabled ? 'check' : 'cross'}
-            data-test-subj={`slos-detail-metadata-alarms-${r.key}`}
+            data-test-subj={`slosDetailMetadataAlarms-${r.key}`}
           >
             {r.label}
             {r.detail ? ` · ${r.detail}` : ''}
@@ -223,7 +218,7 @@ const ExclusionWindowTable: React.FC<ExclusionWindowTableProps> = ({ windows }) 
       width: '10%',
       render: () => (
         <EuiToolTip content="Exclusion windows are persisted but enforcement is deferred post-GA (design §3.5).">
-          <EuiBadge color="hollow" data-test-subj="slos-detail-metadata-exclusion-deferred">
+          <EuiBadge color="hollow" data-test-subj="slosDetailMetadataExclusionDeferred">
             deferred
           </EuiBadge>
         </EuiToolTip>
@@ -235,7 +230,7 @@ const ExclusionWindowTable: React.FC<ExclusionWindowTableProps> = ({ windows }) 
       tableCaption="Exclusion windows"
       items={windows}
       columns={columns}
-      data-test-subj="slos-detail-metadata-exclusion-windows"
+      data-test-subj="slosDetailMetadataExclusionWindows"
     />
   );
 };
@@ -273,7 +268,7 @@ export const SloMetadataPanel: React.FC<SloMetadataPanelProps> = ({ slo }) => {
   const prov = slo.status.provisioning.backend === 'prometheus' ? slo.status.provisioning : null;
 
   return (
-    <EuiPanel data-test-subj="slos-detail-metadata-panel">
+    <EuiPanel data-test-subj="slosDetailMetadataPanel">
       <EuiFlexGroup>
         <EuiFlexItem>
           <EuiText size="m">
@@ -284,7 +279,7 @@ export const SloMetadataPanel: React.FC<SloMetadataPanelProps> = ({ slo }) => {
           </EuiText>
           <EuiSpacer size="s" />
           {labels.length === 0 ? (
-            <EuiText size="s" color="subdued" data-test-subj="slos-detail-metadata-labels-empty">
+            <EuiText size="s" color="subdued" data-test-subj="slosDetailMetadataLabelsEmpty">
               No labels configured.
             </EuiText>
           ) : (
@@ -292,7 +287,7 @@ export const SloMetadataPanel: React.FC<SloMetadataPanelProps> = ({ slo }) => {
               tableCaption="Labels"
               items={labels}
               columns={LABEL_COLUMNS}
-              data-test-subj="slos-detail-metadata-labels"
+              data-test-subj="slosDetailMetadataLabels"
             />
           )}
         </EuiFlexItem>
@@ -305,11 +300,7 @@ export const SloMetadataPanel: React.FC<SloMetadataPanelProps> = ({ slo }) => {
           </EuiText>
           <EuiSpacer size="s" />
           {annotations.length === 0 ? (
-            <EuiText
-              size="s"
-              color="subdued"
-              data-test-subj="slos-detail-metadata-annotations-empty"
-            >
+            <EuiText size="s" color="subdued" data-test-subj="slosDetailMetadataAnnotationsEmpty">
               No annotations configured.
             </EuiText>
           ) : (
@@ -317,7 +308,7 @@ export const SloMetadataPanel: React.FC<SloMetadataPanelProps> = ({ slo }) => {
               tableCaption="Annotations"
               items={annotations}
               columns={ANNOTATION_COLUMNS}
-              data-test-subj="slos-detail-metadata-annotations"
+              data-test-subj="slosDetailMetadataAnnotations"
             />
           )}
         </EuiFlexItem>
@@ -335,11 +326,7 @@ export const SloMetadataPanel: React.FC<SloMetadataPanelProps> = ({ slo }) => {
           </EuiText>
           <EuiSpacer size="s" />
           {burnRates.length === 0 ? (
-            <EuiText
-              size="s"
-              color="subdued"
-              data-test-subj="slos-detail-metadata-burn-rates-empty"
-            >
+            <EuiText size="s" color="subdued" data-test-subj="slosDetailMetadataBurnRatesEmpty">
               No burn-rate tiers configured.
             </EuiText>
           ) : (
@@ -348,7 +335,7 @@ export const SloMetadataPanel: React.FC<SloMetadataPanelProps> = ({ slo }) => {
               items={burnRates}
               columns={BURN_RATE_COLUMNS}
               rowProps={rowPropsForDisabledBurnRate}
-              data-test-subj="slos-detail-metadata-burn-rates"
+              data-test-subj="slosDetailMetadataBurnRates"
             />
           )}
         </EuiFlexItem>
@@ -364,7 +351,7 @@ export const SloMetadataPanel: React.FC<SloMetadataPanelProps> = ({ slo }) => {
             <EuiText
               size="s"
               color="subdued"
-              data-test-subj="slos-detail-metadata-budget-warnings-empty"
+              data-test-subj="slosDetailMetadataBudgetWarningsEmpty"
             >
               No budget-warning thresholds configured.
             </EuiText>
@@ -373,7 +360,7 @@ export const SloMetadataPanel: React.FC<SloMetadataPanelProps> = ({ slo }) => {
               tableCaption="Budget warning thresholds"
               items={budgetWarnings}
               columns={BUDGET_WARNING_COLUMNS}
-              data-test-subj="slos-detail-metadata-budget-warnings"
+              data-test-subj="slosDetailMetadataBudgetWarnings"
             />
           )}
         </EuiFlexItem>
@@ -382,7 +369,7 @@ export const SloMetadataPanel: React.FC<SloMetadataPanelProps> = ({ slo }) => {
       <EuiSpacer size="m" />
 
       <EuiAccordion
-        id="slos-detail-metadata-advanced"
+        id="slosDetailMetadataAdvanced"
         buttonContent={
           <EuiText size="s">
             <strong>
@@ -390,7 +377,7 @@ export const SloMetadataPanel: React.FC<SloMetadataPanelProps> = ({ slo }) => {
             </strong>
           </EuiText>
         }
-        data-test-subj="slos-detail-metadata-advanced"
+        data-test-subj="slosDetailMetadataAdvanced"
         initialIsOpen={false}
       >
         <EuiSpacer size="s" />
@@ -407,7 +394,7 @@ export const SloMetadataPanel: React.FC<SloMetadataPanelProps> = ({ slo }) => {
         </EuiText>
         <EuiSpacer size="xs" />
         {exclusionWindows.length === 0 ? (
-          <EuiText size="s" color="subdued" data-test-subj="slos-detail-metadata-exclusion-empty">
+          <EuiText size="s" color="subdued" data-test-subj="slosDetailMetadataExclusionEmpty">
             No exclusion windows configured.
           </EuiText>
         ) : (
@@ -423,11 +410,7 @@ export const SloMetadataPanel: React.FC<SloMetadataPanelProps> = ({ slo }) => {
         {prov ? (
           <ProvisioningBlock provisioning={prov} />
         ) : (
-          <EuiText
-            size="s"
-            color="subdued"
-            data-test-subj="slos-detail-metadata-provisioning-empty"
-          >
+          <EuiText size="s" color="subdued" data-test-subj="slosDetailMetadataProvisioningEmpty">
             Non-Prometheus provisioning — no rule names available.
           </EuiText>
         )}

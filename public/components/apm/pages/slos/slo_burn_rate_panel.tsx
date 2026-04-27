@@ -203,7 +203,7 @@ const TierCard: React.FC<TierCardProps> = ({
       paddingSize="s"
       hasBorder
       hasShadow={false}
-      data-test-subj={`slos-burnrate-tier-${tier.severity}-${tier.shortWindow}-${tier.longWindow}`}
+      data-test-subj={`slosBurnrateTier-${tier.severity}-${tier.shortWindow}-${tier.longWindow}`}
     >
       <EuiFlexGroup gutterSize="s" alignItems="center" responsive={false}>
         <EuiFlexItem>
@@ -286,7 +286,7 @@ export const SloBurnRatePanel: React.FC<SloBurnRatePanelProps> = ({
   }
 
   return (
-    <EuiPanel data-test-subj="slos-burnrate-panel">
+    <EuiPanel data-test-subj="slosBurnratePanel">
       <EuiFlexGroup alignItems="center" gutterSize="s">
         <EuiFlexItem>
           <EuiText size="m">
