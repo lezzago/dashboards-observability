@@ -23,6 +23,8 @@ import {
   substituteCustomPromqlDefaults,
 } from '../../../../../common/slo/slo_templates';
 import type { SloTemplate } from '../../../../../common/slo/slo_templates';
+import { getBurnRatePreset } from './burn_rate_presets';
+import type { BurnRatePresetId } from './burn_rate_presets';
 
 /** One row in the Objectives section. Strings for form editing; built into
  *  numeric `target` / `latencyThreshold` at submit time (keeps typing UX sane). */
@@ -91,6 +93,7 @@ export type Action =
     }
   | { kind: 'addBurnRate' }
   | { kind: 'removeBurnRate'; index: number }
+  | { kind: 'applyBurnRatePreset'; preset: BurnRatePresetId }
   | {
       kind: 'setBudgetWarningField';
       index: number;
@@ -362,6 +365,10 @@ export function reducer(state: FormState, action: Action): FormState {
       const next = state.burnRates.slice();
       next.splice(action.index, 1);
       return { ...state, burnRates: next };
+    }
+    case 'applyBurnRatePreset': {
+      const preset = getBurnRatePreset(action.preset);
+      return { ...state, burnRates: preset.tiers.map((t) => ({ ...t })) };
     }
     case 'setBudgetWarningField': {
       const next = state.budgetWarnings.slice();

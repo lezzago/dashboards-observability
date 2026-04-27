@@ -18,9 +18,10 @@
  * get exactly what the wizard produced before.
  */
 
-import React from 'react';
+import React, { useMemo } from 'react';
 import {
   EuiAccordion,
+  EuiButton,
   EuiButtonEmpty,
   EuiCheckbox,
   EuiFieldNumber,
@@ -32,9 +33,11 @@ import {
   EuiSelect,
   EuiSpacer,
   EuiText,
+  EuiToolTip,
 } from '@elastic/eui';
 import type { BudgetWarningThreshold, BurnRateConfig } from '../../../../../common/slo/slo_types';
 import type { Action, FormState, ToggleableAlarm } from './wizard_state';
+import { BURN_RATE_PRESETS, isPresetApplied } from './burn_rate_presets';
 
 export interface AdvancedSectionProps {
   burnRates: BurnRateConfig[];
@@ -79,165 +82,196 @@ const BurnRatesEditor: React.FC<{
   burnRates: BurnRateConfig[];
   errors: Record<string, string>;
   dispatch: React.Dispatch<Action>;
-}> = ({ burnRates, errors, dispatch }) => (
-  <div data-test-subj="slosWizardBurnrates">
-    <EuiText size="s">
-      <h5>Burn-rate tiers (MWMBR)</h5>
-    </EuiText>
-    <EuiText size="xs" color="subdued">
-      Multi-window, multi-burn-rate. Defaults match google-30d.yaml (14.4× / 6× / 3× / 1×).
-    </EuiText>
-    <EuiSpacer size="xs" />
-    {burnRates.map((tier, i) => {
-      const prefix = `spec.alerting.burnRates[${i}]`;
-      return (
-        <EuiFlexGroup
-          key={i}
-          gutterSize="s"
-          alignItems="flexEnd"
-          style={{ marginBottom: 6 }}
-          data-test-subj={`slosWizardBurnrateRow-${i}`}
-          wrap
-        >
-          <EuiFlexItem>
-            <EuiFormRow
-              label="Short window"
-              isInvalid={!!errors[`${prefix}.shortWindow`]}
-              error={errors[`${prefix}.shortWindow`]}
-            >
-              <EuiFieldText
-                value={tier.shortWindow}
-                onChange={(e) =>
-                  dispatch({
-                    kind: 'setBurnRateField',
-                    index: i,
-                    field: 'shortWindow',
-                    value: e.target.value,
-                  })
-                }
-                compressed
-                data-test-subj={`slosWizardBurnrateShort-${i}`}
-              />
-            </EuiFormRow>
+}> = ({ burnRates, errors, dispatch }) => {
+  const activePresetId = useMemo(
+    () => BURN_RATE_PRESETS.find((p) => isPresetApplied(p, burnRates))?.id ?? null,
+    [burnRates]
+  );
+  return (
+    <div data-test-subj="slosWizardBurnrates">
+      <EuiText size="s">
+        <h5>Burn-rate tiers (MWMBR)</h5>
+      </EuiText>
+      <EuiText size="xs" color="subdued">
+        Pick a preset, or edit the table below for a custom configuration. Presets overwrite the
+        existing tiers.
+      </EuiText>
+      <EuiSpacer size="xs" />
+      <EuiFlexGroup gutterSize="s" responsive={false} wrap>
+        {BURN_RATE_PRESETS.map((preset) => (
+          <EuiFlexItem grow={false} key={preset.id}>
+            <EuiToolTip content={preset.summary}>
+              <EuiButton
+                size="s"
+                fill={activePresetId === preset.id}
+                onClick={() => dispatch({ kind: 'applyBurnRatePreset', preset: preset.id })}
+                data-test-subj={`slosBurnRatePreset-${preset.id}`}
+              >
+                {preset.label}
+              </EuiButton>
+            </EuiToolTip>
           </EuiFlexItem>
-          <EuiFlexItem>
-            <EuiFormRow
-              label="Long window"
-              isInvalid={!!errors[`${prefix}.longWindow`]}
-              error={errors[`${prefix}.longWindow`]}
-            >
-              <EuiFieldText
-                value={tier.longWindow}
-                onChange={(e) =>
-                  dispatch({
-                    kind: 'setBurnRateField',
-                    index: i,
-                    field: 'longWindow',
-                    value: e.target.value,
-                  })
-                }
-                compressed
-                data-test-subj={`slosWizardBurnrateLong-${i}`}
-              />
-            </EuiFormRow>
-          </EuiFlexItem>
-          <EuiFlexItem>
-            <EuiFormRow
-              label="Multiplier"
-              isInvalid={!!errors[`${prefix}.burnRateMultiplier`]}
-              error={errors[`${prefix}.burnRateMultiplier`]}
-            >
-              <EuiFieldNumber
-                value={tier.burnRateMultiplier}
-                step={0.1}
-                min={0.001}
-                onChange={(e) =>
-                  dispatch({
-                    kind: 'setBurnRateField',
-                    index: i,
-                    field: 'burnRateMultiplier',
-                    value: Number(e.target.value),
-                  })
-                }
-                compressed
-                data-test-subj={`slosWizardBurnrateMultiplier-${i}`}
-              />
-            </EuiFormRow>
-          </EuiFlexItem>
-          <EuiFlexItem>
-            <EuiFormRow label="For">
-              <EuiFieldText
-                value={tier.forDuration}
-                onChange={(e) =>
-                  dispatch({
-                    kind: 'setBurnRateField',
-                    index: i,
-                    field: 'forDuration',
-                    value: e.target.value,
-                  })
-                }
-                compressed
-                data-test-subj={`slosWizardBurnrateFor-${i}`}
-              />
-            </EuiFormRow>
-          </EuiFlexItem>
-          <EuiFlexItem>
-            <EuiFormRow label="Severity">
-              <EuiSelect
-                value={tier.severity}
-                onChange={(e) =>
-                  dispatch({
-                    kind: 'setBurnRateField',
-                    index: i,
-                    field: 'severity',
-                    value: e.target.value,
-                  })
-                }
-                options={SEVERITY_OPTIONS}
-                compressed
-                data-test-subj={`slosWizardBurnrateSeverity-${i}`}
-              />
-            </EuiFormRow>
-          </EuiFlexItem>
+        ))}
+        {activePresetId === null && (
           <EuiFlexItem grow={false}>
-            <EuiCheckbox
-              id={`slosWizardBurnrateAlarm-${i}`}
-              label="Alarm"
-              checked={tier.createAlarm}
-              onChange={(e) =>
-                dispatch({
-                  kind: 'setBurnRateField',
-                  index: i,
-                  field: 'createAlarm',
-                  value: e.target.checked,
-                })
-              }
-              data-test-subj={`slosWizardBurnrateAlarm-${i}`}
-            />
+            <EuiText size="xs" color="subdued" data-test-subj="slosBurnRatePresetCustom">
+              Custom configuration
+            </EuiText>
           </EuiFlexItem>
-          <EuiFlexItem grow={false}>
-            <EuiButtonEmpty
-              color="danger"
-              onClick={() => dispatch({ kind: 'removeBurnRate', index: i })}
-              iconType="trash"
-              aria-label={`Remove burn-rate tier ${i}`}
-              size="s"
-              data-test-subj={`slosWizardBurnrateRemove-${i}`}
-            />
-          </EuiFlexItem>
-        </EuiFlexGroup>
-      );
-    })}
-    <EuiButtonEmpty
-      iconType="plusInCircle"
-      size="s"
-      onClick={() => dispatch({ kind: 'addBurnRate' })}
-      data-test-subj="slosWizardBurnrateAdd"
-    >
-      Add burn-rate tier
-    </EuiButtonEmpty>
-  </div>
-);
+        )}
+      </EuiFlexGroup>
+      <EuiSpacer size="s" />
+      {burnRates.map((tier, i) => {
+        const prefix = `spec.alerting.burnRates[${i}]`;
+        return (
+          <EuiFlexGroup
+            key={i}
+            gutterSize="s"
+            alignItems="flexEnd"
+            style={{ marginBottom: 6 }}
+            data-test-subj={`slosWizardBurnrateRow-${i}`}
+            wrap
+          >
+            <EuiFlexItem>
+              <EuiFormRow
+                label="Short window"
+                isInvalid={!!errors[`${prefix}.shortWindow`]}
+                error={errors[`${prefix}.shortWindow`]}
+              >
+                <EuiFieldText
+                  value={tier.shortWindow}
+                  onChange={(e) =>
+                    dispatch({
+                      kind: 'setBurnRateField',
+                      index: i,
+                      field: 'shortWindow',
+                      value: e.target.value,
+                    })
+                  }
+                  compressed
+                  data-test-subj={`slosWizardBurnrateShort-${i}`}
+                />
+              </EuiFormRow>
+            </EuiFlexItem>
+            <EuiFlexItem>
+              <EuiFormRow
+                label="Long window"
+                isInvalid={!!errors[`${prefix}.longWindow`]}
+                error={errors[`${prefix}.longWindow`]}
+              >
+                <EuiFieldText
+                  value={tier.longWindow}
+                  onChange={(e) =>
+                    dispatch({
+                      kind: 'setBurnRateField',
+                      index: i,
+                      field: 'longWindow',
+                      value: e.target.value,
+                    })
+                  }
+                  compressed
+                  data-test-subj={`slosWizardBurnrateLong-${i}`}
+                />
+              </EuiFormRow>
+            </EuiFlexItem>
+            <EuiFlexItem>
+              <EuiFormRow
+                label="Multiplier"
+                isInvalid={!!errors[`${prefix}.burnRateMultiplier`]}
+                error={errors[`${prefix}.burnRateMultiplier`]}
+              >
+                <EuiFieldNumber
+                  value={tier.burnRateMultiplier}
+                  step={0.1}
+                  min={0.001}
+                  onChange={(e) =>
+                    dispatch({
+                      kind: 'setBurnRateField',
+                      index: i,
+                      field: 'burnRateMultiplier',
+                      value: Number(e.target.value),
+                    })
+                  }
+                  compressed
+                  data-test-subj={`slosWizardBurnrateMultiplier-${i}`}
+                />
+              </EuiFormRow>
+            </EuiFlexItem>
+            <EuiFlexItem>
+              <EuiFormRow label="For">
+                <EuiFieldText
+                  value={tier.forDuration}
+                  onChange={(e) =>
+                    dispatch({
+                      kind: 'setBurnRateField',
+                      index: i,
+                      field: 'forDuration',
+                      value: e.target.value,
+                    })
+                  }
+                  compressed
+                  data-test-subj={`slosWizardBurnrateFor-${i}`}
+                />
+              </EuiFormRow>
+            </EuiFlexItem>
+            <EuiFlexItem>
+              <EuiFormRow label="Severity">
+                <EuiSelect
+                  value={tier.severity}
+                  onChange={(e) =>
+                    dispatch({
+                      kind: 'setBurnRateField',
+                      index: i,
+                      field: 'severity',
+                      value: e.target.value,
+                    })
+                  }
+                  options={SEVERITY_OPTIONS}
+                  compressed
+                  data-test-subj={`slosWizardBurnrateSeverity-${i}`}
+                />
+              </EuiFormRow>
+            </EuiFlexItem>
+            <EuiFlexItem grow={false}>
+              <EuiCheckbox
+                id={`slosWizardBurnrateAlarm-${i}`}
+                label="Alarm"
+                checked={tier.createAlarm}
+                onChange={(e) =>
+                  dispatch({
+                    kind: 'setBurnRateField',
+                    index: i,
+                    field: 'createAlarm',
+                    value: e.target.checked,
+                  })
+                }
+                data-test-subj={`slosWizardBurnrateAlarm-${i}`}
+              />
+            </EuiFlexItem>
+            <EuiFlexItem grow={false}>
+              <EuiButtonEmpty
+                color="danger"
+                onClick={() => dispatch({ kind: 'removeBurnRate', index: i })}
+                iconType="trash"
+                aria-label={`Remove burn-rate tier ${i}`}
+                size="s"
+                data-test-subj={`slosWizardBurnrateRemove-${i}`}
+              />
+            </EuiFlexItem>
+          </EuiFlexGroup>
+        );
+      })}
+      <EuiButtonEmpty
+        iconType="plusInCircle"
+        size="s"
+        onClick={() => dispatch({ kind: 'addBurnRate' })}
+        data-test-subj="slosWizardBurnrateAdd"
+      >
+        Add burn-rate tier
+      </EuiButtonEmpty>
+    </div>
+  );
+};
 
 // ---- Budget warnings ---------------------------------------------------
 
