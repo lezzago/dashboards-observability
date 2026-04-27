@@ -4,28 +4,24 @@
  */
 
 /**
- * Top-strip filter panel for the SLO listing.
+ * Left-sidebar filter shell for the SLO listing.
  *
- * Layout decision (Chen + Maya): chose a horizontal `EuiFilterGroup` over a
- * sidebar so the catalog table keeps the full listing width. The overview
- * panel above already provides the KPI-tile drilldown; this strip is a fast
- * modifier, not a primary surface. Each facet is a popover-backed
- * `EuiFilterButton` that opens an `EuiSelectable` — the OUI-native way to
- * present multi-select checkboxes without building a custom dropdown.
+ * Each facet is an EuiAccordion wrapping a compressed EuiCheckboxGroup. High-
+ * cardinality facets (Service, Team) get an EuiFieldSearch above the checkbox
+ * list; the others are plain groups. The panel emits the full next filter
+ * state on every change — URL sync stays in the parent.
  */
 
 import React, { useMemo, useState } from 'react';
 import {
+  EuiAccordion,
+  EuiButtonGroup,
+  EuiCheckboxGroup,
   EuiFieldSearch,
-  EuiFilterButton,
-  EuiFilterGroup,
-  EuiFlexGroup,
-  EuiFlexItem,
   EuiHealth,
-  EuiPopover,
-  EuiPopoverTitle,
-  EuiSelectable,
-  EuiSelectableOption,
+  EuiHorizontalRule,
+  EuiSpacer,
+  EuiText,
 } from '@elastic/eui';
 import type {
   SloHealthState,
@@ -57,34 +53,15 @@ const MODE_LABEL: Record<SloMode, string> = {
 };
 
 export interface SloListFilterPanelProps {
-  /** Current filter state (server-applied on listing fetches). */
   filters: SloListFilters;
-  /** Called with the full next filter state — parent handles URL sync. */
   onChange: (next: SloListFilters) => void;
   /**
-   * Result set used to derive distinct values for service/team/tier/sliLeafType.
-   * Deliberately the *filtered* set (what's on screen right now) — we
-   * intentionally don't fire a separate unfiltered fetch per the design brief.
+   * Result set used to derive distinct service/team/tier/sliLeafType values.
+   * Deliberately the *filtered* set — we don't fire a second unfiltered fetch.
    */
   items: SloSummary[];
 }
 
-/** Count of applied facets, for the "Clear (N)" affordance. */
-function countAppliedFilters(f: SloListFilters): number {
-  let n = 0;
-  if (f.state?.length) n++;
-  if (f.sliBackend?.length) n++;
-  if (f.sliLeafType?.length) n++;
-  if (f.service?.length) n++;
-  if (f.team?.length) n++;
-  if (f.tier?.length) n++;
-  if (f.mode?.length) n++;
-  if (f.enabled !== undefined) n++;
-  if (f.search && f.search.trim().length > 0) n++;
-  return n;
-}
-
-/** Stable distinct-and-sorted values for a summary-derived facet. */
 function distinctValues<T>(items: T[], pick: (t: T) => string | string[] | undefined): string[] {
   const set = new Set<string>();
   for (const it of items) {
@@ -96,114 +73,93 @@ function distinctValues<T>(items: T[], pick: (t: T) => string | string[] | undef
   return Array.from(set).sort((a, b) => a.localeCompare(b));
 }
 
-/** Build EuiSelectable options from a flat string[] + current selection. */
-function toSelectOptions(
-  all: string[],
-  selected: string[],
-  displayMap?: Record<string, string>
-): EuiSelectableOption[] {
-  return all.map((value) => ({
-    label: displayMap?.[value] ?? value,
-    key: value,
-    checked: selected.includes(value) ? ('on' as const) : undefined,
-  }));
+function toggleInArray<T>(arr: T[] | undefined, value: T): T[] | undefined {
+  const set = new Set(arr ?? []);
+  if (set.has(value)) set.delete(value);
+  else set.add(value);
+  const next = Array.from(set);
+  return next.length === 0 ? undefined : next;
 }
 
-/**
- * Generic popover-backed multi-select facet. Keeps the open/close state local
- * so we don't proliferate props on the parent.
- */
-const FacetPopover: React.FC<{
+function arrToIdMap(values: string[] | undefined): Record<string, boolean> {
+  const out: Record<string, boolean> = {};
+  (values ?? []).forEach((v) => (out[v] = true));
+  return out;
+}
+
+interface FacetAccordionProps {
+  id: string;
   label: string;
-  dataTestSubj: string;
-  options: EuiSelectableOption[];
-  onChange: (selectedKeys: string[]) => void;
+  options: Array<{ id: string; label: React.ReactNode }>;
+  selected: string[] | undefined;
+  onToggle: (id: string) => void;
+  initialIsOpen?: boolean;
   searchable?: boolean;
-  /** Render each row with a coloured health dot. */
-  healthColor?: Record<string, string>;
-}> = ({ label, dataTestSubj, options, onChange, searchable, healthColor }) => {
-  const [open, setOpen] = useState(false);
-  const activeCount = options.filter((o) => o.checked === 'on').length;
+  dataTestSubj: string;
+}
 
-  const button = (
-    <EuiFilterButton
-      iconType="arrowDown"
-      onClick={() => setOpen((v) => !v)}
-      isSelected={open}
-      hasActiveFilters={activeCount > 0}
-      numActiveFilters={activeCount > 0 ? activeCount : undefined}
-      data-test-subj={`slosListingFilter-${dataTestSubj}-button`}
-    >
-      {label}
-    </EuiFilterButton>
+const FacetAccordion: React.FC<FacetAccordionProps> = ({
+  id,
+  label,
+  options,
+  selected,
+  onToggle,
+  initialIsOpen = true,
+  searchable = false,
+  dataTestSubj,
+}) => {
+  const [query, setQuery] = useState('');
+  const filtered = useMemo(() => {
+    if (!searchable || !query.trim()) return options;
+    const q = query.toLowerCase();
+    return options.filter((o) => o.id.toLowerCase().includes(q));
+  }, [options, query, searchable]);
+  const selectedCount = (selected ?? []).length;
+  const buttonContent = (
+    <EuiText size="xs">
+      <strong>{label}</strong>
+      {selectedCount > 0 ? (
+        <span style={{ fontWeight: 400, marginLeft: 4 }}>({selectedCount})</span>
+      ) : null}
+    </EuiText>
   );
 
   return (
-    <EuiPopover
-      button={button}
-      isOpen={open}
-      closePopover={() => setOpen(false)}
-      panelPaddingSize="none"
-      anchorPosition="downCenter"
+    <EuiAccordion
+      id={id}
+      buttonContent={buttonContent}
+      initialIsOpen={initialIsOpen}
+      data-test-subj={dataTestSubj}
     >
-      <EuiSelectable
-        aria-label={`Filter by ${label}`}
-        searchable={searchable}
-        searchProps={
-          searchable
-            ? { placeholder: `Search ${label.toLowerCase()}`, compressed: true }
-            : undefined
-        }
-        options={options}
-        onChange={(next) =>
-          onChange(
-            next
-              .filter((o) => o.checked === 'on')
-              .map((o) => (typeof o.key === 'string' ? o.key : String(o.label)))
-          )
-        }
-        listProps={{ bordered: false, showIcons: false }}
-        renderOption={
-          healthColor
-            ? (opt) => (
-                <EuiHealth color={healthColor[String(opt.key ?? opt.label)] ?? 'subdued'}>
-                  {opt.label}
-                </EuiHealth>
-              )
-            : undefined
-        }
-        data-test-subj={`slosListingFilter-${dataTestSubj}-selectable`}
-      >
-        {(list, search) => (
-          <div style={{ width: 260 }}>
-            {searchable ? <EuiPopoverTitle paddingSize="s">{search}</EuiPopoverTitle> : null}
-            {list}
-          </div>
-        )}
-      </EuiSelectable>
-    </EuiPopover>
-  );
-};
-
-/** Tri-state Enabled button — cycles: any → enabled → disabled → any. */
-const EnabledTriStateButton: React.FC<{
-  value: boolean | undefined;
-  onChange: (next: boolean | undefined) => void;
-}> = ({ value, onChange }) => {
-  const label = value === undefined ? 'Enabled: Any' : value ? 'Enabled: Yes' : 'Enabled: No';
-  const cycle = () => {
-    if (value === undefined) onChange(true);
-    else if (value === true) onChange(false);
-    else onChange(undefined);
-  };
-  return (
-    <EuiFilterButton
-      onClick={cycle}
-      hasActiveFilters={value !== undefined}
-      data-test-subj="slosListingFilter-enabled-button"
-    >
-      {label}
-    </EuiFilterButton>
+      <EuiSpacer size="xs" />
+      {searchable ? (
+        <>
+          <EuiFieldSearch
+            placeholder={`Search ${label.toLowerCase()}`}
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            isClearable
+            compressed
+            fullWidth
+            data-test-subj={`${dataTestSubj}-search`}
+          />
+          <EuiSpacer size="xs" />
+        </>
+      ) : null}
+      {filtered.length === 0 ? (
+        <EuiText size="xs" color="subdued">
+          No values
+        </EuiText>
+      ) : (
+        <EuiCheckboxGroup
+          options={filtered}
+          idToSelectedMap={arrToIdMap(selected)}
+          onChange={onToggle}
+          compressed
+          data-test-subj={`${dataTestSubj}-checkboxGroup`}
+        />
+      )}
+    </EuiAccordion>
   );
 };
 
@@ -219,102 +175,121 @@ export const SloListFilterPanel: React.FC<SloListFilterPanelProps> = ({
 
   const patch = (delta: Partial<SloListFilters>) => onChange({ ...filters, ...delta });
 
-  const activeCount = countAppliedFilters(filters);
-
   return (
-    <EuiFlexGroup
-      gutterSize="s"
-      alignItems="center"
-      responsive={false}
-      wrap
-      data-test-subj="slosListingFilterPanel"
-    >
-      <EuiFlexItem grow={false} style={{ minWidth: 280, flexGrow: 1 }}>
-        <EuiFieldSearch
-          placeholder="Filter by name, service, or description"
-          value={filters.search ?? ''}
-          onChange={(e) => patch({ search: e.target.value })}
-          isClearable
-          compressed
-          fullWidth
-          data-test-subj="slosListingFilterSearch"
+    <div data-test-subj="slosListingFilterPanel">
+      <FacetAccordion
+        id="slosFilterAccordion-state"
+        label="State"
+        dataTestSubj="slosFilterAccordion-state"
+        options={SLO_HEALTH_ORDER.map((s) => ({
+          id: s,
+          label: (
+            <EuiHealth color={SLO_HEALTH_COLOR[s]}>
+              <span style={{ fontSize: 12 }}>{STATE_LABEL[s]}</span>
+            </EuiHealth>
+          ),
+        }))}
+        selected={filters.state}
+        onToggle={(id) => patch({ state: toggleInArray(filters.state, id as SloHealthState) })}
+      />
+      <EuiHorizontalRule margin="xs" />
+
+      <FacetAccordion
+        id="slosFilterAccordion-sliType"
+        label="SLI type"
+        dataTestSubj="slosFilterAccordion-sliType"
+        options={allLeafTypes.map((v) => ({ id: v, label: v }))}
+        selected={filters.sliLeafType}
+        onToggle={(id) => patch({ sliLeafType: toggleInArray(filters.sliLeafType, id) })}
+      />
+      <EuiHorizontalRule margin="xs" />
+
+      <FacetAccordion
+        id="slosFilterAccordion-sliBackend"
+        label="SLI backend"
+        dataTestSubj="slosFilterAccordion-sliBackend"
+        options={(['prometheus', 'opensearch'] as const).map((v) => ({
+          id: v,
+          label: SLI_BACKEND_LABEL[v],
+        }))}
+        selected={filters.sliBackend}
+        onToggle={(id) =>
+          patch({ sliBackend: toggleInArray(filters.sliBackend, id as SliBackend) })
+        }
+      />
+      <EuiHorizontalRule margin="xs" />
+
+      <FacetAccordion
+        id="slosFilterAccordion-service"
+        label="Service"
+        dataTestSubj="slosFilterAccordion-service"
+        options={allServices.map((v) => ({ id: v, label: v }))}
+        selected={filters.service}
+        onToggle={(id) => patch({ service: toggleInArray(filters.service, id) })}
+        searchable
+      />
+      <EuiHorizontalRule margin="xs" />
+
+      <FacetAccordion
+        id="slosFilterAccordion-team"
+        label="Team"
+        dataTestSubj="slosFilterAccordion-team"
+        options={allTeams.map((v) => ({ id: v, label: v }))}
+        selected={filters.team}
+        onToggle={(id) => patch({ team: toggleInArray(filters.team, id) })}
+        searchable
+      />
+      <EuiHorizontalRule margin="xs" />
+
+      <FacetAccordion
+        id="slosFilterAccordion-tier"
+        label="Tier"
+        dataTestSubj="slosFilterAccordion-tier"
+        options={allTiers.map((v) => ({ id: v, label: v }))}
+        selected={filters.tier}
+        onToggle={(id) => patch({ tier: toggleInArray(filters.tier, id) })}
+      />
+      <EuiHorizontalRule margin="xs" />
+
+      <FacetAccordion
+        id="slosFilterAccordion-mode"
+        label="Mode"
+        dataTestSubj="slosFilterAccordion-mode"
+        options={(['active', 'shadow'] as const).map((v) => ({ id: v, label: MODE_LABEL[v] }))}
+        selected={filters.mode}
+        onToggle={(id) => patch({ mode: toggleInArray(filters.mode, id as SloMode) })}
+      />
+      <EuiHorizontalRule margin="xs" />
+
+      <EuiAccordion
+        id="slosFilterAccordion-enabled"
+        buttonContent={
+          <EuiText size="xs">
+            <strong>Enabled</strong>
+            {filters.enabled !== undefined ? (
+              <span style={{ fontWeight: 400, marginLeft: 4 }}>
+                ({filters.enabled ? 'yes' : 'no'})
+              </span>
+            ) : null}
+          </EuiText>
+        }
+        initialIsOpen
+        data-test-subj="slosFilterAccordion-enabled"
+      >
+        <EuiSpacer size="xs" />
+        <EuiButtonGroup
+          legend="Filter by enabled"
+          buttonSize="compressed"
+          options={[
+            { id: 'any', label: 'Any' },
+            { id: 'yes', label: 'Yes' },
+            { id: 'no', label: 'No' },
+          ]}
+          idSelected={filters.enabled === undefined ? 'any' : filters.enabled ? 'yes' : 'no'}
+          onChange={(id) => patch({ enabled: id === 'any' ? undefined : id === 'yes' })}
+          data-test-subj="slosFilterEnabledGroup"
         />
-      </EuiFlexItem>
-      <EuiFlexItem grow={false}>
-        <EuiFilterGroup compressed>
-          <FacetPopover
-            label="State"
-            dataTestSubj="state"
-            options={toSelectOptions(SLO_HEALTH_ORDER, filters.state ?? [], STATE_LABEL)}
-            onChange={(keys) =>
-              patch({ state: keys.length ? (keys as SloHealthState[]) : undefined })
-            }
-            healthColor={SLO_HEALTH_COLOR}
-          />
-          <FacetPopover
-            label="SLI backend"
-            dataTestSubj="sliBackend"
-            options={toSelectOptions(
-              ['prometheus', 'opensearch'],
-              filters.sliBackend ?? [],
-              SLI_BACKEND_LABEL as Record<string, string>
-            )}
-            onChange={(keys) =>
-              patch({ sliBackend: keys.length ? (keys as SliBackend[]) : undefined })
-            }
-          />
-          <FacetPopover
-            label="SLI type"
-            dataTestSubj="sliLeafType"
-            options={toSelectOptions(allLeafTypes, filters.sliLeafType ?? [])}
-            onChange={(keys) => patch({ sliLeafType: keys.length ? keys : undefined })}
-          />
-          <FacetPopover
-            label="Service"
-            dataTestSubj="service"
-            options={toSelectOptions(allServices, filters.service ?? [])}
-            onChange={(keys) => patch({ service: keys.length ? keys : undefined })}
-            searchable
-          />
-          <FacetPopover
-            label="Team"
-            dataTestSubj="team"
-            options={toSelectOptions(allTeams, filters.team ?? [])}
-            onChange={(keys) => patch({ team: keys.length ? keys : undefined })}
-            searchable
-          />
-          <FacetPopover
-            label="Tier"
-            dataTestSubj="tier"
-            options={toSelectOptions(allTiers, filters.tier ?? [])}
-            onChange={(keys) => patch({ tier: keys.length ? keys : undefined })}
-          />
-          <FacetPopover
-            label="Mode"
-            dataTestSubj="mode"
-            options={toSelectOptions(
-              ['active', 'shadow'],
-              filters.mode ?? [],
-              MODE_LABEL as Record<string, string>
-            )}
-            onChange={(keys) => patch({ mode: keys.length ? (keys as SloMode[]) : undefined })}
-          />
-          <EnabledTriStateButton
-            value={filters.enabled}
-            onChange={(next) => patch({ enabled: next })}
-          />
-        </EuiFilterGroup>
-      </EuiFlexItem>
-      {activeCount > 0 ? (
-        <EuiFlexItem grow={false}>
-          <span
-            data-test-subj="slosListingFilterActiveCount"
-            style={{ fontSize: 12, color: '#69707D' }}
-          >
-            {activeCount} active
-          </span>
-        </EuiFlexItem>
-      ) : null}
-    </EuiFlexGroup>
+      </EuiAccordion>
+    </div>
   );
 };

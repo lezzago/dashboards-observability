@@ -90,12 +90,10 @@ describe('SloListingPage — filter integration', () => {
   });
 
   it('shows the "no matches" empty state with Clear-filters CTA when filtered to zero', async () => {
-    // First call: unfiltered (on mount, no URL params), returns 2 items.
-    // Second call: after we apply a filter, returns 0.
     const list = jest
       .fn<ReturnType<SloApiClient['list']>, Parameters<SloApiClient['list']>>()
       .mockImplementation(async (filters?: SloListFilters) => {
-        if (!filters || !filters.state) {
+        if (!filters || !filters.search) {
           return {
             results: [makeSummary({ id: 'a' }), makeSummary({ id: 'b', name: 'b' })],
             total: 2,
@@ -111,30 +109,7 @@ describe('SloListingPage — filter integration', () => {
       renderPage(list);
     });
 
-    // Wait for the unfiltered fetch to complete and the table to mount.
     await screen.findByTestId('slosTable');
-
-    // Apply an impossible filter via the URL-params round-trip: this exercises
-    // the same code path as a facet click without depending on popover
-    // rendering in jsdom.
-    //
-    // We re-render with an initialSearch; React Router MemoryRouter does not
-    // re-parse on a remount here, so instead we trigger the filter via the
-    // search input (a straightforward text input, no popover needed) and
-    // confirm the listing re-calls `list` with the new search arg.
-    list.mockImplementation(async (filters?: SloListFilters) => {
-      // Any non-empty filter → empty result
-      if (filters && (filters.search || filters.state)) {
-        return { results: [], total: 0, page: 1, pageSize: 100, hasMore: false };
-      }
-      return {
-        results: [makeSummary({ id: 'a' })],
-        total: 1,
-        page: 1,
-        pageSize: 100,
-        hasMore: false,
-      };
-    });
 
     await act(async () => {
       fireEvent.change(screen.getByTestId('slosListingFilterSearch'), {
@@ -147,7 +122,6 @@ describe('SloListingPage — filter integration', () => {
     });
     expect(screen.getByTestId('slosEmptyFilteredClear')).toBeInTheDocument();
 
-    // Clicking the clear CTA should re-fetch without filters.
     await act(async () => {
       fireEvent.click(screen.getByTestId('slosEmptyFilteredClear'));
     });
@@ -167,7 +141,6 @@ describe('SloListingPage — filter integration', () => {
         hasMore: false,
       });
 
-    // Initial URL carries a state filter — the listing must forward it.
     await act(async () => {
       renderPage(list, '?state=breached');
     });
@@ -179,7 +152,7 @@ describe('SloListingPage — filter integration', () => {
     });
   });
 
-  it('hydrates filter state from the URL so a pasted link renders chips', async () => {
+  it('hydrates filter state from the URL so a pasted link renders active badges', async () => {
     const list = jest
       .fn<ReturnType<SloApiClient['list']>, Parameters<SloApiClient['list']>>()
       .mockResolvedValue({
@@ -195,8 +168,8 @@ describe('SloListingPage — filter integration', () => {
     });
 
     await screen.findByTestId('slosTable');
-    expect(screen.getByTestId('slosListingFilterChip-state-breached')).toBeInTheDocument();
-    expect(screen.getByTestId('slosListingFilterChip-state-warning')).toBeInTheDocument();
-    expect(screen.getByTestId('slosListingFilterChip-tier-tier-1')).toBeInTheDocument();
+    expect(screen.getByTestId('activeFilterBadges')).toBeInTheDocument();
+    expect(screen.getByTestId('filterBadge-state')).toHaveTextContent('State: Breached, Warning');
+    expect(screen.getByTestId('filterBadge-tier')).toHaveTextContent('Tier: tier-1');
   });
 });

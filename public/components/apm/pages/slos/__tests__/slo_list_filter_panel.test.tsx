@@ -38,80 +38,60 @@ function makeSummary(overrides: Partial<SloSummary> = {}): SloSummary {
   };
 }
 
-describe('SloListFilterPanel', () => {
-  it('renders the free-text search field preloaded from filters', () => {
-    render(
-      <SloListFilterPanel
-        filters={{ search: 'checkout' }}
-        onChange={jest.fn()}
-        items={[makeSummary()]}
-      />
-    );
-    const input = screen.getByTestId('slosListingFilterSearch') as HTMLInputElement;
-    expect(input.value).toBe('checkout');
+describe('SloListFilterPanel (sidebar)', () => {
+  it('renders an accordion per facet', () => {
+    render(<SloListFilterPanel filters={{}} onChange={jest.fn()} items={[makeSummary()]} />);
+    expect(screen.getByTestId('slosFilterAccordion-state')).toBeInTheDocument();
+    expect(screen.getByTestId('slosFilterAccordion-sliType')).toBeInTheDocument();
+    expect(screen.getByTestId('slosFilterAccordion-service')).toBeInTheDocument();
+    expect(screen.getByTestId('slosFilterAccordion-team')).toBeInTheDocument();
+    expect(screen.getByTestId('slosFilterAccordion-tier')).toBeInTheDocument();
+    expect(screen.getByTestId('slosFilterAccordion-mode')).toBeInTheDocument();
+    expect(screen.getByTestId('slosFilterAccordion-enabled')).toBeInTheDocument();
   });
 
-  it('emits a search-delta onChange when the user types', () => {
+  it('toggles a state value when its checkbox is clicked', () => {
     const onChange = jest.fn();
     render(<SloListFilterPanel filters={{}} onChange={onChange} items={[makeSummary()]} />);
-    fireEvent.change(screen.getByTestId('slosListingFilterSearch'), {
-      target: { value: 'cart' },
-    });
-    expect(onChange).toHaveBeenCalledWith({ search: 'cart' });
+    // The checkbox group renders one input per option; click "breached".
+    fireEvent.click(screen.getByLabelText('Breached'));
+    expect(onChange).toHaveBeenCalledWith({ state: ['breached'] });
   });
 
-  it('tri-state enabled: any → yes → no → any on successive clicks', () => {
+  it('removes a state value when its checkbox is clicked again', () => {
     const onChange = jest.fn();
-    const { rerender } = render(
-      <SloListFilterPanel filters={{}} onChange={onChange} items={[makeSummary()]} />
-    );
-    fireEvent.click(screen.getByTestId('slosListingFilter-enabled-button'));
-    expect(onChange).toHaveBeenLastCalledWith({ enabled: true });
-
-    rerender(
-      <SloListFilterPanel filters={{ enabled: true }} onChange={onChange} items={[makeSummary()]} />
-    );
-    fireEvent.click(screen.getByTestId('slosListingFilter-enabled-button'));
-    expect(onChange).toHaveBeenLastCalledWith({ enabled: false });
-
-    rerender(
+    render(
       <SloListFilterPanel
-        filters={{ enabled: false }}
+        filters={{ state: ['breached'] }}
         onChange={onChange}
         items={[makeSummary()]}
       />
     );
-    fireEvent.click(screen.getByTestId('slosListingFilter-enabled-button'));
-    expect(onChange).toHaveBeenLastCalledWith({ enabled: undefined });
+    fireEvent.click(screen.getByLabelText('Breached'));
+    expect(onChange).toHaveBeenCalledWith({ state: undefined });
   });
 
-  it('surfaces an active-count summary when filters are applied', () => {
+  it('tri-state enabled group switches to yes / no / any via the button group', () => {
+    const onChange = jest.fn();
+    render(<SloListFilterPanel filters={{}} onChange={onChange} items={[makeSummary()]} />);
+    // EuiButtonGroup wraps radios; each input carries `data-test-subj` equal to
+    // its option id ("any" | "yes" | "no").
+    fireEvent.click(screen.getByTestId('yes'));
+    expect(onChange).toHaveBeenLastCalledWith({ enabled: true });
+  });
+
+  it('only shows services derived from the items list', () => {
     render(
       <SloListFilterPanel
-        filters={{ state: ['breached'], service: ['payments-api'] }}
+        filters={{}}
         onChange={jest.fn()}
-        items={[makeSummary()]}
+        items={[
+          makeSummary({ service: 'payments-api' }),
+          makeSummary({ id: 's2', service: 'cart-service' }),
+        ]}
       />
     );
-    expect(screen.getByTestId('slosListingFilterActiveCount')).toHaveTextContent('2 active');
-  });
-
-  it('hides the active-count when no filters are applied', () => {
-    render(<SloListFilterPanel filters={{}} onChange={jest.fn()} items={[makeSummary()]} />);
-    expect(screen.queryByTestId('slosListingFilterActiveCount')).not.toBeInTheDocument();
-  });
-
-  it('renders a facet button for state with an active-count badge when pre-applied', () => {
-    render(
-      <SloListFilterPanel
-        filters={{ state: ['breached', 'warning'] }}
-        onChange={jest.fn()}
-        items={[makeSummary()]}
-      />
-    );
-    // EuiFilterButton renders its label text directly, so a straight regex
-    // query works without opening the popover.
-    const stateBtn = screen.getByTestId('slosListingFilter-state-button');
-    expect(stateBtn).toHaveTextContent('State');
+    expect(screen.getByLabelText('payments-api')).toBeInTheDocument();
+    expect(screen.getByLabelText('cart-service')).toBeInTheDocument();
   });
 });

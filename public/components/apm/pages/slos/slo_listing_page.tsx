@@ -9,6 +9,7 @@ import {
   EuiButton,
   EuiButtonEmpty,
   EuiEmptyPrompt,
+  EuiFieldSearch,
   EuiFlexGroup,
   EuiFlexItem,
   EuiHealth,
@@ -20,6 +21,7 @@ import {
   EuiPageContent,
   EuiPageContentBody,
   EuiPanel,
+  EuiResizableContainer,
   EuiSpacer,
   EuiText,
   EuiToolTip,
@@ -28,9 +30,9 @@ import { euiThemeVars } from '@osd/ui-shared-deps/theme';
 import { useHistory, useLocation } from 'react-router-dom';
 import { ChromeStart, NotificationsStart } from '../../../../../../../src/core/public';
 import { HeaderControlledComponentsWrapper } from '../../../../plugin_helpers/plugin_headerControl';
+import { ActiveFilterBadges, FilterBadge } from '../../shared/components/active_filter_badges';
 import { SloOverviewPanel } from './slo_overview_panel';
 import { SloListFilterPanel } from './slo_list_filter_panel';
-import { SloListFilterChips } from './slo_list_filter_chips';
 import {
   deserializeFiltersFromSearch,
   filtersEqual,
@@ -114,6 +116,93 @@ function filterStateToTile(state: SloHealthState[] | undefined): SloHealthState 
   return state[0];
 }
 
+const STATE_LABEL: Record<SloHealthState, string> = {
+  breached: 'Breached',
+  warning: 'Warning',
+  ok: 'Healthy',
+  no_data: 'No data',
+  stale: 'Stale',
+  disabled: 'Disabled',
+};
+
+const SLI_BACKEND_LABEL: Record<'prometheus' | 'opensearch', string> = {
+  prometheus: 'Prometheus',
+  opensearch: 'OpenSearch',
+};
+
+const MODE_LABEL: Record<'active' | 'shadow', string> = {
+  active: 'Active',
+  shadow: 'Shadow',
+};
+
+// Module-level memoized table panel. EuiResizableContainer re-runs its render
+// prop on every mousemove; memoizing keeps pagination and sort stable. Project
+// memory references the same pattern from services_home.tsx.
+interface SlosTablePanelProps {
+  items: SloSummary[];
+  columns: Array<EuiBasicTableColumn<SloSummary>>;
+  loading: boolean;
+  resultCount: number;
+  filteredToZero: boolean;
+  onClearAllFilters: () => void;
+}
+
+const SlosTablePanelUI: React.FC<SlosTablePanelProps> = ({
+  items,
+  columns,
+  loading,
+  resultCount,
+  filteredToZero,
+  onClearAllFilters,
+}) => {
+  if (filteredToZero) {
+    return (
+      <EuiPanel data-test-subj="slosEmptyFilteredZero">
+        <EuiEmptyPrompt
+          iconType="search"
+          title={<h2>No SLOs match your filters</h2>}
+          body={<p>Try widening the filters, or clear them to see every SLO in this workspace.</p>}
+          actions={
+            <EuiButton onClick={onClearAllFilters} data-test-subj="slosEmptyFilteredClear">
+              Clear filters
+            </EuiButton>
+          }
+        />
+      </EuiPanel>
+    );
+  }
+  return (
+    <EuiPanel>
+      <EuiFlexGroup justifyContent="spaceBetween" alignItems="center">
+        <EuiFlexItem grow={false}>
+          <EuiText size="m">
+            <h4>SLO catalog</h4>
+          </EuiText>
+        </EuiFlexItem>
+        <EuiFlexItem grow={false}>
+          <EuiText size="s" color="subdued" data-test-subj="slosListingResultCount">
+            {resultCount} SLO{resultCount === 1 ? '' : 's'}
+          </EuiText>
+        </EuiFlexItem>
+      </EuiFlexGroup>
+      <EuiSpacer size="s" />
+      <EuiInMemoryTable<SloSummary>
+        items={items}
+        columns={columns}
+        pagination={{
+          initialPageSize: 20,
+          pageSizeOptions: [10, 20, 50, 100],
+        }}
+        sorting={{ sort: { field: 'name', direction: 'asc' } }}
+        loading={loading}
+        data-test-subj="slosTable"
+      />
+    </EuiPanel>
+  );
+};
+
+const SlosTablePanel = React.memo(SlosTablePanelUI);
+
 export const SloListingPage: React.FC<SloListingPageProps> = ({
   apiClient,
   chrome,
@@ -154,7 +243,6 @@ export const SloListingPage: React.FC<SloListingPageProps> = ({
     }
 
     if (rawUrl !== lastSyncedSearch.current) {
-      // URL changed out from under us (paste / back button). Pull into state.
       const parsed = deserializeFiltersFromSearch(location.search);
       if (!filtersEqual(parsed, filters)) {
         lastSyncedSearch.current = rawUrl;
@@ -163,7 +251,6 @@ export const SloListingPage: React.FC<SloListingPageProps> = ({
       return;
     }
 
-    // State changed; push to URL.
     lastSyncedSearch.current = fromState;
     history.replace({
       pathname: location.pathname,
@@ -175,13 +262,8 @@ export const SloListingPage: React.FC<SloListingPageProps> = ({
     setLoading(true);
     setError(null);
     try {
-      // Server-side filtering via the SloListFilters contract.
       const result = await apiClient.list({ ...filters, pageSize: 100 });
       setItems(result.results);
-      // Track whether the workspace has any SLOs at all, so we can tell
-      // "no SLOs exist" from "filters narrowed to zero". The total the server
-      // returns is post-filter; if any filter is applied we can't tell from
-      // this response alone, so only lock it on the unfiltered fetch.
       if (Object.keys(filters).length === 0) {
         setTotalUnfiltered(result.total);
       }
@@ -306,6 +388,91 @@ export const SloListingPage: React.FC<SloListingPageProps> = ({
 
   const clearAllFilters = useCallback(() => setFilters({}), []);
 
+  // Build the shared ActiveFilterBadges rows. Each badge clears all values for
+  // its category at once — mirrors services_home.
+  const activeFilters: FilterBadge[] = useMemo(() => {
+    const badges: FilterBadge[] = [];
+    const clearKey = (key: keyof SloListFilters) =>
+      setFilters((f) => {
+        const next = { ...f };
+        delete next[key];
+        return next;
+      });
+    if (filters.state?.length) {
+      badges.push({
+        key: 'state',
+        category: 'State',
+        values: filters.state.map((v) => STATE_LABEL[v] ?? v),
+        onRemove: () => clearKey('state'),
+      });
+    }
+    if (filters.sliBackend?.length) {
+      badges.push({
+        key: 'sliBackend',
+        category: 'Backend',
+        values: filters.sliBackend.map((v) => SLI_BACKEND_LABEL[v] ?? v),
+        onRemove: () => clearKey('sliBackend'),
+      });
+    }
+    if (filters.sliLeafType?.length) {
+      badges.push({
+        key: 'sliLeafType',
+        category: 'SLI type',
+        values: filters.sliLeafType,
+        onRemove: () => clearKey('sliLeafType'),
+      });
+    }
+    if (filters.service?.length) {
+      badges.push({
+        key: 'service',
+        category: 'Service',
+        values: filters.service,
+        onRemove: () => clearKey('service'),
+      });
+    }
+    if (filters.team?.length) {
+      badges.push({
+        key: 'team',
+        category: 'Team',
+        values: filters.team,
+        onRemove: () => clearKey('team'),
+      });
+    }
+    if (filters.tier?.length) {
+      badges.push({
+        key: 'tier',
+        category: 'Tier',
+        values: filters.tier,
+        onRemove: () => clearKey('tier'),
+      });
+    }
+    if (filters.mode?.length) {
+      badges.push({
+        key: 'mode',
+        category: 'Mode',
+        values: filters.mode.map((v) => MODE_LABEL[v] ?? v),
+        onRemove: () => clearKey('mode'),
+      });
+    }
+    if (filters.enabled !== undefined) {
+      badges.push({
+        key: 'enabled',
+        category: 'Enabled',
+        values: [filters.enabled ? 'Yes' : 'No'],
+        onRemove: () => clearKey('enabled'),
+      });
+    }
+    if (filters.search && filters.search.trim().length > 0) {
+      badges.push({
+        key: 'search',
+        category: 'Search',
+        values: [`"${filters.search}"`],
+        onRemove: () => clearKey('search'),
+      });
+    }
+    return badges;
+  }, [filters]);
+
   const createButton = (
     <EuiButton
       fill
@@ -339,9 +506,13 @@ export const SloListingPage: React.FC<SloListingPageProps> = ({
   // Overview panel tile-click: map the tile to a state filter slice so the
   // strip + chips stay in sync with the tile highlight.
   const overviewActive = filterStateToTile(filters.state);
-  const setOverviewStateFilter = (tile: SloHealthState | 'firing' | null) => {
+  const setOverviewStateFilter = useCallback((tile: SloHealthState | 'firing' | null) => {
     setFilters((prev) => ({ ...prev, state: stateTileToFilterState(tile) }));
-  };
+  }, []);
+
+  const onSearchChange = useCallback((next: string) => {
+    setFilters((f) => ({ ...f, search: next || undefined }));
+  }, []);
 
   // --- Render states ---
   const isFirstLoad = loading && items.length === 0 && totalUnfiltered === null;
@@ -405,78 +576,81 @@ export const SloListingPage: React.FC<SloListingPageProps> = ({
                 />
               </EuiPanel>
             ) : (
-              <>
-                {/* Aggregate health at a glance — server-side list provides the items. */}
-                {items.length > 0 && (
+              <EuiResizableContainer style={{ marginTop: '8px' }}>
+                {(EuiResizablePanel, EuiResizableButton) => (
                   <>
-                    <SloOverviewPanel
-                      items={items}
-                      activeStateFilter={overviewActive}
-                      onStateFilterChange={setOverviewStateFilter}
-                    />
-                    <EuiSpacer size="m" />
+                    <EuiResizablePanel
+                      id="slosFilterSidebar"
+                      initialSize={18}
+                      minSize="12%"
+                      paddingSize="none"
+                      style={{ paddingTop: '8px', paddingRight: '8px' }}
+                    >
+                      <EuiPanel style={{ height: '100%', overflowY: 'auto' }} paddingSize="s">
+                        <EuiText size="xs">
+                          <strong>Filters</strong>
+                        </EuiText>
+                        <EuiSpacer size="xs" />
+                        <SloListFilterPanel filters={filters} onChange={setFilters} items={items} />
+                      </EuiPanel>
+                    </EuiResizablePanel>
+
+                    <EuiResizableButton />
+
+                    <EuiResizablePanel
+                      initialSize={82}
+                      minSize="50%"
+                      paddingSize="none"
+                      scrollable={false}
+                      style={{ padding: '8px 0 0 8px' }}
+                    >
+                      {items.length > 0 && (
+                        <>
+                          <SloOverviewPanel
+                            items={items}
+                            activeStateFilter={overviewActive}
+                            onStateFilterChange={setOverviewStateFilter}
+                          />
+                          <EuiSpacer size="m" />
+                        </>
+                      )}
+
+                      <EuiFlexGroup gutterSize="s" alignItems="center" responsive={false}>
+                        <EuiFlexItem>
+                          <EuiFieldSearch
+                            placeholder="Filter by name, service, or description"
+                            value={filters.search ?? ''}
+                            onChange={(e) => onSearchChange(e.target.value)}
+                            isClearable
+                            compressed
+                            fullWidth
+                            data-test-subj="slosListingFilterSearch"
+                          />
+                        </EuiFlexItem>
+                      </EuiFlexGroup>
+                      {activeFilters.length > 0 && (
+                        <>
+                          <EuiSpacer size="xs" />
+                          <ActiveFilterBadges
+                            filters={activeFilters}
+                            onClearAll={clearAllFilters}
+                          />
+                        </>
+                      )}
+                      <EuiSpacer size="s" />
+
+                      <SlosTablePanel
+                        items={items}
+                        columns={columns}
+                        loading={loading}
+                        resultCount={items.length}
+                        filteredToZero={filteredToZero}
+                        onClearAllFilters={clearAllFilters}
+                      />
+                    </EuiResizablePanel>
                   </>
                 )}
-
-                <SloListFilterPanel filters={filters} onChange={setFilters} items={items} />
-                <EuiSpacer size="xs" />
-                <SloListFilterChips
-                  filters={filters}
-                  onChange={setFilters}
-                  onClearAll={clearAllFilters}
-                />
-                <EuiSpacer size="s" />
-
-                {filteredToZero ? (
-                  <EuiPanel data-test-subj="slosEmptyFilteredZero">
-                    <EuiEmptyPrompt
-                      iconType="search"
-                      title={<h2>No SLOs match your filters</h2>}
-                      body={
-                        <p>
-                          Try widening the filters, or clear them to see every SLO in this
-                          workspace.
-                        </p>
-                      }
-                      actions={
-                        <EuiButton
-                          onClick={clearAllFilters}
-                          data-test-subj="slosEmptyFilteredClear"
-                        >
-                          Clear filters
-                        </EuiButton>
-                      }
-                    />
-                  </EuiPanel>
-                ) : (
-                  <EuiPanel>
-                    <EuiFlexGroup justifyContent="spaceBetween" alignItems="center">
-                      <EuiFlexItem grow={false}>
-                        <EuiText size="m">
-                          <h4>SLO catalog</h4>
-                        </EuiText>
-                      </EuiFlexItem>
-                      <EuiFlexItem grow={false}>
-                        <EuiText size="s" color="subdued" data-test-subj="slosListingResultCount">
-                          {items.length} SLO{items.length === 1 ? '' : 's'}
-                        </EuiText>
-                      </EuiFlexItem>
-                    </EuiFlexGroup>
-                    <EuiSpacer size="s" />
-                    <EuiInMemoryTable<SloSummary>
-                      items={items}
-                      columns={columns}
-                      pagination={{
-                        initialPageSize: 20,
-                        pageSizeOptions: [10, 20, 50, 100],
-                      }}
-                      sorting={{ sort: { field: 'name', direction: 'asc' } }}
-                      loading={loading}
-                      data-test-subj="slosTable"
-                    />
-                  </EuiPanel>
-                )}
-              </>
+              </EuiResizableContainer>
             )}
           </EuiPageContentBody>
         </EuiPageContent>
