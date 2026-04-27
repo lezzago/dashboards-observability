@@ -16,11 +16,12 @@
  * before the ruler has evaluated the SLO rules.
  */
 
-import React, { useMemo } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   EuiFlexGroup,
   EuiFlexItem,
   EuiHealth,
+  EuiLink,
   EuiPanel,
   EuiSpacer,
   EuiText,
@@ -38,6 +39,13 @@ export interface SloBurnRatePanelProps {
   prometheusConnectionId: string;
   timeRange: TimeRange;
   refreshTrigger: number;
+  /**
+   * Callback fired when a tier card asks the user to "view generated rules".
+   * The detail page opens its Advanced-details accordion and scrolls to it.
+   * When undefined, the link is not rendered — keeps the panel usable in
+   * embedding contexts that don't own an accordion (e.g. storybook).
+   */
+  onViewRulesRequest?: () => void;
 }
 
 /** Friendly labels for the four default MWMBR tiers, in index order. */
@@ -150,6 +158,26 @@ interface TierCardProps {
   prometheusConnectionId: string;
   timeRange: TimeRange;
   refreshTrigger: number;
+  /**
+   * When true AND this tier has no samples yet, collapse the short/long/for
+   * readout into a single waiting-for-data block with a "view generated
+   * rules" affordance. Only applied by the parent when ≥2 tiers are no_data
+   * so we don't visually isolate a single card.
+   */
+  collapseWhenNoData: boolean;
+  onViewRulesRequest?: () => void;
+  /**
+   * Stable key passed back to the parent on every health change so it can
+   * bucket tiers without the TierCard having to know how the parent indexes
+   * them.
+   */
+  reportKey: string;
+  /**
+   * Reports tier health back to the parent so it can decide whether enough
+   * tiers are in no_data to justify collapsing them into the waiting-for-data
+   * layout.
+   */
+  onHealthChange: (key: string, health: TierHealth) => void;
 }
 
 /**
@@ -166,6 +194,10 @@ const TierCard: React.FC<TierCardProps> = ({
   prometheusConnectionId,
   timeRange,
   refreshTrigger,
+  collapseWhenNoData,
+  onViewRulesRequest,
+  reportKey,
+  onHealthChange,
 }) => {
   const shortQuery = useMemo(() => buildErrorRatioExprForWindow(slo, objective, tier.shortWindow), [
     slo,
@@ -198,6 +230,12 @@ const TierCard: React.FC<TierCardProps> = ({
   const health = classifyTier(short, long, threshold);
   const loading = shortData.isLoading || longData.isLoading;
 
+  useEffect(() => {
+    onHealthChange(reportKey, health);
+  }, [reportKey, health, onHealthChange]);
+
+  const waiting = collapseWhenNoData && health === 'no_data' && !loading;
+
   return (
     <EuiPanel
       paddingSize="s"
@@ -221,52 +259,74 @@ const TierCard: React.FC<TierCardProps> = ({
 
       <EuiSpacer size="s" />
 
-      <EuiFlexGroup gutterSize="m" alignItems="center" responsive={false}>
-        <EuiFlexItem>
+      {waiting ? (
+        <div data-test-subj="slosBurnrateTierWaiting">
           <EuiText size="xs" color="subdued">
-            short ({tier.shortWindow})
+            Waiting for Prometheus samples · evaluates every 1m.
           </EuiText>
-          <EuiText size="s">
-            <strong
-              style={{
-                color:
-                  short !== null && short > threshold ? euiThemeVars.euiColorDanger : undefined,
-              }}
-            >
-              {loading ? '…' : formatPct(short)}
-            </strong>
-          </EuiText>
-          <EuiSpacer size="xs" />
-          <BurnBar ratio={short} threshold={threshold} />
-        </EuiFlexItem>
-        <EuiFlexItem>
-          <EuiText size="xs" color="subdued">
-            long ({tier.longWindow})
-          </EuiText>
-          <EuiText size="s">
-            <strong
-              style={{
-                color: long !== null && long > threshold ? euiThemeVars.euiColorDanger : undefined,
-              }}
-            >
-              {loading ? '…' : formatPct(long)}
-            </strong>
-          </EuiText>
-          <EuiSpacer size="xs" />
-          <BurnBar ratio={long} threshold={threshold} />
-        </EuiFlexItem>
-      </EuiFlexGroup>
+          {onViewRulesRequest && (
+            <>
+              <EuiSpacer size="xs" />
+              <EuiLink
+                onClick={onViewRulesRequest}
+                data-test-subj="slosBurnrateTierWaitingViewRules"
+              >
+                View generated rules
+              </EuiLink>
+            </>
+          )}
+        </div>
+      ) : (
+        <>
+          <EuiFlexGroup gutterSize="m" alignItems="center" responsive={false}>
+            <EuiFlexItem>
+              <EuiText size="xs" color="subdued">
+                short ({tier.shortWindow})
+              </EuiText>
+              <EuiText size="s">
+                <strong
+                  style={{
+                    color:
+                      short !== null && short > threshold ? euiThemeVars.euiColorDanger : undefined,
+                  }}
+                >
+                  {loading ? '…' : formatPct(short)}
+                </strong>
+              </EuiText>
+              <EuiSpacer size="xs" />
+              <BurnBar ratio={short} threshold={threshold} />
+            </EuiFlexItem>
+            <EuiFlexItem>
+              <EuiText size="xs" color="subdued">
+                long ({tier.longWindow})
+              </EuiText>
+              <EuiText size="s">
+                <strong
+                  style={{
+                    color:
+                      long !== null && long > threshold ? euiThemeVars.euiColorDanger : undefined,
+                  }}
+                >
+                  {loading ? '…' : formatPct(long)}
+                </strong>
+              </EuiText>
+              <EuiSpacer size="xs" />
+              <BurnBar ratio={long} threshold={threshold} />
+            </EuiFlexItem>
+          </EuiFlexGroup>
 
-      <EuiSpacer size="xs" />
-      <EuiToolTip
-        content={`Fires when BOTH windows exceed ${formatPct(
-          threshold
-        )} (burn rate × error budget). For: ${tier.forDuration}.`}
-      >
-        <EuiText size="xs" color="subdued">
-          threshold {formatPct(threshold)} · for {tier.forDuration}
-        </EuiText>
-      </EuiToolTip>
+          <EuiSpacer size="xs" />
+          <EuiToolTip
+            content={`Fires when BOTH windows exceed ${formatPct(
+              threshold
+            )} (burn rate × error budget). For: ${tier.forDuration}.`}
+          >
+            <EuiText size="xs" color="subdued">
+              threshold {formatPct(threshold)} · for {tier.forDuration}
+            </EuiText>
+          </EuiToolTip>
+        </>
+      )}
     </EuiPanel>
   );
 };
@@ -277,13 +337,26 @@ export const SloBurnRatePanel: React.FC<SloBurnRatePanelProps> = ({
   prometheusConnectionId,
   timeRange,
   refreshTrigger,
+  onViewRulesRequest,
 }) => {
   const tiers = slo.spec.alerting.strategy === 'mwmbr' ? slo.spec.alerting.burnRates : [];
   const errorBudget = 1 - objective.target;
 
+  // Each tier card reports its health up here so we can decide whether to
+  // collapse no_data tiers into the inline waiting state. Keyed by the
+  // tier's (short, long) pair — unique per tier in P0 since the wizard
+  // rejects duplicates.
+  const [tierHealths, setTierHealths] = useState<Record<string, TierHealth>>({});
+  const handleHealthChange = useCallback((key: string, health: TierHealth) => {
+    setTierHealths((prev) => (prev[key] === health ? prev : { ...prev, [key]: health }));
+  }, []);
+
   if (tiers.length === 0) {
     return null;
   }
+
+  const noDataCount = Object.values(tierHealths).filter((h) => h === 'no_data').length;
+  const collapseWhenNoData = noDataCount >= 2;
 
   return (
     <EuiPanel data-test-subj="slosBurnratePanel">
@@ -305,8 +378,9 @@ export const SloBurnRatePanel: React.FC<SloBurnRatePanelProps> = ({
         {tiers.map((tier, i) => {
           const threshold = tier.burnRateMultiplier * errorBudget;
           const label = TIER_LABELS[i] ?? `Tier ${i + 1}`;
+          const key = `${tier.shortWindow}-${tier.longWindow}`;
           return (
-            <EuiFlexItem key={`${tier.shortWindow}-${tier.longWindow}`} style={{ minWidth: 260 }}>
+            <EuiFlexItem key={key} style={{ minWidth: 260 }}>
               <TierCard
                 tier={tier}
                 label={label}
@@ -316,6 +390,10 @@ export const SloBurnRatePanel: React.FC<SloBurnRatePanelProps> = ({
                 prometheusConnectionId={prometheusConnectionId}
                 timeRange={timeRange}
                 refreshTrigger={refreshTrigger}
+                collapseWhenNoData={collapseWhenNoData}
+                onViewRulesRequest={onViewRulesRequest}
+                reportKey={key}
+                onHealthChange={handleHealthChange}
               />
             </EuiFlexItem>
           );

@@ -49,6 +49,13 @@ export interface SloVisualizationsProps {
   slo: SloDocument & { liveStatus: SloLiveStatus };
   timeRange: TimeRange;
   refreshTrigger: number;
+  /**
+   * Invoked when the MWMBR tier cards ask the operator to "view generated
+   * rules". The detail page owns the Advanced-details accordion holding the
+   * generated rule names, so it passes down the scroll/expand handler from
+   * there. Undefined = link hidden (e.g. storybook / tests).
+   */
+  onViewRulesRequest?: () => void;
 }
 
 function formatSeconds(value: number): string {
@@ -68,6 +75,7 @@ export const SloVisualizations: React.FC<SloVisualizationsProps> = ({
   slo,
   timeRange,
   refreshTrigger,
+  onViewRulesRequest,
 }) => {
   const { config } = useApmConfig();
   const prometheusConnectionId = config?.prometheusDataSource?.name ?? '';
@@ -198,6 +206,7 @@ export const SloVisualizations: React.FC<SloVisualizationsProps> = ({
         prometheusConnectionId={prometheusConnectionId}
         timeRange={timeRange}
         refreshTrigger={refreshTrigger}
+        onViewRulesRequest={onViewRulesRequest}
       />
 
       <EuiSpacer size="m" />
