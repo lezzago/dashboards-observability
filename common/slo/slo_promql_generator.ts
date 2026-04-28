@@ -646,3 +646,60 @@ export function generateSloRuleGroup(
 export function extractGeneratedRuleNames(group: GeneratedRuleGroup): string[] {
   return group.rules.map((r) => r.name);
 }
+
+// ============================================================================
+// Probe SLI query builder — W8 (Probe SLI wizard feature)
+// ============================================================================
+
+/**
+ * Per-query pieces the Probe-SLI endpoint executes to surface "does this SLI
+ * actually match data in Prometheus" before the user clicks Create. Returns
+ * the same good/total expressions the recording-rule deployment path would
+ * emit — the probe is deliberately identical to what lands in the ruler so a
+ * healthy probe implies a healthy deploy.
+ *
+ * `good` is the count of good events over `window`; `total` is the count of
+ * total events over `window`. `ratio = good / total` is what the UI renders.
+ *
+ * Returns `null` when the spec is malformed enough that no query can be
+ * issued (composite SLOs, OpenSearch backend, custom with missing expr):
+ * caller surfaces that to the user rather than issuing an empty query.
+ */
+export function buildProbeQueries(
+  spec: SloSpec,
+  objective: Objective,
+  window: string
+): { good: string; total: string } | null {
+  if (spec.sli.type !== 'single') return null;
+  const sli = spec.sli;
+  if (sli.definition.backend !== 'prometheus') return null;
+  const prom = sli.definition;
+
+  if (prom.type === 'custom') {
+    if (!prom.customExpr) return null;
+    if (prom.customExpr.mode === 'raw') {
+      // Raw error-ratio has no separable good/total — the probe surface only
+      // supports the events split. Callers pre-check for `mode === 'events'`.
+      return null;
+    }
+    return { good: prom.customExpr.goodQuery, total: prom.customExpr.totalQuery };
+  }
+
+  const dimSelectors = buildSelectors(sli, false);
+  const goodSelectors = buildSelectors(sli, true);
+  if (prom.type === 'availability') {
+    const metric = prom.metric || '';
+    return {
+      good: `sum(rate(${metric}{${goodSelectors}}[${window}]))`,
+      total: `sum(rate(${metric}{${dimSelectors}}[${window}]))`,
+    };
+  }
+  // latency_threshold — "good" = requests under the latency bound.
+  const bucketMetric = ensureBucketMetric(prom.metric || '');
+  const bound = objective.latencyThreshold ?? 0;
+  const boundLe = formatLatencyBoundLe(bound, prom.latencyThresholdUnit ?? 'seconds');
+  return {
+    good: `sum(rate(${bucketMetric}{${dimSelectors}, le="${boundLe}"}[${window}]))`,
+    total: `sum(rate(${bucketMetric}{${dimSelectors}, le="+Inf"}[${window}]))`,
+  };
+}

@@ -14,6 +14,8 @@ import type { PaginatedResponse } from '../../../../../common/types/alerting/typ
 import { OBSERVABILITY_BASE } from '../../../../../common/constants/shared';
 import type {
   GeneratedRuleGroup,
+  ProbeSliRequest,
+  ProbeSliResponse,
   SloCreateInput,
   SloDocument,
   SloLiveStatus,
@@ -81,7 +83,7 @@ function serializeFilters(filters: SloListFilters): Record<string, string | numb
   const query: Record<string, string | number | boolean> = {};
   if (filters.page !== undefined) query.page = filters.page;
   if (filters.pageSize !== undefined) query.pageSize = filters.pageSize;
-  if (filters.datasourceId) query.datasourceId = filters.datasourceId;
+  if (filters.datasourceId?.length) query.datasourceId = filters.datasourceId.join(',');
   if (filters.state?.length) query.state = filters.state.join(',');
   if (filters.sliBackend?.length) query.sliBackend = filters.sliBackend.join(',');
   if (filters.sliLeafType?.length) query.sliLeafType = filters.sliLeafType.join(',');
@@ -133,5 +135,9 @@ export class SloApiClient {
 
   statuses(ids: string[]): Promise<{ statuses: SloLiveStatus[] }> {
     return this.http.post(`${SLO_BASE}/statuses`, { body: JSON.stringify({ ids }) });
+  }
+
+  probeSli(body: ProbeSliRequest): Promise<ProbeSliResponse> {
+    return this.http.post(`${SLO_BASE}/probe-sli`, { body: JSON.stringify(body) });
   }
 }

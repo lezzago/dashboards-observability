@@ -371,7 +371,7 @@ export interface GeneratedRuleGroup {
 
 export interface ISloStore {
   get(id: string): Promise<SloDocument | null>;
-  list(datasourceId?: string): Promise<SloDocument[]>;
+  list(datasourceIds?: string[]): Promise<SloDocument[]>;
   /** Upsert — uses `id` as the key. */
   save(doc: SloDocument): Promise<void>;
   /** Returns true if deleted, false if not found. */
@@ -396,8 +396,53 @@ export interface SloUpdateInput {
   version: number;
 }
 
+// ============================================================================
+// Probe SLI — step 8
+// ============================================================================
+
+/** Lookback windows offered to the wizard's Probe SLI button. */
+export type ProbeSliLookback = '1h' | '24h' | '7d';
+
+export interface ProbeSliRequest {
+  datasourceId: string;
+  goodQuery: string;
+  totalQuery: string;
+  /** Defaults to '1h' on the server when absent. */
+  lookback?: ProbeSliLookback;
+}
+
+export interface ProbeSliSamplePoint {
+  /** Millisecond epoch of the sample. */
+  t: number;
+  /** Ratio in [0, 1] — clamped client-side before render. */
+  v: number;
+}
+
+/**
+ * Partial-success response. A failed sub-query leaves its count/ratio absent
+ * and populates `errors.{good,total}`; the opposite side's data is preserved
+ * so the user sees whatever the backend did return.
+ */
+export interface ProbeSliResponse {
+  goodCount?: number;
+  totalCount?: number;
+  /** `good / total`, clamped to [0, 1]. Absent when either side is missing. */
+  sliRatio?: number;
+  /** Up to 20 points spanning the lookback window. */
+  samplePoints?: ProbeSliSamplePoint[];
+  /** True when either query returned no series, or total count is 0. */
+  emptyVector?: boolean;
+  /** Per-query PromQL / backend diagnostic surfaced to the user verbatim. */
+  errors?: { good?: string; total?: string };
+}
+
 export interface SloListFilters {
-  datasourceId?: string;
+  /**
+   * Restrict listing to SLOs owned by these datasource ids. Empty/undefined
+   * means "all datasources the user has access to". The listing UI caps the
+   * selection at 5; callers may pass arbitrary lengths.
+   */
+  datasourceId?: string[];
   state?: SloHealthState[];
   sliBackend?: Array<'prometheus' | 'opensearch'>;
   sliLeafType?: string[];
