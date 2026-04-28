@@ -31,7 +31,7 @@ import type {
   Objective,
   SloDocument,
 } from '../../../../../common/slo/slo_types';
-import { buildErrorRatioExprForWindow } from './slo_query_builders';
+import { buildCoverageProbeQuery, buildErrorRatioExprForWindow } from './slo_query_builders';
 import { formatPct } from '../../../../../common/slo/format';
 
 export interface SloBudgetRemainingChartProps {
@@ -43,11 +43,10 @@ export interface SloBudgetRemainingChartProps {
 }
 
 /**
- * Construct a PromQL expression for `(target - errorRatio(t)) / (1 - target)`,
- * which maps [budget exhausted, full budget] to [0, 1]. When errorRatio > 1
- * (impossible in clean data but possible with clock skew on recording rules)
- * the value goes negative — the chart yAxis stays pinned so the negative
- * region shows as "off the floor" rather than redrawing the axis.
+ * Construct a PromQL expression for `((1 - target) - errorRatio(t)) / (1 - target)`,
+ * which maps [budget exhausted, full budget] to [0, 1]. Values below 0 mean the
+ * SLO is in breach; the chart's yAxis expands its floor dynamically to show the
+ * real dip so the chart agrees with the "Budget remaining" headline stat.
  */
 function buildBudgetRemainingExpr(
   slo: SloDocument,
@@ -58,10 +57,13 @@ function buildBudgetRemainingExpr(
   if (!errorRatioExpr) return null;
   const errorBudget = 1 - objective.target;
   if (errorBudget <= 0) return null;
-  // Promql: ((1 - target) - errorRatio) / (1 - target)
-  // = clamp_min(..., -0.5) keeps the chart readable if the rule briefly
-  //   returns a value > 1 (histogram quirks, cold-start recording rule).
-  return `clamp_min((${errorBudget} - (${errorRatioExpr})) / ${errorBudget}, -0.5)`;
+  // PromQL: ((1 - target) - errorRatio) / (1 - target)
+  // Returned unclamped — the headline stat on the budget panel shows the true
+  // deep-breach number (e.g. -1900%), and clamping here used to leave the chart
+  // pinned at -50% while the panel screamed -1900%, which looked like a bug.
+  // The yAxis now autoscales its floor from the data, so extreme dips render
+  // truthfully without collapsing the rest of the chart.
+  return `(${errorBudget} - (${errorRatioExpr})) / ${errorBudget}`;
 }
 
 export interface BudgetRemainingOptionInputs {
@@ -104,7 +106,10 @@ export function buildBudgetRemainingOption(
       },
       label: {
         formatter: `${warningThreshold.severity} @ ${formatPct(warningThreshold.threshold)}`,
-        position: 'insideStartTop',
+        // Pin the warning label to the end so it doesn't collide with the
+        // "exhausted" label in deep-breach renders where the axis is stretched
+        // downward and both markLines sit near the chart's top edge.
+        position: 'insideEndTop',
         color: euiThemeVars.euiColorWarningText,
         fontSize: 10,
       },
@@ -112,7 +117,7 @@ export function buildBudgetRemainingOption(
   }
 
   return {
-    grid: { left: 50, right: 20, top: 20, bottom: 30, containLabel: true },
+    grid: { left: 50, right: 20, top: 24, bottom: 30, containLabel: true },
     tooltip: {
       trigger: 'axis',
       formatter: (params: unknown) => {
@@ -131,7 +136,12 @@ export function buildBudgetRemainingOption(
     },
     yAxis: {
       type: 'value',
-      min: -0.1,
+      // Keep a small headroom below 0 so the "exhausted" markLine label stays
+      // readable when budget is healthy. When the series dips into the negative
+      // breach region (PromQL clamps at -0.5), extend down far enough to show
+      // the actual low — otherwise we silently clip data between -0.5 and -0.1.
+      min: (value: { min: number; max: number }) =>
+        Number.isFinite(value.min) ? Math.min(-0.1, value.min) : -0.1,
       max: 1,
       axisLabel: {
         color: euiThemeVars.euiColorDarkShade,
@@ -193,12 +203,27 @@ export const SloBudgetRemainingChart: React.FC<SloBudgetRemainingChartProps> = (
     enabled: Boolean(query),
   });
 
+  // Coverage probe — fires alongside the main query so that when the chart is
+  // empty we can say *why*. A hit here with no chart data means the metric
+  // exists but the current window has no samples (wait/widen-range story). A
+  // miss here means the SLI's source metric is absent from the datasource
+  // entirely (permanent misconfig — typing out "waiting for data" would lie).
+  const probeQuery = useMemo(() => buildCoverageProbeQuery(slo, objective), [slo, objective]);
+  const { series: probeSeries, isLoading: probeLoading } = usePromQLChartData({
+    promqlQuery: probeQuery ?? '',
+    timeRange,
+    prometheusConnectionId,
+    refreshTrigger,
+    enabled: Boolean(probeQuery),
+  });
+
   // All hooks must be called before the early return — the spec is derived
   // from the fetched series so it's cheap when query is null (empty data).
   const data: Array<[number, number]> = (series[0]?.data ?? []).map((d) => [d.timestamp, d.value]);
   const latest = data.length > 0 ? data[data.length - 1][1] : null;
   const atZero = latest !== null && latest <= 0;
   const hasData = !isLoading && !error && data.length > 0;
+  const metricExists = probeSeries.some((s) => s.data.length > 0);
 
   const spec = useMemo(
     () =>
@@ -248,17 +273,34 @@ export const SloBudgetRemainingChart: React.FC<SloBudgetRemainingChartProps> = (
           <EuiText size="s">{error.message}</EuiText>
         </EuiCallOut>
       )}
-      {!error && !isLoading && !hasData && (
+      {!error && !isLoading && !hasData && !probeLoading && !metricExists && (
+        <EuiCallOut
+          size="s"
+          color="warning"
+          iconType="alert"
+          title="SLI source metric not found in this datasource"
+          data-test-subj="slosBudgetRemainingMissingMetric"
+        >
+          <EuiText size="s">
+            No samples exist for the metric this SLI queries on
+            <strong> {prometheusConnectionId}</strong>. This usually means the SLI was configured
+            against a metric name or label set that the datasource has never scraped — waiting
+            won&apos;t populate the chart. Check the SLI&apos;s metric / selectors, or point the SLO
+            at a datasource that has them.
+          </EuiText>
+        </EuiCallOut>
+      )}
+      {!error && !isLoading && !hasData && !probeLoading && metricExists && (
         <EuiCallOut
           size="s"
           color="primary"
           iconType="iInCircle"
-          title="Waiting for data"
+          title="No samples in the selected time range"
           data-test-subj="slosBudgetRemainingEmpty"
         >
           <EuiText size="s">
-            The recording rules for this SLO have not evaluated yet. The chart will populate once
-            Prometheus returns samples.
+            The metric exists in this datasource but the current range has no data. Widen the time
+            range, or wait for the next Prometheus scrape + rule evaluation.
           </EuiText>
         </EuiCallOut>
       )}

@@ -161,15 +161,22 @@ describe('buildBudgetRemainingOption', () => {
     expect(area.color).toMatch(/189.*39.*30/);
   });
 
-  it("pins yAxis to the [-0.1, 1] range so chartnegative values don't redraw the axis", () => {
+  it('caps yAxis max at 1 and keeps -0.1 headroom for healthy data while expanding to show breach dips', () => {
     const opt = buildBudgetRemainingOption({
       seriesName: 'obj-1',
       data: [],
       atZero: false,
     });
-    const yAxis = opt.yAxis as { min: number; max: number };
-    expect(yAxis.min).toBeLessThan(0);
+    const yAxis = opt.yAxis as {
+      min: (v: { min: number; max: number }) => number;
+      max: number;
+    };
     expect(yAxis.max).toBe(1);
+    // Healthy data — axis keeps a small negative gutter so the "exhausted"
+    // markLine's label isn't clipped.
+    expect(yAxis.min({ min: 0.4, max: 1 })).toBe(-0.1);
+    // Breach data (PromQL clamps at -0.5) — axis drops far enough to show it.
+    expect(yAxis.min({ min: -0.3, max: 0.9 })).toBe(-0.3);
   });
 });
 
@@ -178,7 +185,7 @@ describe('SloBudgetRemainingChart', () => {
     jest.clearAllMocks();
   });
 
-  it('renders the empty-state callout when the query returns no samples', () => {
+  it('renders the missing-metric callout when neither the chart nor the probe return samples', () => {
     mockUsePromQLChartData.mockReturnValue({
       series: [],
       latestValue: null,
@@ -186,6 +193,33 @@ describe('SloBudgetRemainingChart', () => {
       error: null,
       refetch: jest.fn(),
     });
+    render(
+      <SloBudgetRemainingChart
+        slo={makeSlo()}
+        objective={makeSlo().spec.objectives[0]}
+        {...baseProps}
+      />
+    );
+    expect(screen.getByTestId('slosBudgetRemainingMissingMetric')).toBeInTheDocument();
+  });
+
+  it('renders the empty-window callout when the probe finds the metric but the chart is empty', () => {
+    // First call = main query (empty), second call = coverage probe (has data).
+    mockUsePromQLChartData
+      .mockReturnValueOnce({
+        series: [],
+        latestValue: null,
+        isLoading: false,
+        error: null,
+        refetch: jest.fn(),
+      })
+      .mockReturnValueOnce({
+        series: [{ name: 'probe', data: [{ timestamp: 1, value: 1 }], color: '#000' }],
+        latestValue: 1,
+        isLoading: false,
+        error: null,
+        refetch: jest.fn(),
+      });
     render(
       <SloBudgetRemainingChart
         slo={makeSlo()}

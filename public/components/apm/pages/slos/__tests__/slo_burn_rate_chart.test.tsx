@@ -151,6 +151,56 @@ describe('buildBurnRateOption', () => {
     expect(secondMark.data[0].yAxis).toBe(3);
     expect(secondMark.label.formatter).toContain('ticket');
   });
+
+  it('pins yAxis floor at 0 and pads max above the highest threshold or sample', () => {
+    const opt = buildBurnRateOption({
+      tiers: [
+        {
+          label: 'Page · Quick',
+          severity: 'page',
+          multiplier: 20,
+          color: '#A00',
+          data: [[1, 5]],
+        },
+        {
+          label: 'Ticket · Slow',
+          severity: 'ticket',
+          multiplier: 1,
+          color: '#0A0',
+          data: [[1, 2]],
+        },
+      ],
+    });
+    const yAxis = opt.yAxis as { min: number; max: number };
+    expect(yAxis.min).toBe(0);
+    // 20x threshold is the highest anchor; axis must clear it so the
+    // markLine label doesn't render on top of the grid border.
+    expect(yAxis.max).toBeGreaterThan(20);
+  });
+
+  it('pads yAxis above the highest sampled value when samples exceed thresholds', () => {
+    const opt = buildBurnRateOption({
+      tiers: [
+        {
+          label: 'Page · Quick',
+          severity: 'page',
+          multiplier: 14,
+          color: '#A00',
+          // Brief full-breach spike — recording-rule rate can briefly exceed
+          // 1/errorBudget so the series outruns the threshold markLine.
+          data: [[1, 50]],
+        },
+      ],
+    });
+    const yAxis = opt.yAxis as { min: number; max: number };
+    expect(yAxis.max).toBeGreaterThan(50);
+  });
+
+  it('falls back to a non-zero yAxis max when there is no data and no tiers', () => {
+    const opt = buildBurnRateOption({ tiers: [] });
+    const yAxis = opt.yAxis as { min: number; max: number };
+    expect(yAxis.max).toBeGreaterThan(0);
+  });
 });
 
 describe('SloBurnRateChart', () => {
@@ -172,7 +222,7 @@ describe('SloBurnRateChart', () => {
     expect(screen.getByTestId('slosBurnRateEmptyTiers')).toBeInTheDocument();
   });
 
-  it('renders the waiting-for-data callout when every tier returns zero samples', () => {
+  it('renders the missing-metric callout when every tier AND the probe return zero samples', () => {
     mockUsePromQLChartData.mockReturnValue({
       series: [],
       latestValue: null,
@@ -180,6 +230,33 @@ describe('SloBurnRateChart', () => {
       error: null,
       refetch: jest.fn(),
     });
+    const slo = baseSlo();
+    render(<SloBurnRateChart slo={slo} objective={slo.spec.objectives[0]} {...baseProps} />);
+    expect(screen.getByTestId('slosBurnRateMissingMetric')).toBeInTheDocument();
+  });
+
+  it('renders the empty-window callout when the probe sees samples but the tiers do not', () => {
+    // Return stable refs to avoid TierFetcher's onChange-driven loop: every
+    // call returns the same frozen `emptyResult` for tier fetches, and the
+    // probe (identified by its `count(...)` query prefix) gets a pre-frozen
+    // `probeResult`. Stable references prevent useMemo from re-running.
+    const emptyResult = Object.freeze({
+      series: [] as never[],
+      latestValue: null,
+      isLoading: false,
+      error: null,
+      refetch: jest.fn(),
+    });
+    const probeResult = Object.freeze({
+      series: [{ name: 'probe', data: [{ timestamp: 1, value: 1 }], color: '#000' }],
+      latestValue: 1,
+      isLoading: false,
+      error: null,
+      refetch: jest.fn(),
+    });
+    mockUsePromQLChartData.mockImplementation((p: { promqlQuery: string }) =>
+      p.promqlQuery.startsWith('count(') ? probeResult : emptyResult
+    );
     const slo = baseSlo();
     render(<SloBurnRateChart slo={slo} objective={slo.spec.objectives[0]} {...baseProps} />);
     expect(screen.getByTestId('slosBurnRateEmpty')).toBeInTheDocument();

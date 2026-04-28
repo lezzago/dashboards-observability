@@ -29,7 +29,7 @@ import { usePromQLChartData } from '../../shared/hooks/use_promql_chart_data';
 import { TimeRange } from '../../common/types/service_types';
 import { CHART_COLORS } from '../../common/constants';
 import type { BurnRateConfig, Objective, SloDocument } from '../../../../../common/slo/slo_types';
-import { buildErrorRatioExprForWindow } from './slo_query_builders';
+import { buildCoverageProbeQuery, buildErrorRatioExprForWindow } from './slo_query_builders';
 
 export interface SloBurnRateChartProps {
   slo: SloDocument;
@@ -64,8 +64,24 @@ export interface BurnRateOptionInputs {
 export function buildBurnRateOption(inputs: BurnRateOptionInputs): echarts.EChartsOption {
   const { tiers } = inputs;
 
+  // Upper bound of everything we need to fit — tier thresholds plus sampled
+  // burn values. ECharts autoscales yAxis from series alone and would clip the
+  // top threshold's markLine label (rendered at the line's y position) against
+  // the grid's top edge. Compute the required height and pad ~15% for the label,
+  // then round up to a clean integer so the rendered axis labels don't pick up
+  // floating-point noise (e.g. `22.99999999…` rendering as "23x").
+  const seriesMax = tiers.reduce((acc, t) => {
+    for (const [, v] of t.data) {
+      if (Number.isFinite(v) && v > acc) acc = v;
+    }
+    return acc;
+  }, 0);
+  const thresholdMax = tiers.reduce((acc, t) => (t.multiplier > acc ? t.multiplier : acc), 0);
+  const yMaxCandidate = Math.max(seriesMax, thresholdMax);
+  // Fall back to 1 so the axis doesn't collapse when there's no data yet.
+  const yMax = yMaxCandidate > 0 ? Math.ceil(yMaxCandidate * 1.15) : 1;
   return {
-    grid: { left: 50, right: 20, top: 20, bottom: 40, containLabel: true },
+    grid: { left: 50, right: 20, top: 30, bottom: 40, containLabel: true },
     legend: {
       show: true,
       bottom: 0,
@@ -108,6 +124,10 @@ export function buildBurnRateOption(inputs: BurnRateOptionInputs): echarts.EChar
       name: 'burn rate',
       nameGap: 25,
       nameTextStyle: { color: euiThemeVars.euiColorDarkShade, fontSize: 11 },
+      // Burn rate is non-negative; pin the floor so recording-rule clock-skew
+      // blips don't drag the axis below zero and waste vertical space.
+      min: 0,
+      max: yMax,
       axisLabel: {
         color: euiThemeVars.euiColorDarkShade,
         fontSize: 11,
@@ -247,6 +267,18 @@ export const SloBurnRateChart: React.FC<SloBurnRateChartProps> = ({
   const hasData = tierResults.some((r) => r.data.length > 0);
   const firstError = tierResults.find((r) => r.error)?.error ?? null;
 
+  // Coverage probe — one shared fetch per chart mount. See slo_budget_remaining_chart.tsx
+  // for the rationale behind distinguishing "metric missing" vs "window empty".
+  const probeQuery = useMemo(() => buildCoverageProbeQuery(slo, objective), [slo, objective]);
+  const { series: probeSeries, isLoading: probeLoading } = usePromQLChartData({
+    promqlQuery: probeQuery ?? '',
+    timeRange,
+    prometheusConnectionId,
+    refreshTrigger,
+    enabled: Boolean(probeQuery),
+  });
+  const metricExists = probeSeries.some((s) => s.data.length > 0);
+
   const spec = useMemo(
     () =>
       buildBurnRateOption({
@@ -311,17 +343,33 @@ export const SloBurnRateChart: React.FC<SloBurnRateChartProps> = ({
           <EuiText size="s">{firstError.message}</EuiText>
         </EuiCallOut>
       )}
-      {tiers.length > 0 && !firstError && !isLoading && !hasData && (
+      {tiers.length > 0 && !firstError && !isLoading && !hasData && !probeLoading && !metricExists && (
+        <EuiCallOut
+          size="s"
+          color="warning"
+          iconType="alert"
+          title="SLI source metric not found in this datasource"
+          data-test-subj="slosBurnRateMissingMetric"
+        >
+          <EuiText size="s">
+            No samples exist for the metric this SLI queries on
+            <strong> {prometheusConnectionId}</strong>. Burn rate is derived from the same error
+            ratio as the budget chart — if that metric is absent, burn rate can&apos;t populate.
+            Waiting won&apos;t help; re-check the SLI&apos;s metric / selectors.
+          </EuiText>
+        </EuiCallOut>
+      )}
+      {tiers.length > 0 && !firstError && !isLoading && !hasData && !probeLoading && metricExists && (
         <EuiCallOut
           size="s"
           color="primary"
           iconType="iInCircle"
-          title="Waiting for data"
+          title="No samples in the selected time range"
           data-test-subj="slosBurnRateEmpty"
         >
           <EuiText size="s">
-            The burn-rate recording rules have not evaluated yet. The chart will populate once
-            Prometheus returns samples.
+            The metric exists in this datasource but the current range returned no burn-rate
+            samples. Widen the time range, or wait for the next Prometheus scrape + rule evaluation.
           </EuiText>
         </EuiCallOut>
       )}
