@@ -15,6 +15,7 @@
  */
 
 import React, { useMemo } from 'react';
+import { useHistory } from 'react-router-dom';
 import {
   EuiButtonEmpty,
   EuiFlexGroup,
@@ -113,6 +114,39 @@ function aggregateBudgetAccent(avgRemaining: number): string {
   if (avgRemaining >= 0.8) return euiThemeVars.euiColorSuccess;
   if (avgRemaining >= 0.4) return euiThemeVars.euiColorWarning;
   return euiThemeVars.euiColorDanger;
+}
+
+/**
+ * When ≥95% of SLOs carry the same tier value (the same threshold the listing
+ * uses for hiding majority traits — see the d720b68a listing refactor), the
+ * stacked-bars chart collapses to a single bar and stops being informative.
+ * Surface a one-line callout that points the user at the bulk-retag path.
+ */
+const TIER_MAJORITY_THRESHOLD = 0.95;
+
+interface TierMajority {
+  value: string;
+  pct: number;
+}
+
+function computeTierMajority(items: SloSummary[]): TierMajority | null {
+  if (items.length === 0) return null;
+  const counts = new Map<string, number>();
+  for (const s of items) {
+    const key = s.tier ?? 'untiered';
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  let top: string | null = null;
+  let topN = 0;
+  counts.forEach((n, v) => {
+    if (n > topN) {
+      top = v;
+      topN = n;
+    }
+  });
+  if (top === null) return null;
+  const pct = topN / items.length;
+  return pct >= TIER_MAJORITY_THRESHOLD ? { value: top, pct } : null;
 }
 
 /** Compact budget bar used inside the leaderboard. */
@@ -373,6 +407,8 @@ export const SloOverviewPanel: React.FC<SloOverviewPanelProps> = ({
   }, [items]);
 
   const tierRows = useMemo(() => groupByTier(items), [items]);
+  const tierMajority = useMemo(() => computeTierMajority(items), [items]);
+  const history = useHistory();
 
   /**
    * Leaderboard — worst budget remaining first, cut off at 6. These are the
@@ -597,6 +633,43 @@ export const SloOverviewPanel: React.FC<SloOverviewPanelProps> = ({
                 </EuiText>
               </EuiFlexItem>
             </EuiFlexGroup>
+            {tierMajority && (
+              <>
+                <EuiSpacer size="xs" />
+                <div
+                  data-test-subj="slosOverviewTierCallout"
+                  style={{
+                    display: 'flex',
+                    alignItems: 'flex-start',
+                    gap: 6,
+                    padding: '6px 8px',
+                    borderRadius: 4,
+                    background: euiThemeVars.euiColorLightestShade,
+                    border: `1px solid ${euiThemeVars.euiColorLightShade}`,
+                  }}
+                >
+                  <EuiIcon
+                    type="tag"
+                    size="s"
+                    color="subdued"
+                    style={{ marginTop: 2, flexShrink: 0 }}
+                  />
+                  <EuiText size="xs" color="subdued">
+                    {Math.round(tierMajority.pct * 100)}% of SLOs are in{' '}
+                    <strong>{tierMajority.value}</strong>. Tag tiers to group by importance.{' '}
+                    <EuiLink
+                      onClick={() =>
+                        history.push(`/slos?tier=${encodeURIComponent(tierMajority.value)}`)
+                      }
+                      data-test-subj="slosOverviewTierBulkLink"
+                    >
+                      Bulk-edit tiers
+                    </EuiLink>
+                  </EuiText>
+                </div>
+                <EuiSpacer size="xs" />
+              </>
+            )}
             <div style={{ flex: 1, minHeight: 160 }}>
               <EchartsRender spec={tierSpec} height={Math.max(130, tierRows.length * 28 + 30)} />
             </div>
