@@ -176,10 +176,12 @@ export function registerProbeSliRoute(
     const errors: { good?: string; total?: string } = {};
 
     // Instant counts (good + total) — fan out in parallel. Each side is
-    // timeout-guarded and any throw becomes a per-query error string.
+    // timeout-guarded and any throw becomes a per-query error string. The
+    // `time` argument is required by the SQL plugin's PrometheusQueryHandler
+    // (it rejects instant requests without one), so pass endSec explicitly.
     const [goodInstant, totalInstant] = await Promise.all([
       withTimeout(
-        prometheusBackend.queryInstant(client, ds, goodQuery),
+        prometheusBackend.queryInstant(client, ds, goodQuery, endSec),
         QUERY_TIMEOUT_MS,
         'good-query instant'
       ).catch((e) => {
@@ -188,7 +190,7 @@ export function registerProbeSliRoute(
         return null;
       }),
       withTimeout(
-        prometheusBackend.queryInstant(client, ds, totalQuery),
+        prometheusBackend.queryInstant(client, ds, totalQuery, endSec),
         QUERY_TIMEOUT_MS,
         'total-query instant'
       ).catch((e) => {
