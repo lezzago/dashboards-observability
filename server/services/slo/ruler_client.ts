@@ -222,43 +222,24 @@ export class DirectQueryRulerClient implements RulerClient {
     }
   }
 
+  /**
+   * Probe a single rule group by name.
+   *
+   * Implementation reality: the OpenSearch SQL plugin's DirectQuery resource
+   * router only registers `DELETE` on `{namespace}/{groupName}` — a GET
+   * against that path returns HTTP 405 with
+   * `allowed: [DELETE]`. So we cannot read a single group directly; we read
+   * the whole namespace and filter by name. One round-trip either way; the
+   * parser pays the cost of scanning siblings.
+   */
   async getRuleGroup(
     client: AlertingOSClient,
     datasource: Datasource,
     namespace: string,
     groupName: string
   ): Promise<GeneratedRuleGroup | null> {
-    const path = rulesPath(
-      datasource,
-      `/api/v1/rules/${encodeURIComponent(namespace)}/${encodeURIComponent(groupName)}`
-    );
-    this.logger.debug(`DirectQuery ruler GET ${path}`);
-
-    let response: unknown;
-    try {
-      response = await client.transport.request({
-        method: 'GET',
-        path,
-      });
-    } catch (err: unknown) {
-      if (extractHttpStatus(err) === 404) {
-        return null;
-      }
-      throw this.toRulerError(err);
-    }
-
-    const body = extractResponseBody(response);
-    const parsed = parseYamlBody(body);
-    const group = coerceRuleGroup(parsed);
-    if (!group) {
-      // Defensive: a 200 with a body shape we can't recognize is more useful
-      // as "missing" than as a hard failure — the probe is best-effort.
-      this.logger.warn(
-        `DirectQuery ruler GET ${path} returned 200 with unrecognized body shape; treating as missing`
-      );
-      return null;
-    }
-    return group;
+    const groups = await this.listRuleGroups(client, datasource, namespace);
+    return groups.find((g) => g.groupName === groupName) ?? null;
   }
 
   async listRuleGroups(
@@ -277,6 +258,14 @@ export class DirectQueryRulerClient implements RulerClient {
       });
     } catch (err: unknown) {
       if (extractHttpStatus(err) === 404) {
+        return [];
+      }
+      // The SQL plugin wraps Cortex's "no rule groups found" 404 as HTTP 400
+      // with a `DataSourceClientException` / `PrometheusClientException`
+      // envelope whose `details` contains `"Ruler request failed with code:
+      // 404. Error details: no rule groups found"`. Treat that as an empty
+      // namespace — anything else at 4xx is a real validation failure.
+      if (isWrappedEmptyNamespaceError(err)) {
         return [];
       }
       throw this.toRulerError(err);
@@ -337,6 +326,36 @@ function stringifyBody(body: unknown): string {
  * the extraction logic in `toRulerError` but returns the code only so the
  * probe paths can branch on 404 without building a full SloRulerError.
  */
+/**
+ * Cortex's ruler returns HTTP 404 with body `no rule groups found` when a
+ * namespace exists but holds nothing (or hasn't yet been created). The
+ * OpenSearch SQL plugin's DirectQuery proxy does not forward that status —
+ * it wraps the response as HTTP 400 with a
+ * `DataSourceClientException` / `PrometheusClientException` envelope whose
+ * `details` string carries the original upstream status.
+ *
+ * We sniff for the exact wrapped-404 fingerprint so a genuinely empty
+ * namespace lines up with the HTTP-404 path (return `[]`) instead of
+ * escalating to `SloRulerError('RULER_VALIDATION_FAILED', 400, …)`.
+ *
+ * Anything else at 400 is still treated as a real validation failure.
+ */
+function isWrappedEmptyNamespaceError(err: unknown): boolean {
+  if (extractHttpStatus(err) !== 400) return false;
+  const raw = err as { body?: unknown; meta?: { body?: unknown }; message?: string };
+  const bodyCandidates: unknown[] = [raw?.body, raw?.meta?.body, raw?.message];
+  for (const candidate of bodyCandidates) {
+    const text = stringifyBody(candidate);
+    if (!text) continue;
+    const normalized = text.toLowerCase();
+    if (normalized.includes('no rule groups found')) return true;
+    if (normalized.includes('code: 404') && normalized.includes('ruler request failed')) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function extractHttpStatus(err: unknown): number {
   const raw = err as {
     statusCode?: number;
@@ -406,9 +425,11 @@ function isGeneratedRule(rule: GeneratedRule | null): rule is GeneratedRule {
 }
 
 /**
- * Coerce the list-namespace response. Cortex returns
- * `{ "<ns>": [ { name, interval, rules }, ... ] }`; some builds return a
- * top-level array or even a single group. Accept all three.
+ * Coerce the list-namespace response. The ruler's HTTP API answers with the
+ * Prometheus envelope `{ status: "success", data: { groups: [ { name, file,
+ * interval, rules, ... }, ... ] } }`. Cortex's ruler CRUD admin surface also
+ * accepts `{ "<ns>": [ { name, interval, rules }, ... ] }`; some tests feed a
+ * top-level array or a single group. Accept all four shapes.
  */
 function coerceRuleGroupList(doc: unknown): GeneratedRuleGroup[] {
   if (!doc) return [];
@@ -417,6 +438,14 @@ function coerceRuleGroupList(doc: unknown): GeneratedRuleGroup[] {
   }
   if (typeof doc === 'object') {
     const record = doc as Record<string, unknown>;
+    // Prometheus response envelope: `{ data: { groups: [...] } }`.
+    const data = record.data;
+    if (data && typeof data === 'object' && !Array.isArray(data)) {
+      const groups = (data as Record<string, unknown>).groups;
+      if (Array.isArray(groups)) {
+        return groups.map(coerceRuleGroup).filter(isGeneratedRuleGroup);
+      }
+    }
     // Cortex namespace-keyed envelope: take every array-valued field and
     // flatten — namespaces are already filtered server-side by the URL, so
     // this is safe even if multiple keys appear.

@@ -384,7 +384,8 @@ async function tryBuildDeployContext(
 function buildStatusContext(
   ctx: SloHandlerContext,
   datasourceService: InMemoryDatasourceService | undefined,
-  discoveryService: DatasourceDiscoveryService | undefined
+  discoveryService: DatasourceDiscoveryService | undefined,
+  ruleHealthChecker: RuleHealthChecker | undefined
 ): SloStatusAggregationContext | undefined {
   if (!datasourceService) return undefined;
   const client = ctx.core.opensearch.client.asCurrentUser;
@@ -404,6 +405,11 @@ function buildStatusContext(
       // works today (single scoped client per request).
       return ds as Datasource;
     },
+    // W1.6 priority merge: if the health checker is available, the
+    // aggregator overlays `rules_missing` / `ruler_unreachable` on top of
+    // the sample-derived state. When absent (offline dev / tests), the
+    // aggregator falls through to the existing derivation.
+    healthChecker: ruleHealthChecker,
   };
 }
 
@@ -465,7 +471,8 @@ export function registerSloRoutes(
       const statusCtx = buildStatusContext(
         ctx as SloHandlerContext,
         datasourceService,
-        discoveryService
+        discoveryService,
+        ruleHealthChecker
       );
       const result = await handleListSLOs(sloService, filters, logger, statusCtx);
       if (result.status >= 400) {
@@ -534,7 +541,8 @@ export function registerSloRoutes(
       const statusCtx = buildStatusContext(
         ctx as SloHandlerContext,
         datasourceService,
-        discoveryService
+        discoveryService,
+        ruleHealthChecker
       );
       const result = await handleGetSLOStatuses(sloService, req.body.ids, logger, statusCtx);
       if (result.status === 200) return res.ok({ body: result.body });
@@ -554,7 +562,8 @@ export function registerSloRoutes(
       const statusCtx = buildStatusContext(
         ctx as SloHandlerContext,
         datasourceService,
-        discoveryService
+        discoveryService,
+        ruleHealthChecker
       );
       const result = await handleGetSLO(sloService, req.params.id, logger, statusCtx);
       if (result.status === 200) return res.ok({ body: result.body });
