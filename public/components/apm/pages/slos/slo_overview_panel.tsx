@@ -411,18 +411,28 @@ export const SloOverviewPanel: React.FC<SloOverviewPanelProps> = ({
   const history = useHistory();
 
   /**
-   * Leaderboard — worst budget remaining first, cut off at 6. These are the
-   * SLOs about to pop: the most actionable list on the page.
+   * Leaderboard — reporting SLOs first so "100% because it hasn't been
+   * measured yet" doesn't crowd out the SLOs that are actually burning
+   * budget. If the reporting bucket doesn't have enough rows to fill the
+   * slot count, fall through to no_data SLOs so the leaderboard never
+   * collapses on a fresh dev cluster.
    */
-  const leaderboard = useMemo(
-    () =>
-      [...items]
-        .map((s) => ({ summary: s, remaining: worstBudgetRemaining(s) }))
-        .filter(({ summary }) => summary.enabled)
-        .sort((a, b) => a.remaining - b.remaining)
-        .slice(0, 6),
-    [items]
-  );
+  const leaderboard = useMemo(() => {
+    const LEADERBOARD_SIZE = 8;
+    const rows = [...items]
+      .filter((s) => s.enabled)
+      .map((s) => ({
+        summary: s,
+        remaining: worstBudgetRemaining(s),
+        reporting: isReporting(s),
+      }));
+    rows.sort((a, b) => {
+      if (a.reporting !== b.reporting) return a.reporting ? -1 : 1;
+      if (a.remaining !== b.remaining) return a.remaining - b.remaining;
+      return a.summary.name.localeCompare(b.summary.name);
+    });
+    return rows.slice(0, LEADERBOARD_SIZE);
+  }, [items]);
 
   const donutSpec = useMemo(() => buildHealthDonutOption(stats), [stats]);
   const tierSpec = useMemo(() => buildTierBarOption(tierRows), [tierRows]);
@@ -694,7 +704,7 @@ export const SloOverviewPanel: React.FC<SloOverviewPanelProps> = ({
               </EuiFlexItem>
               <EuiFlexItem grow={false}>
                 <EuiText size="xs" color="subdued">
-                  worst remaining budget first
+                  reporting SLOs first, worst budget up top
                 </EuiText>
               </EuiFlexItem>
             </EuiFlexGroup>
@@ -704,12 +714,19 @@ export const SloOverviewPanel: React.FC<SloOverviewPanelProps> = ({
                 Nothing enabled yet.
               </EuiText>
             ) : (
-              leaderboard.map(({ summary: s, remaining }) => (
+              leaderboard.map(({ summary: s, remaining, reporting }) => (
                 <div
                   key={s.id}
+                  data-test-subj={`slosOverviewLeaderboardRow-${
+                    reporting ? 'reporting' : 'noData'
+                  }-${s.id}`}
                   style={{
-                    padding: '4px 0',
+                    padding: '4px 0 4px 8px',
                     borderBottom: `1px solid ${euiThemeVars.euiColorLightestShade}`,
+                    borderLeft: reporting
+                      ? 'none'
+                      : `2px solid ${euiThemeVars.euiColorMediumShade}`,
+                    opacity: reporting ? 1 : 0.75,
                   }}
                 >
                   <EuiFlexGroup
@@ -732,10 +749,28 @@ export const SloOverviewPanel: React.FC<SloOverviewPanelProps> = ({
                     <EuiFlexItem grow={false} style={{ minWidth: 72, textAlign: 'right' }}>
                       <EuiText
                         size="xs"
-                        color={remaining <= 0 ? 'danger' : remaining < 0.25 ? 'accent' : 'success'}
+                        color={
+                          !reporting
+                            ? 'subdued'
+                            : remaining <= 0
+                            ? 'danger'
+                            : remaining < 0.25
+                            ? 'accent'
+                            : 'success'
+                        }
                       >
                         <strong>
                           {remaining <= 0 ? 'over' : `${Math.max(0, remaining * 100).toFixed(0)}%`}
+                          {!reporting && (
+                            <span
+                              style={{
+                                fontWeight: 400,
+                                color: euiThemeVars.euiColorDarkShade,
+                              }}
+                            >
+                              {' · no data yet'}
+                            </span>
+                          )}
                         </strong>
                       </EuiText>
                       <EuiText size="xs" color="subdued">
@@ -751,9 +786,11 @@ export const SloOverviewPanel: React.FC<SloOverviewPanelProps> = ({
                       </EuiText>
                     </EuiFlexItem>
                   </EuiFlexGroup>
-                  <div style={{ marginTop: 3 }}>
-                    <MiniBudgetBar remaining={remaining} />
-                  </div>
+                  {reporting && (
+                    <div style={{ marginTop: 3 }}>
+                      <MiniBudgetBar remaining={remaining} />
+                    </div>
+                  )}
                 </div>
               ))
             )}
