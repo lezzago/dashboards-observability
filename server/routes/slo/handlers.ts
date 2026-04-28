@@ -10,14 +10,18 @@
 
 import type { Logger } from '../../../common/types/alerting/types';
 import {
+  deriveExpectedGroups,
   SloDeployContext,
   SloNotFoundError,
+  SloRepairContext,
+  SloRuleHealthProbe,
   SloRulerError,
   SloRulerTeardownRequiredError,
   SloStatusAggregationContext,
   SloValidationError,
   SloVersionConflictError,
   SloService,
+  sloRulerNamespaceFor,
 } from '../../../common/slo/slo_service';
 import type { SloCreateInput, SloListFilters, SloUpdateInput } from '../../../common/slo/slo_types';
 import type { HandlerResult } from '../alerting/route_utils';
@@ -206,6 +210,114 @@ export async function handleGetSLOStatuses(
     }
     const statuses = await svc.getStatuses(ids, statusCtx);
     return { status: 200, body: { statuses } };
+  } catch (e) {
+    return toSloError(e, logger);
+  }
+}
+
+// ============================================================================
+// W1.5 — Repair + Rule health endpoints
+// ============================================================================
+
+/**
+ * Context accepted by the W1.5 handlers. The health probe is a structural
+ * subset of `RuleHealthChecker` and the deploy context is the same one
+ * create/update/delete take — both come from `registerSloRoutes`' closure.
+ *
+ * When `health` is missing we return 501 instead of silently falling back:
+ * the UI already has its own "rule health checker not configured" affordance,
+ * and a 200 with a synthetic `ok` would mask genuine rollout regressions.
+ */
+export interface SloRepairHandlerContext {
+  health?: SloRuleHealthProbe;
+  deploy?: SloDeployContext;
+}
+
+/**
+ * `POST /api/observability/v1/slos/{id}/repair` — re-asserts the expected
+ * rule groups for an SLO. See `SloService.repair`.
+ */
+export async function handleRepairSLO(
+  svc: SloService,
+  id: string,
+  logger?: Logger,
+  ctx?: SloRepairHandlerContext
+): Promise<HandlerResult> {
+  try {
+    if (!ctx?.health) {
+      return {
+        status: 501,
+        body: { error: 'Rule health checker not configured in this environment' },
+      };
+    }
+    if (!ctx.deploy) {
+      return {
+        status: 400,
+        body: {
+          error:
+            'Cannot repair SLO: deploy context unavailable (datasource not registered or not a DirectQuery Prometheus connection)',
+        },
+      };
+    }
+    const repairCtx: SloRepairContext = { health: ctx.health, deploy: ctx.deploy };
+    const result = await svc.repair(id, repairCtx);
+    return { status: 200, body: result };
+  } catch (e) {
+    return toSloError(e, logger);
+  }
+}
+
+/**
+ * `GET /api/observability/v1/slos/{id}/rule_health` — probes the ruler for
+ * the SLO's expected rule groups and returns a `RuleHealthResponse`-shaped
+ * body (sloId + the rule-health report fields inlined).
+ */
+export async function handleGetRuleHealth(
+  svc: SloService,
+  id: string,
+  logger?: Logger,
+  ctx?: SloRepairHandlerContext
+): Promise<HandlerResult> {
+  try {
+    if (!ctx?.health) {
+      return {
+        status: 501,
+        body: { error: 'Rule health checker not configured in this environment' },
+      };
+    }
+    const doc = await svc.get(id);
+    if (!doc) throw new SloNotFoundError(id);
+
+    if (!ctx.deploy) {
+      return {
+        status: 400,
+        body: {
+          error:
+            'Cannot probe rule health: deploy context unavailable (datasource not registered or not a DirectQuery Prometheus connection)',
+        },
+      };
+    }
+
+    const expectedGroups = deriveExpectedGroups(doc);
+    const namespace =
+      doc.status.provisioning.backend === 'prometheus'
+        ? doc.status.provisioning.rulerNamespace || sloRulerNamespaceFor(ctx.deploy.workspaceId)
+        : sloRulerNamespaceFor(ctx.deploy.workspaceId);
+
+    const report = await ctx.health.check({
+      workspaceId: ctx.deploy.workspaceId,
+      datasource: ctx.deploy.datasource,
+      client: ctx.deploy.client,
+      sloId: doc.id,
+      namespace,
+      expectedGroups,
+    });
+
+    // Shape matches the public `RuleHealthResponse` in `slo_api_client.ts`:
+    // { sloId, state, expectedGroups, presentGroups, missingGroups,
+    //   rulerErrorCode?, computedAt }. We spread the report first so the
+    // route is a thin pass-through — no hidden field mutation.
+    return { status: 200, body: { sloId: doc.id, ...report } };
   } catch (e) {
     return toSloError(e, logger);
   }

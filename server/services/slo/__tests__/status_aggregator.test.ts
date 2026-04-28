@@ -24,10 +24,11 @@ import {
   NoopStatusAggregator,
   buildLongWindowQuery,
   deriveTopLevelState,
+  expectedRuleGroupsFor,
   objectiveState,
   parseInstantResponse,
 } from '../status_aggregator';
-import type { SloStatusAggregationContext } from '../../../../common/slo/slo_service';
+import type { SloRuleHealthChecker, SloStatusAggregationContext } from '../status_aggregator';
 import type { AlertingOSClient, Datasource, Logger } from '../../../../common/types/alerting/types';
 import type { ObjectiveStatus, SloDocument, SloSpec } from '../../../../common/slo/slo_types';
 
@@ -528,5 +529,204 @@ describe('NoopStatusAggregator', () => {
     expect(status.objectives[0].errorBudgetRemaining).toBe(1);
     // ruleCount is surfaced from provisioning so listing can still show it.
     expect(status.ruleCount).toBe(1);
+  });
+});
+
+// ============================================================================
+// W1.6 rule-health priority merge
+// ============================================================================
+
+describe('expectedRuleGroupsFor', () => {
+  it('returns [ruleGroupName] for prometheus-backed docs with a name', () => {
+    const doc = makeDoc();
+    expect(expectedRuleGroupsFor(doc)).toEqual(['slo:group_aaaaaaaa']);
+  });
+
+  it('returns [] when the rule group name is empty', () => {
+    const doc = makeDoc();
+    if (doc.status.provisioning.backend === 'prometheus') {
+      doc.status.provisioning.ruleGroupName = '';
+    }
+    expect(expectedRuleGroupsFor(doc)).toEqual([]);
+  });
+});
+
+describe('W1.6 rule-health priority merge', () => {
+  /** Build a checker mock that returns the given fixed result. */
+  function checkerReturning(
+    result:
+      | {
+          state: 'ok' | 'rules_partial' | 'rules_missing' | 'ruler_unreachable';
+          rulerErrorCode?: string;
+        }
+      | ((
+          input: Parameters<SloRuleHealthChecker['check']>[0]
+        ) => {
+          state: 'ok' | 'rules_partial' | 'rules_missing' | 'ruler_unreachable';
+          rulerErrorCode?: string;
+        })
+  ): { checker: SloRuleHealthChecker; checkMock: jest.Mock } {
+    const checkMock = jest.fn(async (input: Parameters<SloRuleHealthChecker['check']>[0]) => {
+      const r = typeof result === 'function' ? result(input) : result;
+      return {
+        state: r.state,
+        rulerErrorCode: r.rulerErrorCode,
+        expectedGroups: input.expectedGroups,
+        presentGroups: r.state === 'rules_missing' ? [] : input.expectedGroups,
+        missingGroups: r.state === 'rules_missing' ? input.expectedGroups : [],
+        computedAt: '2026-04-28T00:00:00Z',
+      };
+    });
+    return { checker: { check: checkMock }, checkMock };
+  }
+
+  /** Extend ctxFor with a healthChecker. */
+  function ctxWith(
+    ds: Datasource | undefined,
+    client: AlertingOSClient,
+    checker: SloRuleHealthChecker | undefined
+  ): SloStatusAggregationContext {
+    return {
+      client,
+      workspaceId: 'default',
+      resolveDatasource: async () => ds,
+      healthChecker: checker,
+    };
+  }
+
+  it('no healthChecker in ctx → state is the sample-derived one (back-compat)', async () => {
+    const doc = makeDoc();
+    const { client } = mockClient({
+      query: () =>
+        instantResponse([{ objective: 'availability-99-9', sloId: 'slo-1', ratio: 0.0002 }]),
+    });
+    const agg = new DirectQueryStatusAggregator(noopLogger());
+    const [status] = await agg.aggregate([doc], ctxFor(promDatasource(), client));
+    // ctxFor does NOT set healthChecker — this pins back-compat.
+    expect(status.state).toBe('ok');
+  });
+
+  it('enabled=false → state=disabled, healthChecker.check is NOT called', async () => {
+    const doc = makeDoc({ enabled: false });
+    const { client } = mockClient({});
+    const { checker, checkMock } = checkerReturning({ state: 'rules_missing' });
+    const agg = new DirectQueryStatusAggregator(noopLogger());
+    const [status] = await agg.aggregate([doc], ctxWith(promDatasource(), client, checker));
+    expect(status.state).toBe('disabled');
+    expect(checkMock).not.toHaveBeenCalled();
+  });
+
+  it('health=rules_missing → top-level state becomes rules_missing (overrides ok)', async () => {
+    const doc = makeDoc();
+    const { client } = mockClient({
+      query: () =>
+        instantResponse([{ objective: 'availability-99-9', sloId: 'slo-1', ratio: 0.0002 }]),
+    });
+    const { checker } = checkerReturning({ state: 'rules_missing' });
+    const agg = new DirectQueryStatusAggregator(noopLogger());
+    const [status] = await agg.aggregate([doc], ctxWith(promDatasource(), client, checker));
+    expect(status.state).toBe('rules_missing');
+    // Per-objective states are left as the sample derivation produced them.
+    expect(status.objectives[0].state).toBe('ok');
+  });
+
+  it('health=rules_partial → top-level state becomes rules_missing', async () => {
+    const doc = makeDoc();
+    const { client } = mockClient({
+      query: () =>
+        instantResponse([{ objective: 'availability-99-9', sloId: 'slo-1', ratio: 0.002 }]),
+      alerts: () => alertsResponse([{ sloId: 'slo-1', state: 'firing' }]),
+    });
+    const { checker } = checkerReturning({ state: 'rules_partial' });
+    const agg = new DirectQueryStatusAggregator(noopLogger());
+    const [status] = await agg.aggregate([doc], ctxWith(promDatasource(), client, checker));
+    expect(status.state).toBe('rules_missing');
+    // Per-objective still reflects the breached sample (rules_missing is
+    // only the top-level overlay).
+    expect(status.objectives[0].state).toBe('breached');
+  });
+
+  it('health=ruler_unreachable → top-level state becomes no_data', async () => {
+    const doc = makeDoc();
+    const { client } = mockClient({
+      query: () =>
+        instantResponse([{ objective: 'availability-99-9', sloId: 'slo-1', ratio: 0.0002 }]),
+    });
+    const { checker } = checkerReturning({
+      state: 'ruler_unreachable',
+      rulerErrorCode: 'TIMEOUT',
+    });
+    const logger = noopLogger();
+    const agg = new DirectQueryStatusAggregator(logger);
+    const [status] = await agg.aggregate([doc], ctxWith(promDatasource(), client, checker));
+    expect(status.state).toBe('no_data');
+    // Debug log is emitted with the error code so operators can follow up.
+    expect(logger.debug).toHaveBeenCalledWith(
+      expect.stringContaining('ruler unreachable for slo=slo-1 code=TIMEOUT')
+    );
+  });
+
+  it('health=ok → state is the sample-derived one', async () => {
+    const doc = makeDoc();
+    const { client } = mockClient({
+      query: () =>
+        instantResponse([{ objective: 'availability-99-9', sloId: 'slo-1', ratio: 0.002 }]),
+      alerts: () => alertsResponse([{ sloId: 'slo-1', state: 'firing' }]),
+    });
+    const { checker } = checkerReturning({ state: 'ok' });
+    const agg = new DirectQueryStatusAggregator(noopLogger());
+    const [status] = await agg.aggregate([doc], ctxWith(promDatasource(), client, checker));
+    // Sample derivation says breached; health is ok → no overlay.
+    expect(status.state).toBe('breached');
+  });
+
+  it('healthChecker.check rejects → state untouched, no throw, warn logged', async () => {
+    const doc = makeDoc();
+    const { client } = mockClient({
+      query: () =>
+        instantResponse([{ objective: 'availability-99-9', sloId: 'slo-1', ratio: 0.0002 }]),
+    });
+    const checkMock = jest.fn().mockRejectedValue(new Error('checker boom'));
+    const checker: SloRuleHealthChecker = { check: checkMock };
+    const logger = noopLogger();
+    const agg = new DirectQueryStatusAggregator(logger);
+    const [status] = await agg.aggregate([doc], ctxWith(promDatasource(), client, checker));
+    expect(status.state).toBe('ok');
+    expect(checkMock).toHaveBeenCalledTimes(1);
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('healthChecker.check rejected (slo=slo-1)')
+    );
+    // Dedup: a second aggregate with the same failure message should not
+    // emit a second warn.
+    (logger.warn as jest.Mock).mockClear();
+    await agg.aggregate([doc], ctxWith(promDatasource(), client, checker));
+    expect(logger.warn).not.toHaveBeenCalledWith(
+      expect.stringContaining('healthChecker.check rejected (slo=slo-1)')
+    );
+  });
+
+  it('expectedGroups passed to the checker comes from provisioning.ruleGroupName', async () => {
+    const doc = makeDoc();
+    if (doc.status.provisioning.backend === 'prometheus') {
+      doc.status.provisioning.ruleGroupName = 'slo:foo_123';
+    }
+    const { client } = mockClient({
+      query: () =>
+        instantResponse([{ objective: 'availability-99-9', sloId: 'slo-1', ratio: 0.0002 }]),
+    });
+    const { checker, checkMock } = checkerReturning({ state: 'ok' });
+    const agg = new DirectQueryStatusAggregator(noopLogger());
+    await agg.aggregate([doc], ctxWith(promDatasource(), client, checker));
+    expect(checkMock).toHaveBeenCalledTimes(1);
+    const call = checkMock.mock.calls[0][0] as {
+      sloId: string;
+      namespace: string;
+      expectedGroups: string[];
+      workspaceId: string;
+    };
+    expect(call.sloId).toBe('slo-1');
+    expect(call.workspaceId).toBe('default');
+    expect(call.namespace).toBe('slo-generated-default');
+    expect(call.expectedGroups).toEqual(['slo:foo_123']);
   });
 });

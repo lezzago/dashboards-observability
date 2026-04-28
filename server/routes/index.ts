@@ -39,6 +39,7 @@ import { PrometheusMetadataService } from '../services/alerting/prometheus_metad
 import { registerSloRoutes } from './slo';
 import type { SloService } from '../../common/slo/slo_service';
 import { DirectQueryRulerClient } from '../services/slo/ruler_client';
+import { createRuleHealthChecker } from '../services/slo/rule_health_checker';
 
 export function setupRoutes({
   router,
@@ -125,6 +126,10 @@ export function setupRoutes({
     // would see an empty map and reject with "Datasource ds-N is not
     // registered" even though the datasource exists.
     const rulerClient = new DirectQueryRulerClient(logger);
+    // One RuleHealthChecker per plugin instance — it owns the TTL cache the
+    // W1.5 repair + rule_health routes (and the Phase 2 reconciler) all
+    // share. Default TTL (30s) is fine for the UI poll cadence.
+    const ruleHealthChecker = createRuleHealthChecker(rulerClient, logger);
     registerSloRoutes(
       router,
       sloService,
@@ -132,7 +137,8 @@ export function setupRoutes({
       rulerClient,
       alertingDatasourceService,
       datasourceDiscoveryService,
-      promBackend
+      promBackend,
+      ruleHealthChecker
     );
   }
 }

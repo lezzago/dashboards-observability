@@ -30,11 +30,12 @@ import {
 } from '@elastic/eui';
 import { euiThemeVars } from '@osd/ui-shared-deps/theme';
 import { useHistory, useLocation } from 'react-router-dom';
-import { ChromeStart, NotificationsStart } from '../../../../../../../src/core/public';
+import { ChromeStart, HttpStart, NotificationsStart } from '../../../../../../../src/core/public';
 import { HeaderControlledComponentsWrapper } from '../../../../plugin_helpers/plugin_headerControl';
 import { ActiveFilterBadges, FilterBadge } from '../../shared/components/active_filter_badges';
 import { SloOverviewPanel } from './slo_overview_panel';
-import { SloListFilterPanel } from './slo_list_filter_panel';
+import { DATASOURCE_SELECTION_CAP, SloListFilterPanel } from './slo_list_filter_panel';
+import { usePrometheusDatasources } from './use_prometheus_datasources';
 import {
   deserializeFiltersFromSearch,
   filtersEqual,
@@ -52,6 +53,7 @@ import { templateIconFor } from './template_icons';
 
 export interface SloListingPageProps {
   apiClient: SloApiClient;
+  http: HttpStart;
   chrome: ChromeStart;
   notifications: NotificationsStart;
   parentBreadcrumb: { text: string; href: string };
@@ -192,11 +194,75 @@ const STATE_LABEL: Record<SloHealthState, string> = {
   no_data: 'No data',
   stale: 'Stale',
   disabled: 'Disabled',
+  rules_missing: 'Rules missing',
 };
 
-const SLI_BACKEND_LABEL: Record<'prometheus' | 'opensearch', string> = {
-  prometheus: 'Prometheus',
-  opensearch: 'OpenSearch',
+/**
+ * Derives the "Rules" column badge from the server-computed `status.state`
+ * (priority-merged to include 'rules_missing'). We intentionally do NOT make a
+ * per-row `getRuleHealth` call here — the listing must remain a single
+ * round-trip, and the server has already folded ruler health into the state
+ * facet so the summary carries everything we need.
+ */
+type RuleBadgeKind = 'missing' | 'disabled' | 'no-data' | 'healthy';
+
+interface RuleBadgeSpec {
+  kind: RuleBadgeKind;
+  label: string;
+  color: 'danger' | 'hollow' | 'warning' | 'success';
+  iconType?: string;
+  tooltip: string;
+}
+
+function ruleBadgeSpecFor(state: SloHealthState): RuleBadgeSpec {
+  if (state === 'rules_missing') {
+    return {
+      kind: 'missing',
+      label: 'Missing',
+      color: 'danger',
+      iconType: 'alert',
+      tooltip:
+        'One or more Prometheus rule groups for this SLO are missing from the ruler. Visit the detail page to restore or delete.',
+    };
+  }
+  if (state === 'disabled') {
+    return {
+      kind: 'disabled',
+      label: 'Disabled',
+      color: 'hollow',
+      tooltip: 'SLO is paused; rule groups are intentionally absent.',
+    };
+  }
+  if (state === 'no_data' || state === 'stale') {
+    return {
+      kind: 'no-data',
+      label: 'No data',
+      color: 'warning',
+      tooltip: 'Rule groups exist but no samples have arrived yet.',
+    };
+  }
+  return {
+    kind: 'healthy',
+    label: 'Healthy',
+    color: 'success',
+    tooltip: 'Rule groups deployed and evaluating.',
+  };
+}
+
+const SloRulesBadge: React.FC<{ row: SloSummary }> = ({ row }) => {
+  const spec = ruleBadgeSpecFor(row.status.state);
+  return (
+    <EuiToolTip content={spec.tooltip}>
+      <EuiBadge
+        color={spec.color}
+        iconType={spec.iconType}
+        data-test-subj={`slosRulesBadge-${row.id}`}
+        data-test-rule-state={spec.kind}
+      >
+        {spec.label}
+      </EuiBadge>
+    </EuiToolTip>
+  );
 };
 
 const MODE_LABEL: Record<'active' | 'shadow', string> = {
@@ -377,12 +443,19 @@ const SlosTablePanel = React.memo(SlosTablePanelUI);
 
 export const SloListingPage: React.FC<SloListingPageProps> = ({
   apiClient,
+  http,
   chrome,
   notifications,
   parentBreadcrumb,
 }) => {
   const history = useHistory();
   const location = useLocation();
+
+  const {
+    datasources: promDatasources,
+    loading: promDatasourcesLoading,
+    error: promDatasourcesError,
+  } = usePrometheusDatasources(http);
 
   // Hash-query round-trip: on mount and on hash changes, hydrate filters from
   // the URL so sharing a link preserves the view.
@@ -434,7 +507,15 @@ export const SloListingPage: React.FC<SloListingPageProps> = ({
     setLoading(true);
     setError(null);
     try {
-      const result = await apiClient.list({ ...filters, pageSize: 100 });
+      // Listing is Prometheus-scoped by default — the SLI backend facet was
+      // dropped from the sidebar in favor of a single-backend default. URL
+      // callers can still override via `?sliBackend=opensearch`.
+      const effectiveFilters: SloListFilters = {
+        ...filters,
+        sliBackend: filters.sliBackend?.length ? filters.sliBackend : ['prometheus'],
+        pageSize: 100,
+      };
+      const result = await apiClient.list(effectiveFilters);
       setItems(result.results);
       if (Object.keys(filters).length === 0) {
         setTotalUnfiltered(result.total);
@@ -535,6 +616,11 @@ export const SloListingPage: React.FC<SloListingPageProps> = ({
         render: (row: SloSummary) => <SloTraitsCell row={row} majorities={traitMajorities} />,
       },
       {
+        name: 'Rules',
+        width: '110px',
+        render: (row: SloSummary) => <SloRulesBadge row={row} />,
+      },
+      {
         name: 'Health',
         width: '200px',
         render: (row: SloSummary) => <SloHealthCell row={row} />,
@@ -565,20 +651,21 @@ export const SloListingPage: React.FC<SloListingPageProps> = ({
         delete next[key];
         return next;
       });
+    if (filters.datasourceId?.length) {
+      const nameById = new Map(promDatasources.map((d) => [d.id, d.name]));
+      badges.push({
+        key: 'datasourceId',
+        category: 'Datasource',
+        values: filters.datasourceId.map((id) => nameById.get(id) ?? id),
+        onRemove: () => clearKey('datasourceId'),
+      });
+    }
     if (filters.state?.length) {
       badges.push({
         key: 'state',
         category: 'State',
         values: filters.state.map((v) => STATE_LABEL[v] ?? v),
         onRemove: () => clearKey('state'),
-      });
-    }
-    if (filters.sliBackend?.length) {
-      badges.push({
-        key: 'sliBackend',
-        category: 'Backend',
-        values: filters.sliBackend.map((v) => SLI_BACKEND_LABEL[v] ?? v),
-        onRemove: () => clearKey('sliBackend'),
       });
     }
     if (filters.sliLeafType?.length) {
@@ -638,7 +725,7 @@ export const SloListingPage: React.FC<SloListingPageProps> = ({
       });
     }
     return badges;
-  }, [filters]);
+  }, [filters, promDatasources]);
 
   const createButton = (
     <EuiButton
@@ -758,7 +845,20 @@ export const SloListingPage: React.FC<SloListingPageProps> = ({
                           <strong>Filters</strong>
                         </EuiText>
                         <EuiSpacer size="xs" />
-                        <SloListFilterPanel filters={filters} onChange={setFilters} items={items} />
+                        <SloListFilterPanel
+                          filters={filters}
+                          onChange={setFilters}
+                          items={items}
+                          datasources={promDatasources}
+                          datasourcesLoading={promDatasourcesLoading}
+                          datasourcesError={promDatasourcesError}
+                          onDatasourceCapReached={() =>
+                            notifications.toasts.addWarning({
+                              title: 'Datasource selection limit reached',
+                              text: `You can select at most ${DATASOURCE_SELECTION_CAP} datasources at a time.`,
+                            })
+                          }
+                        />
                       </EuiPanel>
                     </EuiResizablePanel>
 

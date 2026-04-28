@@ -59,11 +59,18 @@ function renderPage(listImpl: SloApiClient['list'], initialSearch = '') {
   const notifications = ({
     toasts: { addDanger: jest.fn(), addWarning: jest.fn(), addSuccess: jest.fn() },
   } as unknown) as Parameters<typeof SloListingPage>[0]['notifications'];
+  // The listing page fires one GET to /api/alerting/datasources on mount.
+  // Resolve it to an empty list so the facet renders the "no datasources
+  // registered" text and the rest of the page doesn't wait on a real fetch.
+  const http = ({
+    get: jest.fn().mockResolvedValue({ datasources: [] }),
+  } as unknown) as Parameters<typeof SloListingPage>[0]['http'];
   return render(
     <MemoryRouter initialEntries={[`/slos${initialSearch}`]}>
       <Route path="/slos">
         <SloListingPage
           apiClient={apiClient}
+          http={http}
           chrome={chrome}
           notifications={notifications}
           parentBreadcrumb={{ text: 'APM', href: '#/' }}
@@ -171,5 +178,91 @@ describe('SloListingPage — filter integration', () => {
     expect(screen.getByTestId('activeFilterBadges')).toBeInTheDocument();
     expect(screen.getByTestId('filterBadge-state')).toHaveTextContent('State: Breached, Warning');
     expect(screen.getByTestId('filterBadge-tier')).toHaveTextContent('Tier: tier-1');
+  });
+});
+
+describe('SloListingPage — Rules column badge (W1.7)', () => {
+  function renderWithSummaries(results: SloSummary[]) {
+    const list = jest
+      .fn<ReturnType<SloApiClient['list']>, Parameters<SloApiClient['list']>>()
+      .mockResolvedValue({
+        results,
+        total: results.length,
+        page: 1,
+        pageSize: 100,
+        hasMore: false,
+      });
+    return renderPage(list);
+  }
+
+  it('renders a red "Missing" badge for rules_missing rows', async () => {
+    const summary = makeSummary({
+      id: 'slo-missing',
+      status: { ...makeSummary().status, sloId: 'slo-missing', state: 'rules_missing' },
+    });
+    await act(async () => {
+      renderWithSummaries([summary]);
+    });
+    const badge = await screen.findByTestId('slosRulesBadge-slo-missing');
+    expect(badge).toHaveTextContent('Missing');
+    expect(badge).toHaveAttribute('data-test-rule-state', 'missing');
+  });
+
+  it('renders "Disabled" badge for disabled rows', async () => {
+    const summary = makeSummary({
+      id: 'slo-disabled',
+      enabled: false,
+      status: { ...makeSummary().status, sloId: 'slo-disabled', state: 'disabled' },
+    });
+    await act(async () => {
+      renderWithSummaries([summary]);
+    });
+    const badge = await screen.findByTestId('slosRulesBadge-slo-disabled');
+    expect(badge).toHaveTextContent('Disabled');
+    expect(badge).toHaveAttribute('data-test-rule-state', 'disabled');
+  });
+
+  it('renders "Healthy" badge for ok rows', async () => {
+    const summary = makeSummary({
+      id: 'slo-healthy',
+      status: { ...makeSummary().status, sloId: 'slo-healthy', state: 'ok' },
+    });
+    await act(async () => {
+      renderWithSummaries([summary]);
+    });
+    const badge = await screen.findByTestId('slosRulesBadge-slo-healthy');
+    expect(badge).toHaveTextContent('Healthy');
+    expect(badge).toHaveAttribute('data-test-rule-state', 'healthy');
+  });
+
+  it('renders "No data" badge for no_data rows', async () => {
+    const summary = makeSummary({
+      id: 'slo-nodata',
+      status: { ...makeSummary().status, sloId: 'slo-nodata', state: 'no_data' },
+    });
+    await act(async () => {
+      renderWithSummaries([summary]);
+    });
+    const badge = await screen.findByTestId('slosRulesBadge-slo-nodata');
+    expect(badge).toHaveTextContent('No data');
+    expect(badge).toHaveAttribute('data-test-rule-state', 'no-data');
+  });
+
+  it('places the Rules column between Traits and Health', async () => {
+    const summary = makeSummary({
+      id: 'slo-columns',
+      status: { ...makeSummary().status, sloId: 'slo-columns', state: 'ok' },
+    });
+    await act(async () => {
+      renderWithSummaries([summary]);
+    });
+    await screen.findByTestId('slosTable');
+    // EuiInMemoryTable renders the <th> row; we pull text content in order
+    // and assert the three columns we care about come in Traits → Rules → Health.
+    const headerCells = Array.from(document.querySelectorAll('table thead th'));
+    const labels = headerCells
+      .map((th) => th.textContent?.trim() ?? '')
+      .filter((t) => t === 'Traits' || t === 'Rules' || t === 'Health');
+    expect(labels).toEqual(['Traits', 'Rules', 'Health']);
   });
 });

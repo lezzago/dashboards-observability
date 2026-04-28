@@ -11,7 +11,10 @@ import {
   EuiBasicTableColumn,
   EuiButton,
   EuiButtonEmpty,
+  EuiCallOut,
+  EuiCodeBlock,
   EuiConfirmModal,
+  EuiCopy,
   EuiDescriptionList,
   EuiEmptyPrompt,
   EuiFlexGroup,
@@ -34,7 +37,7 @@ import { TimeRangePicker } from '../../shared/components/time_filter';
 import { TimeRange } from '../../common/types/service_types';
 import { SloVisualizations } from './slo_visualizations';
 import { SloMetadataPanel } from './slo_metadata_panel';
-import type { SloApiClient } from './slo_api_client';
+import type { RuleHealthResponse, SloApiClient } from './slo_api_client';
 import type {
   Objective,
   SloDocument,
@@ -92,6 +95,8 @@ function iconSummaryFromDoc(doc: SloDocument): SloSummary {
 interface DetailHeaderProps {
   doc: FullDoc;
   primaryObjective: Objective;
+  summaryListItems: Array<{ title: React.ReactNode; description: React.ReactNode }>;
+  sliListItems: Array<{ title: React.ReactNode; description: React.ReactNode }>;
 }
 
 /**
@@ -100,8 +105,17 @@ interface DetailHeaderProps {
  * attainment/target · window). Badges (Enabled / mode) only render when the
  * SLO deviates from the majority defaults — matches the listing's majority-
  * value trait logic so operators aren't distracted by "Enabled" on every page.
+ *
+ * Summary + SLI details nest inside a pre-collapsed accordion so the header
+ * stays compact while keeping the descriptive config one click away — the
+ * old right-hand sidebar is gone, letting charts + tables use the full width.
  */
-const DetailHeader: React.FC<DetailHeaderProps> = ({ doc, primaryObjective }) => {
+const DetailHeader: React.FC<DetailHeaderProps> = ({
+  doc,
+  primaryObjective,
+  summaryListItems,
+  sliListItems,
+}) => {
   const sli = doc.spec.sli.type === 'single' ? doc.spec.sli : null;
   const sliLeafType =
     sli?.definition.backend === 'prometheus' || sli?.definition.backend === 'opensearch'
@@ -213,6 +227,51 @@ const DetailHeader: React.FC<DetailHeaderProps> = ({ doc, primaryObjective }) =>
           </EuiFlexItem>
         )}
       </EuiFlexGroup>
+
+      <EuiSpacer size="s" />
+
+      <EuiAccordion
+        id="slosDetailSummary"
+        buttonContent={
+          <EuiText size="s">
+            <strong>
+              <EuiIcon type="iInCircle" size="s" /> Summary & SLI details
+            </strong>
+          </EuiText>
+        }
+        data-test-subj="slosDetailSummaryAccordion"
+        initialIsOpen={false}
+        paddingSize="s"
+      >
+        <EuiFlexGroup gutterSize="l" wrap>
+          <EuiFlexItem>
+            <EuiText size="s">
+              <strong>Summary</strong>
+            </EuiText>
+            <EuiSpacer size="xs" />
+            <EuiDescriptionList
+              compressed
+              type="column"
+              listItems={summaryListItems}
+              data-test-subj="slosDetailSummaryList"
+            />
+          </EuiFlexItem>
+          {sliListItems.length > 0 && (
+            <EuiFlexItem>
+              <EuiText size="s">
+                <strong>SLI</strong>
+              </EuiText>
+              <EuiSpacer size="xs" />
+              <EuiDescriptionList
+                compressed
+                type="column"
+                listItems={sliListItems}
+                data-test-subj="slosDetailSliList"
+              />
+            </EuiFlexItem>
+          )}
+        </EuiFlexGroup>
+      </EuiAccordion>
     </EuiPanel>
   );
 };
@@ -295,6 +354,8 @@ export const SloDetailPage: React.FC<SloDetailPageProps> = ({
   const [refreshTrigger, setRefreshTrigger] = useState(0);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const advancedRef = useRef<HTMLDivElement | null>(null);
+  const [ruleHealth, setRuleHealth] = useState<RuleHealthResponse | null>(null);
+  const [ruleHealthLoading, setRuleHealthLoading] = useState(false);
 
   const onRefresh = useCallback(() => {
     setRefreshTrigger((v) => v + 1);
@@ -317,6 +378,52 @@ export const SloDetailPage: React.FC<SloDetailPageProps> = ({
   useEffect(() => {
     load();
   }, [load]);
+
+  const loadRuleHealth = useCallback(async () => {
+    setRuleHealthLoading(true);
+    try {
+      const result = await apiClient.getRuleHealth(id);
+      setRuleHealth(result);
+    } catch (e) {
+      const err = e instanceof Error ? e : new Error(String(e));
+      // Don't render the callout on fetch failure — fall back to the
+      // live-status-derived state. Surface the fetch error as a neutral toast
+      // so users have a breadcrumb if they want to investigate.
+      notifications.toasts.addDanger({
+        title: 'Could not load rule health',
+        text: err.message,
+      });
+      setRuleHealth(null);
+    } finally {
+      setRuleHealthLoading(false);
+    }
+  }, [apiClient, id, notifications]);
+
+  useEffect(() => {
+    loadRuleHealth();
+  }, [loadRuleHealth]);
+
+  const onRepair = useCallback(async () => {
+    try {
+      const response = await apiClient.repair(id);
+      if (response.repaired) {
+        const restoredCount = response.health.expectedGroups.length;
+        notifications.toasts.addSuccess({
+          title: `Restored ${restoredCount} rule group${restoredCount === 1 ? '' : 's'}`,
+        });
+      } else {
+        notifications.toasts.addInfo({
+          title: 'Rules are already present — nothing to restore',
+        });
+      }
+      setRuleHealth(response.health);
+      // Refresh the persisted doc too so liveStatus derived badges update.
+      await load();
+    } catch (e) {
+      const err = e instanceof Error ? e : new Error(String(e));
+      notifications.toasts.addDanger({ title: 'Restore failed', text: err.message });
+    }
+  }, [apiClient, id, load, notifications]);
 
   useEffect(() => {
     chrome.setBreadcrumbs([
@@ -404,6 +511,30 @@ export const SloDetailPage: React.FC<SloDetailPageProps> = ({
   const objectiveRows = doc.spec.objectives.map((o) => buildObjectiveRow(o, doc, doc.liveStatus));
   const prov = doc.status.provisioning.backend === 'prometheus' ? doc.status.provisioning : null;
 
+  // Derive the callout mode from whichever signal is strongest. The fresh
+  // rule-health probe (W1.4) is preferred when available; fall back to the
+  // persisted live-status flag so the callout still shows when the probe
+  // hasn't returned yet.
+  const ruleHealthState = ruleHealth?.state;
+  const derivedCalloutState: 'rules_missing' | 'rules_partial' | 'ruler_unreachable' | null =
+    ruleHealthState === 'rules_missing' ||
+    ruleHealthState === 'rules_partial' ||
+    ruleHealthState === 'ruler_unreachable'
+      ? ruleHealthState
+      : doc.liveStatus.state === 'rules_missing'
+      ? 'rules_missing'
+      : null;
+
+  // Recording-rule names from the persisted provisioning record. Prefer the
+  // conventional `slo:sli_error:ratio_rate_` prefix the generator emits; fall
+  // back to the full list if the prefix filter comes up empty so older SLOs
+  // still surface their generated names.
+  const allRuleNames = prov?.generatedRuleNames ?? [];
+  const recordingRuleNames =
+    allRuleNames.filter((n) => n.startsWith('slo:sli_error:ratio_rate_')).length > 0
+      ? allRuleNames.filter((n) => n.startsWith('slo:sli_error:ratio_rate_'))
+      : allRuleNames;
+
   const summaryListItems: Array<{ title: React.ReactNode; description: React.ReactNode }> = [
     { title: 'ID', description: doc.id },
     { title: 'Datasource', description: doc.spec.datasourceId },
@@ -464,122 +595,227 @@ export const SloDetailPage: React.FC<SloDetailPageProps> = ({
         <HeaderControlledComponentsWrapper components={headerActions} />
         <EuiPageContent color="transparent" hasBorder={false} paddingSize="none">
           <EuiPageContentBody>
-            <DetailHeader doc={doc} primaryObjective={primaryObjective} />
+            <DetailHeader
+              doc={doc}
+              primaryObjective={primaryObjective}
+              summaryListItems={summaryListItems}
+              sliListItems={sliListItems}
+            />
 
             <EuiSpacer size="m" />
 
-            {/* Two-column layout — left owns the quantitative signals (charts
-                + objectives), right owns the descriptive config (Summary + SLI
-                + Advanced details). Grow ratio 2:1 matches the service overview
-                page so the SLOs and service pages feel consistent. */}
-            <EuiFlexGroup gutterSize="m">
-              <EuiFlexItem grow={2}>
-                <SloVisualizations
-                  slo={doc}
-                  timeRange={timeRange}
-                  refreshTrigger={refreshTrigger}
-                  onViewRulesRequest={handleViewRulesRequest}
-                />
-
+            {derivedCalloutState === 'rules_missing' || derivedCalloutState === 'rules_partial' ? (
+              <>
+                <EuiCallOut
+                  color="danger"
+                  iconType="alert"
+                  title="Rule groups missing in Cortex"
+                  data-test-subj="slosDetailRuleHealthCallout"
+                >
+                  <p>
+                    {(() => {
+                      const expected = ruleHealth?.expectedGroups.length ?? 0;
+                      const missing =
+                        ruleHealth?.missingGroups.length ??
+                        (derivedCalloutState === 'rules_missing' ? expected : 0);
+                      return `${missing} of ${expected} expected rule groups for this SLO are not present in the ruler. Alerts and status updates will not fire until the rules are restored. You can restore them from this SLO's persisted spec, or delete the SLO if it is no longer needed.`;
+                    })()}
+                  </p>
+                  <EuiFlexGroup gutterSize="s" responsive={false}>
+                    <EuiFlexItem grow={false}>
+                      <EuiButton
+                        size="s"
+                        color="danger"
+                        fill
+                        onClick={onRepair}
+                        data-test-subj="slosDetailRestore"
+                        isLoading={ruleHealthLoading}
+                      >
+                        Restore
+                      </EuiButton>
+                    </EuiFlexItem>
+                    <EuiFlexItem grow={false}>
+                      <EuiButton
+                        size="s"
+                        color="danger"
+                        onClick={() => setConfirmDelete(true)}
+                        data-test-subj="slosDetailBrokenDelete"
+                      >
+                        Delete
+                      </EuiButton>
+                    </EuiFlexItem>
+                  </EuiFlexGroup>
+                </EuiCallOut>
                 <EuiSpacer size="m" />
+              </>
+            ) : derivedCalloutState === 'ruler_unreachable' ? (
+              <>
+                <EuiCallOut
+                  color="warning"
+                  iconType="alert"
+                  title="Ruler unreachable"
+                  data-test-subj="slosDetailRuleHealthCallout"
+                >
+                  <p>
+                    {`Couldn't reach the Prometheus-compatible ruler (${
+                      ruleHealth?.rulerErrorCode ?? 'RULER_UNREACHABLE'
+                    }). Rule health cannot be verified right now. Retry once the ruler is back.`}
+                  </p>
+                  <EuiButton
+                    size="s"
+                    color="warning"
+                    onClick={loadRuleHealth}
+                    data-test-subj="slosDetailRuleHealthRetry"
+                    isLoading={ruleHealthLoading}
+                  >
+                    Retry
+                  </EuiButton>
+                </EuiCallOut>
+                <EuiSpacer size="m" />
+              </>
+            ) : null}
 
-                <EuiPanel>
-                  <EuiText size="m">
-                    <h4>Objectives</h4>
-                  </EuiText>
+            {/* Full-width stack — Summary/SLI collapsed into the header's
+                accordion, so charts, objectives, and advanced details each
+                get the full page width. */}
+            <SloVisualizations
+              slo={doc}
+              timeRange={timeRange}
+              refreshTrigger={refreshTrigger}
+              onViewRulesRequest={handleViewRulesRequest}
+            />
+
+            <EuiSpacer size="m" />
+
+            <EuiPanel>
+              <EuiText size="m">
+                <h4>Objectives</h4>
+              </EuiText>
+              <EuiSpacer size="s" />
+              <EuiBasicTable<ObjectiveRow>
+                tableCaption="Objectives"
+                items={objectiveRows}
+                columns={OBJECTIVE_COLUMNS}
+                compressed
+                data-test-subj="slosDetailObjectivesTable"
+              />
+            </EuiPanel>
+
+            <EuiSpacer size="m" />
+
+            {/* Advanced details stays pre-collapsed at the bottom; the
+                6-column burn-rate tiers table needs the full page width. */}
+            <div ref={advancedRef}>
+              <EuiPanel>
+                <EuiAccordion
+                  id="slosDetailAdvanced"
+                  buttonContent={
+                    <EuiText size="s">
+                      <strong>
+                        <EuiIcon type="advancedSettingsApp" size="s" /> Advanced details
+                      </strong>
+                    </EuiText>
+                  }
+                  data-test-subj="slosDetailAdvancedAccordion"
+                  forceState={advancedOpen ? 'open' : 'closed'}
+                  onToggle={(open) => setAdvancedOpen(open)}
+                >
                   <EuiSpacer size="s" />
-                  <EuiBasicTable<ObjectiveRow>
-                    tableCaption="Objectives"
-                    items={objectiveRows}
-                    columns={OBJECTIVE_COLUMNS}
-                    compressed
-                    data-test-subj="slosDetailObjectivesTable"
-                  />
-                </EuiPanel>
-              </EuiFlexItem>
-
-              <EuiFlexItem grow={1}>
-                <EuiPanel>
-                  <EuiText size="s">
-                    <h5>Summary</h5>
-                  </EuiText>
-                  <EuiSpacer size="xs" />
                   <EuiDescriptionList
                     compressed
                     type="column"
-                    listItems={summaryListItems}
-                    data-test-subj="slosDetailSummaryList"
+                    data-test-subj="slosDetailAdvancedOps"
+                    listItems={[
+                      {
+                        title: 'Rules provisioned',
+                        description: `${doc.liveStatus.ruleCount ?? 0}${
+                          doc.liveStatus.firingCount > 0
+                            ? ` · ${doc.liveStatus.firingCount} firing`
+                            : ''
+                        }`,
+                      },
+                      {
+                        title: 'Last evaluated',
+                        description: doc.liveStatus.lastEvaluatedAt ?? '—',
+                      },
+                      { title: 'Computed at', description: doc.liveStatus.computedAt },
+                      { title: 'Version', description: String(doc.status.version) },
+                      ...(prov
+                        ? [
+                            { title: 'Rule group', description: prov.ruleGroupName },
+                            { title: 'Ruler namespace', description: prov.rulerNamespace },
+                          ]
+                        : []),
+                    ]}
                   />
-
-                  {sliListItems.length > 0 && (
-                    <>
-                      <EuiSpacer size="m" />
-                      <EuiText size="s">
-                        <h5>SLI</h5>
-                      </EuiText>
-                      <EuiSpacer size="xs" />
-                      <EuiDescriptionList
-                        compressed
-                        type="column"
-                        listItems={sliListItems}
-                        data-test-subj="slosDetailSliList"
-                      />
-                    </>
-                  )}
 
                   <EuiSpacer size="m" />
 
-                  <div ref={advancedRef}>
-                    <EuiAccordion
-                      id="slosDetailAdvanced"
-                      buttonContent={
-                        <EuiText size="s">
-                          <strong>
-                            <EuiIcon type="advancedSettingsApp" size="s" /> Advanced details
-                          </strong>
-                        </EuiText>
-                      }
-                      data-test-subj="slosDetailAdvancedAccordion"
-                      forceState={advancedOpen ? 'open' : 'closed'}
-                      onToggle={(open) => setAdvancedOpen(open)}
-                    >
-                      <EuiSpacer size="s" />
-                      <EuiDescriptionList
-                        compressed
-                        type="column"
-                        data-test-subj="slosDetailAdvancedOps"
-                        listItems={[
-                          {
-                            title: 'Rules provisioned',
-                            description: `${doc.liveStatus.ruleCount ?? 0}${
-                              doc.liveStatus.firingCount > 0
-                                ? ` · ${doc.liveStatus.firingCount} firing`
-                                : ''
-                            }`,
-                          },
-                          {
-                            title: 'Last evaluated',
-                            description: doc.liveStatus.lastEvaluatedAt ?? '—',
-                          },
-                          { title: 'Computed at', description: doc.liveStatus.computedAt },
-                          { title: 'Version', description: String(doc.status.version) },
-                          ...(prov
-                            ? [
-                                { title: 'Rule group', description: prov.ruleGroupName },
-                                { title: 'Ruler namespace', description: prov.rulerNamespace },
-                              ]
-                            : []),
-                        ]}
-                      />
+                  <SloMetadataPanel slo={doc} inline />
 
+                  {recordingRuleNames.length > 0 && (
+                    <>
                       <EuiSpacer size="m" />
-
-                      <SloMetadataPanel slo={doc} inline />
-                    </EuiAccordion>
-                  </div>
-                </EuiPanel>
-              </EuiFlexItem>
-            </EuiFlexGroup>
+                      <EuiAccordion
+                        id="slosDetailRecordingRules"
+                        buttonContent={
+                          <EuiText size="s">
+                            <strong>
+                              <EuiIcon type="indexRuntime" size="s" /> Recording rules
+                            </strong>
+                          </EuiText>
+                        }
+                        data-test-subj="slosDetailRecordingRulesAccordion"
+                        initialIsOpen={false}
+                        paddingSize="s"
+                      >
+                        <EuiText size="s" color="subdued">
+                          <p>
+                            Bind external dashboards or visualizations to these recording rule names
+                            to chart SLI error ratios.
+                          </p>
+                        </EuiText>
+                        <EuiSpacer size="s" />
+                        {recordingRuleNames.map((ruleName, idx) => (
+                          <EuiFlexGroup
+                            key={ruleName}
+                            gutterSize="s"
+                            alignItems="center"
+                            responsive={false}
+                          >
+                            <EuiFlexItem>
+                              <EuiCodeBlock
+                                language="text"
+                                paddingSize="s"
+                                fontSize="s"
+                                isCopyable={false}
+                                data-test-subj={`slosDetailRecordingRule-${idx}`}
+                              >
+                                {ruleName}
+                              </EuiCodeBlock>
+                            </EuiFlexItem>
+                            <EuiFlexItem grow={false}>
+                              <EuiCopy textToCopy={ruleName}>
+                                {(copy) => (
+                                  <EuiButtonEmpty
+                                    size="s"
+                                    iconType="copy"
+                                    onClick={copy}
+                                    data-test-subj={`slosDetailRecordingRuleCopy-${idx}`}
+                                  >
+                                    Copy
+                                  </EuiButtonEmpty>
+                                )}
+                              </EuiCopy>
+                            </EuiFlexItem>
+                          </EuiFlexGroup>
+                        ))}
+                      </EuiAccordion>
+                    </>
+                  )}
+                </EuiAccordion>
+              </EuiPanel>
+            </div>
           </EuiPageContentBody>
         </EuiPageContent>
 

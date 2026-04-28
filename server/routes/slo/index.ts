@@ -22,15 +22,18 @@ import type { InMemoryDatasourceService } from '../../services/alerting/datasour
 import type { DatasourceDiscoveryService } from '../../services/alerting/datasource_discovery';
 import type { DirectQueryPrometheusBackend } from '../../services/alerting/directquery_prometheus_backend';
 import type { RulerClient } from '../../services/slo/ruler_client';
+import type { RuleHealthChecker } from '../../services/slo/rule_health_checker';
 import {
   handleCreateSLO,
   handleDeleteSLO,
   handleDisableSLO,
   handleEnableSLO,
+  handleGetRuleHealth,
   handleGetSLO,
   handleGetSLOStatuses,
   handleListSLOs,
   handlePreviewSLORules,
+  handleRepairSLO,
   handleUpdateSLO,
 } from './handlers';
 import { registerProbeSliRoute } from './probe_sli';
@@ -411,7 +414,8 @@ export function registerSloRoutes(
   rulerClient?: RulerClient,
   datasourceService?: InMemoryDatasourceService,
   discoveryService?: DatasourceDiscoveryService,
-  prometheusBackend?: DirectQueryPrometheusBackend
+  prometheusBackend?: DirectQueryPrometheusBackend,
+  ruleHealthChecker?: RuleHealthChecker
 ) {
   if (prometheusBackend) {
     registerProbeSliRoute(router, logger, prometheusBackend, datasourceService, discoveryService);
@@ -732,6 +736,108 @@ export function registerSloRoutes(
       return res.customError({
         statusCode: result.status,
         body: { message: String((result.body as { error?: string }).error ?? 'Disable failed') },
+      });
+    }
+  );
+
+  // --------------------------------------------------------------------------
+  // W1.5 — Repair + rule_health
+  //
+  // Both routes require a resolved deploy context (a DirectQuery-Prometheus
+  // datasource that exists in the registry) AND a `ruleHealthChecker`. When
+  // the caller didn't supply a checker we still register the routes so tests
+  // can rely on the path being present; the handlers return 501 themselves.
+  // --------------------------------------------------------------------------
+  router.post(
+    {
+      path: `${SLO_BASE}/{id}/repair`,
+      validate: { params: schema.object({ id: schema.string() }) },
+    },
+    async (ctx, req, res) => {
+      const existing = await sloService.get(req.params.id);
+      if (!existing) {
+        return res.customError({
+          statusCode: 404,
+          body: { message: 'SLO not found' },
+        });
+      }
+      const built = await tryBuildDeployContext(
+        ctx as SloHandlerContext,
+        existing.spec.datasourceId,
+        rulerClient,
+        datasourceService,
+        discoveryService,
+        logger
+      );
+      if (built.errorResponse) {
+        return res.customError({
+          statusCode: built.errorResponse.status,
+          body: {
+            message: String(
+              (built.errorResponse.body as { error?: string }).error ?? 'Repair failed'
+            ),
+            attributes: built.errorResponse.body,
+          },
+        });
+      }
+      const result = await handleRepairSLO(sloService, req.params.id, logger, {
+        health: ruleHealthChecker,
+        deploy: built.deploy,
+      });
+      if (result.status === 200) return res.ok({ body: result.body });
+      return res.customError({
+        statusCode: result.status,
+        body: {
+          message: String((result.body as { error?: string }).error ?? 'Repair failed'),
+          attributes: result.body as Record<string, unknown>,
+        },
+      });
+    }
+  );
+
+  router.get(
+    {
+      path: `${SLO_BASE}/{id}/rule_health`,
+      validate: { params: schema.object({ id: schema.string() }) },
+    },
+    async (ctx, req, res) => {
+      const existing = await sloService.get(req.params.id);
+      if (!existing) {
+        return res.customError({
+          statusCode: 404,
+          body: { message: 'SLO not found' },
+        });
+      }
+      const built = await tryBuildDeployContext(
+        ctx as SloHandlerContext,
+        existing.spec.datasourceId,
+        rulerClient,
+        datasourceService,
+        discoveryService,
+        logger
+      );
+      if (built.errorResponse) {
+        return res.customError({
+          statusCode: built.errorResponse.status,
+          body: {
+            message: String(
+              (built.errorResponse.body as { error?: string }).error ?? 'Rule health probe failed'
+            ),
+            attributes: built.errorResponse.body,
+          },
+        });
+      }
+      const result = await handleGetRuleHealth(sloService, req.params.id, logger, {
+        health: ruleHealthChecker,
+        deploy: built.deploy,
+      });
+      if (result.status === 200) return res.ok({ body: result.body });
+      return res.customError({
+        statusCode: result.status,
+        body: {
+          message: String((result.body as { error?: string }).error ?? 'Rule health probe failed'),
+          attributes: result.body as Record<string, unknown>,
+        },
       });
     }
   );

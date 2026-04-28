@@ -62,6 +62,32 @@ import {
 // Interfaces
 // ============================================================================
 
+/**
+ * Structural shape for a rule-health checker. Intentionally declared inline
+ * (not imported from `rule_health_checker.ts`) to keep the aggregator's
+ * dependencies weak — callers synthesize this object from whichever checker
+ * they have on hand (real in wiring, `jest.fn()` in tests).
+ */
+export interface SloRuleHealthCheckResult {
+  state: 'ok' | 'rules_partial' | 'rules_missing' | 'ruler_unreachable';
+  rulerErrorCode?: string;
+  expectedGroups: string[];
+  presentGroups: string[];
+  missingGroups: string[];
+  computedAt: string;
+}
+
+export interface SloRuleHealthChecker {
+  check(input: {
+    workspaceId: string;
+    datasource: Datasource;
+    client: AlertingOSClient;
+    sloId: string;
+    namespace: string;
+    expectedGroups: string[];
+  }): Promise<SloRuleHealthCheckResult>;
+}
+
 export interface SloStatusAggregationContext {
   client: AlertingOSClient;
   /**
@@ -77,6 +103,16 @@ export interface SloStatusAggregationContext {
    * Matches what was used at create time (see `SloDeployContext.workspaceId`).
    */
   workspaceId: string;
+  /**
+   * Optional rule-health checker. When present, the aggregator calls it once
+   * per enabled prometheus-backed SLO after ruler samples are collected and
+   * overlays the result onto the top-level SloLiveStatus.state per the W1.6
+   * priority rules:
+   *   `disabled` > `rules_missing` > `ruler_unreachable` > existing derivation
+   * Leave undefined in offline / tests that only exercise the sample-based
+   * derivation. See W1.6 in SLO_RULE_DEDUP_PLAN.md.
+   */
+  healthChecker?: SloRuleHealthChecker;
 }
 
 export interface SloStatusAggregator {
@@ -122,6 +158,15 @@ interface InstantSample {
 }
 
 export class DirectQueryStatusAggregator implements SloStatusAggregator {
+  /**
+   * De-dup key for health-checker failure warnings: one warn per
+   * (sloId × error-message). Mirrors `SloService.warnAggregatorFailure` so a
+   * flapping checker doesn't spam the log during listing polls. Cleared
+   * implicitly by process lifetime — the aggregator is a singleton per
+   * plugin start, so this matches the lifetime of the other caches.
+   */
+  private readonly loggedHealthCheckerFailures = new Set<string>();
+
   constructor(private readonly logger: Logger) {}
 
   async aggregate(docs: SloDocument[], ctx: SloStatusAggregationContext): Promise<SloLiveStatus[]> {
@@ -174,32 +219,109 @@ export class DirectQueryStatusAggregator implements SloStatusAggregator {
       // Per-SLO: one instant query for the recording-rule samples.
       await Promise.all(
         group.map(async (doc) => {
+          // W1.6 priority 1: `disabled` beats everything — don't even call the
+          // ruler or the health checker for a disabled SLO.
           if (!doc.spec.enabled) {
             perSloStatus.set(doc.id, disabledStatus(doc));
             return;
           }
+          let base: SloLiveStatus;
           try {
-            const status = await this.statusForSlo(
-              doc,
-              ds!,
-              ctx,
-              alertCountBySloId.get(doc.id) ?? 0
-            );
-            perSloStatus.set(doc.id, status);
+            base = await this.statusForSlo(doc, ds!, ctx, alertCountBySloId.get(doc.id) ?? 0);
           } catch (err) {
             this.logger.warn(
               `StatusAggregator: statusForSlo failed for ${doc.id}: ${errMsg(
                 err
               )}. Degrading to no_data.`
             );
-            perSloStatus.set(doc.id, noDataStatus(doc));
+            base = noDataStatus(doc);
           }
+          // W1.6 priority 2/3: overlay rule-health state on top of the sample
+          // derivation. Health-checker errors never escape (see
+          // applyRuleHealthMerge) — the listing must stay available.
+          const merged = await this.applyRuleHealthMerge(doc, ds!, ctx, base);
+          perSloStatus.set(doc.id, merged);
         })
       );
     }
 
     // Preserve input order.
     return docs.map((d) => perSloStatus.get(d.id) ?? noDataStatus(d));
+  }
+
+  // --------------------------------------------------------------------------
+  // Rule-health priority merge (W1.6)
+  // --------------------------------------------------------------------------
+
+  /**
+   * Apply the W1.6 rule-health priority rules to a previously-computed
+   * SloLiveStatus. The priority ladder (highest first):
+   *   1. `disabled` (handled upstream — disabled SLOs never reach here)
+   *   2. `rules_missing` — health-checker says `rules_missing` or `rules_partial`
+   *   3. `ruler_unreachable` — health-checker says `ruler_unreachable`; the
+   *      public `SloHealthState` union has no `ruler_unreachable` value so
+   *      we surface this as `'no_data'` with a debug log. Callers who need
+   *      the precise error code can call `GET .../rule_health` directly.
+   *   4. existing sample-based derivation — no overlay
+   *
+   * Errors from `healthChecker.check` are **never** re-thrown: the listing
+   * page polls this aggregator constantly, and a ruler outage must not 500
+   * the listing. Warnings are deduped per (sloId × message) so a flapping
+   * ruler doesn't spam the log.
+   */
+  private async applyRuleHealthMerge(
+    doc: SloDocument,
+    ds: Datasource,
+    ctx: SloStatusAggregationContext,
+    base: SloLiveStatus
+  ): Promise<SloLiveStatus> {
+    if (!ctx.healthChecker) return base;
+
+    const expectedGroups = expectedRuleGroupsFor(doc);
+    // Nothing to check — no persisted rule group name (shouldn't happen for a
+    // prometheus-backed SLO that's gone through create, but be defensive).
+    if (expectedGroups.length === 0) return base;
+
+    const provisioning = doc.status.provisioning;
+    // Non-prometheus backends don't own ruler state — skip.
+    if (provisioning.backend !== 'prometheus') return base;
+
+    let result: SloRuleHealthCheckResult;
+    try {
+      result = await ctx.healthChecker.check({
+        workspaceId: ctx.workspaceId,
+        datasource: ds,
+        client: ctx.client,
+        sloId: doc.id,
+        namespace: provisioning.rulerNamespace,
+        expectedGroups,
+      });
+    } catch (err) {
+      this.warnHealthCheckerFailure(doc.id, err);
+      return base;
+    }
+
+    if (result.state === 'rules_missing' || result.state === 'rules_partial') {
+      return { ...base, state: 'rules_missing' };
+    }
+    if (result.state === 'ruler_unreachable') {
+      this.logger.debug(
+        `ruler unreachable for slo=${doc.id} code=${result.rulerErrorCode ?? 'unknown'}`
+      );
+      return { ...base, state: 'no_data' };
+    }
+    // `ok` — leave the sample-derived state intact.
+    return base;
+  }
+
+  private warnHealthCheckerFailure(sloId: string, err: unknown): void {
+    const msg = errMsg(err);
+    const key = `${sloId}:${msg}`;
+    if (this.loggedHealthCheckerFailures.has(key)) return;
+    this.loggedHealthCheckerFailures.add(key);
+    this.logger.warn(
+      `StatusAggregator: healthChecker.check rejected (slo=${sloId}): ${msg}. Leaving state untouched.`
+    );
   }
 
   // --------------------------------------------------------------------------
@@ -577,4 +699,22 @@ function extractAlerts(
 
 function errMsg(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * Derive the list of rule-group names the ruler is expected to serve for
+ * this SLO. Phase 1: one group per SLO for prometheus-backed docs — the
+ * generator emits `provisioning.ruleGroupName` and writes exactly that group
+ * under the SLO's workspace namespace. Future phases (per-objective rule
+ * groups, burn-rate groups) can extend this to return multiple names.
+ *
+ * Returns an empty array when there's nothing to probe (non-prometheus
+ * backend or an empty group name) — callers treat that as "skip the health
+ * check for this SLO".
+ */
+export function expectedRuleGroupsFor(doc: SloDocument): string[] {
+  const p = doc.status.provisioning;
+  if (p.backend !== 'prometheus') return [];
+  if (!p.ruleGroupName) return [];
+  return [p.ruleGroupName];
 }
