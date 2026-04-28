@@ -262,11 +262,18 @@ function errorRatioExpr(
     if (prom.customExpr.mode === 'raw') {
       return prom.customExpr.errorRatioQuery;
     }
+    // Wrap each sub-expression in its own parens — PromQL `/` binds tighter
+    // than `-`/`+`, so an unparenthesized `sum(a) - sum(b) / sum(c)` parses
+    // as `sum(a) - (sum(b) / sum(c))`. A goodQuery of `sum(request) -
+    // sum(fault)` paired with totalQuery `sum(request)` otherwise evaluates
+    // to `-1` when traffic is healthy, which feeds nonsense into the
+    // recording rule and the budget-remaining chart (`20,100%` headline
+    // remaining budget, vs the correct `100%`).
     return (
       `1 - (\n` +
-      `  ${prom.customExpr.goodQuery}\n` +
+      `  (${prom.customExpr.goodQuery})\n` +
       `  /\n` +
-      `  ${prom.customExpr.totalQuery}\n` +
+      `  (${prom.customExpr.totalQuery})\n` +
       `)`
     );
   }

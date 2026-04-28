@@ -80,7 +80,14 @@ export function buildErrorRatioExprForWindow(
   if (def.type === 'custom') {
     if (!def.customExpr) return null;
     if (def.customExpr.mode === 'raw') return def.customExpr.errorRatioQuery;
-    return `1 - (${def.customExpr.goodQuery} / ${def.customExpr.totalQuery})`;
+    // Wrap each sub-expression in its own parens — PromQL `/` binds tighter
+    // than `-`/`+`, so an unparenthesized `sum(a) - sum(b) / sum(c)` parses
+    // as `sum(a) - (sum(b) / sum(c))` rather than the operator-intended
+    // `(sum(a) - sum(b)) / sum(c)`. Seen in the wild: a goodQuery of
+    // `sum(request) - sum(fault)` + totalQuery `sum(request)` produced an
+    // errorRatio of `-1` (→ budget-remaining `20,100%`) when the real ratio
+    // was `0`.
+    return `1 - ((${def.customExpr.goodQuery}) / (${def.customExpr.totalQuery}))`;
   }
 
   const dim = buildSelectors(slo, false);

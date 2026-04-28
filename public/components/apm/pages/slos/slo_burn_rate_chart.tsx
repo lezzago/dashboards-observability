@@ -67,9 +67,12 @@ export function buildBurnRateOption(inputs: BurnRateOptionInputs): echarts.EChar
   // Upper bound of everything we need to fit — tier thresholds plus sampled
   // burn values. ECharts autoscales yAxis from series alone and would clip the
   // top threshold's markLine label (rendered at the line's y position) against
-  // the grid's top edge. Compute the required height and pad ~15% for the label,
+  // the grid's top edge. Compute the required height and pad ~25% for the label,
   // then round up to a clean integer so the rendered axis labels don't pick up
-  // floating-point noise (e.g. `22.99999999…` rendering as "23x").
+  // floating-point noise (e.g. `22.99999999…` rendering as "23x"). The ~25%
+  // headroom keeps `insideEndTop`/`insideStartTop` labels clear of the border
+  // even when the top threshold dominates yMax (normal operation — series is
+  // near zero, axis driven entirely by the tier thresholds).
   const seriesMax = tiers.reduce((acc, t) => {
     for (const [, v] of t.data) {
       if (Number.isFinite(v) && v > acc) acc = v;
@@ -79,20 +82,14 @@ export function buildBurnRateOption(inputs: BurnRateOptionInputs): echarts.EChar
   const thresholdMax = tiers.reduce((acc, t) => (t.multiplier > acc ? t.multiplier : acc), 0);
   const yMaxCandidate = Math.max(seriesMax, thresholdMax);
   // Fall back to 1 so the axis doesn't collapse when there's no data yet.
-  const yMax = yMaxCandidate > 0 ? Math.ceil(yMaxCandidate * 1.15) : 1;
+  const yMax = yMaxCandidate > 0 ? Math.ceil(yMaxCandidate * 1.25) : 1;
   return {
-    grid: { left: 50, right: 20, top: 30, bottom: 40, containLabel: true },
-    legend: {
-      show: true,
-      bottom: 0,
-      textStyle: {
-        fontSize: 11,
-        color: euiThemeVars.euiColorDarkShade,
-      },
-      icon: 'roundRect',
-      itemWidth: 14,
-      itemHeight: 3,
-    },
+    // No legend — each tier's threshold markLine is already labeled with
+    // `<severity> @ <multiplier>x` inline, which is what operators actually
+    // read. The separate legend row duplicated that information and
+    // crowded the time-axis labels at the bottom of the chart.
+    grid: { left: 50, right: 20, top: 24, bottom: 32, containLabel: true },
+    legend: { show: false },
     tooltip: {
       trigger: 'axis',
       formatter: (params: unknown) => {
@@ -137,7 +134,7 @@ export function buildBurnRateOption(inputs: BurnRateOptionInputs): echarts.EChar
         lineStyle: { color: euiThemeVars.euiColorLightestShade, type: 'dashed' },
       },
     },
-    series: tiers.map((t, idx) => ({
+    series: tiers.map((t) => ({
       name: t.label,
       type: 'line',
       data: t.data,
@@ -154,9 +151,24 @@ export function buildBurnRateOption(inputs: BurnRateOptionInputs): echarts.EChar
         lineStyle: { color: t.color, type: 'dashed', width: 1 },
         label: {
           formatter: `${t.severity} @ ${formatMultiplier(t.multiplier)}`,
-          position: idx % 2 === 0 ? 'insideStartTop' : 'insideEndTop',
+          // Always anchor to the right edge. The previous alternating
+          // `insideStartTop` placed odd-indexed labels flush against the
+          // y-axis gutter, where they overprinted the axis tick label at
+          // the same y-coordinate (e.g. `critical @ 14.4x` landed on the
+          // `15x` tick). The right edge has no axis labels, and different
+          // tiers occupy different y-values so these threshold labels
+          // don't stack on each other.
+          position: 'insideEndTop',
+          // Nudge the label up a pixel so it doesn't kiss the dashed line
+          // it belongs to.
+          distance: [0, 2],
           color: t.color,
           fontSize: 10,
+          // Opaque panel-colored chip so the label over-writes any grid
+          // split-line or neighboring series point it happens to land on,
+          // instead of letting the line bleed through the glyph strokes.
+          backgroundColor: '#FFFFFF',
+          padding: [1, 4],
         },
         data: [{ yAxis: t.multiplier }],
       },
