@@ -43,10 +43,12 @@ import type { SloApiClient, SloRulerErrorEnvelope } from './slo_api_client';
 import { GeneratedRulesPreview } from './generated_rules_preview';
 import { ObjectivesSection } from './objectives_section';
 import { CustomPromqlEditor } from './custom_promql_editor';
+import { ProbeSliPanel } from './probe_sli_panel';
 import { AdvancedSection } from './advanced_section';
 import { ExclusionWindowsEditor } from './exclusion_windows_editor';
 import type { SloCreateInput } from '../../../../../common/slo/slo_types';
 import { SLO_TEMPLATES } from '../../../../../common/slo/slo_templates';
+import { buildProbeQueries } from '../../../../../common/slo/slo_promql_generator';
 import { validateSloSpec } from '../../../../../common/slo/slo_validators';
 import { initialState, reducer } from './wizard_state';
 import type { FormState } from './wizard_state';
@@ -168,6 +170,17 @@ export const SloWizardPage: React.FC<SloWizardPageProps> = ({
     () => (liveInput ? validateSloSpec(liveInput.spec).warnings : {}),
     [liveInput]
   );
+  // Probe queries — built from the first objective's spec at a 5m rate window
+  // (matches the shortest recording window). The probe's lookback is a
+  // horizontal-axis concern applied server-side by queryRange(); these
+  // PromQL strings are what the ruler would otherwise evaluate.
+  const probeQueries = useMemo<{ good: string | null; total: string | null }>(() => {
+    if (!liveInput) return { good: null, total: null };
+    const firstObjective = liveInput.spec.objectives[0];
+    if (!firstObjective) return { good: null, total: null };
+    const q = buildProbeQueries(liveInput.spec, firstObjective, '5m');
+    return q ? { good: q.good, total: q.total } : { good: null, total: null };
+  }, [liveInput]);
   // Live errors drive the rule-preview empty-state list — *before* the user
   // has clicked submit. Distinct from the `errors` state variable which only
   // populates after submit (and gates the top-level summary).
@@ -361,6 +374,15 @@ export const SloWizardPage: React.FC<SloWizardPageProps> = ({
                       <EuiSpacer size="m" />
                     </>
                   )}
+
+                  <ProbeSliPanel
+                    apiClient={apiClient}
+                    goodQuery={probeQueries.good}
+                    totalQuery={probeQueries.total}
+                    datasourceId={state.datasourceId}
+                  />
+
+                  <EuiSpacer size="m" />
 
                   <div id={sectionAnchorId('objectives')}>
                     <ObjectivesSection
