@@ -12,10 +12,13 @@ export const SLO_HEALTH_COLOR: Record<SloHealthState, string> = {
   no_data: 'subdued',
   stale: 'subdued',
   disabled: 'default',
+  // Broken rules are as bad as a breach — alerts can't fire when the rule group is gone.
+  rules_missing: 'danger',
 };
 
 export const SLO_HEALTH_ORDER: SloHealthState[] = [
   'breached',
+  'rules_missing',
   'warning',
   'ok',
   'no_data',

@@ -291,7 +291,14 @@ export interface SloDocument {
 // Live status — §3.6 (read-time, not persisted)
 // ============================================================================
 
-export type SloHealthState = 'breached' | 'warning' | 'ok' | 'no_data' | 'stale' | 'disabled';
+export type SloHealthState =
+  | 'breached'
+  | 'warning'
+  | 'ok'
+  | 'no_data'
+  | 'stale'
+  | 'disabled'
+  | 'rules_missing';
 
 export interface ObjectiveStatus {
   objectiveName: string;

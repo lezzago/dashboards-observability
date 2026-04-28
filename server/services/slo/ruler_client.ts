@@ -30,7 +30,7 @@
 
 /* eslint-disable max-classes-per-file */
 
-import { dump as yamlDump } from 'js-yaml';
+import { dump as yamlDump, load as yamlLoad } from 'js-yaml';
 import type { AlertingOSClient, Datasource, Logger } from '../../../common/types/alerting/types';
 import type { GeneratedRule, GeneratedRuleGroup } from '../../../common/slo/slo_types';
 import { SloRulerError } from '../../../common/slo/slo_errors';
@@ -52,13 +52,39 @@ export interface RulerClient {
     group: GeneratedRuleGroup
   ): Promise<void>;
 
-  /** Delete a single rule group. Idempotent server-side on 404. */
+  /**
+   * Delete a single rule group. 404-tolerant: if the target is already gone,
+   * resolves successfully so callers can use delete as "ensure absent".
+   */
   deleteRuleGroup(
     client: AlertingOSClient,
     datasource: Datasource,
     namespace: string,
     groupName: string
   ): Promise<void>;
+
+  /**
+   * GET a single rule group. Returns `null` on HTTP 404 so callers can
+   * distinguish "missing" from "unreachable" (5xx still throws
+   * `SloRulerError` with `RULER_UNREACHABLE`).
+   */
+  getRuleGroup(
+    client: AlertingOSClient,
+    datasource: Datasource,
+    namespace: string,
+    groupName: string
+  ): Promise<GeneratedRuleGroup | null>;
+
+  /**
+   * List all rule groups in a namespace. Returns `[]` on 404 (namespace
+   * doesn't exist yet or is empty). Throws `SloRulerError` with
+   * `RULER_UNREACHABLE` on 5xx.
+   */
+  listRuleGroups(
+    client: AlertingOSClient,
+    datasource: Datasource,
+    namespace: string
+  ): Promise<GeneratedRuleGroup[]>;
 }
 
 // ============================================================================
@@ -183,8 +209,82 @@ export class DirectQueryRulerClient implements RulerClient {
         path,
       });
     } catch (err: unknown) {
+      // 404-tolerant: if the target is already gone we treat the delete as a
+      // success — lets callers use deleteRuleGroup as an "ensure absent"
+      // primitive without needing a pre-flight probe.
+      if (extractHttpStatus(err) === 404) {
+        this.logger.debug(
+          `DirectQuery ruler DELETE ${path} returned 404 — rule group already gone, treating as success`
+        );
+        return;
+      }
       throw this.toRulerError(err);
     }
+  }
+
+  async getRuleGroup(
+    client: AlertingOSClient,
+    datasource: Datasource,
+    namespace: string,
+    groupName: string
+  ): Promise<GeneratedRuleGroup | null> {
+    const path = rulesPath(
+      datasource,
+      `/api/v1/rules/${encodeURIComponent(namespace)}/${encodeURIComponent(groupName)}`
+    );
+    this.logger.debug(`DirectQuery ruler GET ${path}`);
+
+    let response: unknown;
+    try {
+      response = await client.transport.request({
+        method: 'GET',
+        path,
+      });
+    } catch (err: unknown) {
+      if (extractHttpStatus(err) === 404) {
+        return null;
+      }
+      throw this.toRulerError(err);
+    }
+
+    const body = extractResponseBody(response);
+    const parsed = parseYamlBody(body);
+    const group = coerceRuleGroup(parsed);
+    if (!group) {
+      // Defensive: a 200 with a body shape we can't recognize is more useful
+      // as "missing" than as a hard failure — the probe is best-effort.
+      this.logger.warn(
+        `DirectQuery ruler GET ${path} returned 200 with unrecognized body shape; treating as missing`
+      );
+      return null;
+    }
+    return group;
+  }
+
+  async listRuleGroups(
+    client: AlertingOSClient,
+    datasource: Datasource,
+    namespace: string
+  ): Promise<GeneratedRuleGroup[]> {
+    const path = rulesPath(datasource, `/api/v1/rules/${encodeURIComponent(namespace)}`);
+    this.logger.debug(`DirectQuery ruler GET ${path}`);
+
+    let response: unknown;
+    try {
+      response = await client.transport.request({
+        method: 'GET',
+        path,
+      });
+    } catch (err: unknown) {
+      if (extractHttpStatus(err) === 404) {
+        return [];
+      }
+      throw this.toRulerError(err);
+    }
+
+    const body = extractResponseBody(response);
+    const parsed = parseYamlBody(body);
+    return coerceRuleGroupList(parsed);
   }
 
   /**
@@ -232,6 +332,183 @@ function stringifyBody(body: unknown): string {
   }
 }
 
+/**
+ * Pull an HTTP status code off the possibly-wrapped transport error. Mirrors
+ * the extraction logic in `toRulerError` but returns the code only so the
+ * probe paths can branch on 404 without building a full SloRulerError.
+ */
+function extractHttpStatus(err: unknown): number {
+  const raw = err as {
+    statusCode?: number;
+    meta?: { statusCode?: number };
+  };
+  if (typeof raw?.statusCode === 'number') return raw.statusCode;
+  if (typeof raw?.meta?.statusCode === 'number') return raw.meta.statusCode;
+  return 0;
+}
+
+/**
+ * OSD's scoped cluster client `transport.request` typically returns `{ body,
+ * statusCode, headers, warnings, meta }`. The SQL plugin's DirectQuery proxy
+ * forwards the upstream ruler body through that same envelope, so we peel off
+ * `.body` when present and otherwise pass the response through as-is.
+ */
+function extractResponseBody(response: unknown): unknown {
+  if (response && typeof response === 'object' && 'body' in response) {
+    return (response as { body: unknown }).body;
+  }
+  return response;
+}
+
+/**
+ * The ruler responds with YAML that may arrive either as a raw string (when
+ * the transport hasn't pre-parsed) or as an already-decoded object (when it
+ * has). Accept both.
+ */
+function parseYamlBody(body: unknown): unknown {
+  if (body == null) return null;
+  if (typeof body === 'string') {
+    if (body.trim() === '') return null;
+    try {
+      return yamlLoad(body);
+    } catch {
+      return null;
+    }
+  }
+  return body;
+}
+
+/**
+ * Coerce a ruler rule-group document (either the Prometheus `{ name,
+ * interval, rules }` shape or a close variant) into our `GeneratedRuleGroup`.
+ * Returns `null` when the input can't plausibly be a rule group so callers
+ * can treat "unparseable" as "missing".
+ */
+function coerceRuleGroup(doc: unknown): GeneratedRuleGroup | null {
+  if (!doc || typeof doc !== 'object' || Array.isArray(doc)) return null;
+  const record = doc as Record<string, unknown>;
+  const name = record.name;
+  if (typeof name !== 'string' || name.length === 0) return null;
+
+  const rulesRaw = record.rules;
+  const rules = Array.isArray(rulesRaw) ? rulesRaw.map(coerceRule).filter(isGeneratedRule) : [];
+
+  return {
+    groupName: name,
+    interval: parseIntervalSeconds(record.interval),
+    rules,
+    yaml: '',
+  };
+}
+
+function isGeneratedRule(rule: GeneratedRule | null): rule is GeneratedRule {
+  return rule !== null;
+}
+
+/**
+ * Coerce the list-namespace response. Cortex returns
+ * `{ "<ns>": [ { name, interval, rules }, ... ] }`; some builds return a
+ * top-level array or even a single group. Accept all three.
+ */
+function coerceRuleGroupList(doc: unknown): GeneratedRuleGroup[] {
+  if (!doc) return [];
+  if (Array.isArray(doc)) {
+    return doc.map(coerceRuleGroup).filter(isGeneratedRuleGroup);
+  }
+  if (typeof doc === 'object') {
+    const record = doc as Record<string, unknown>;
+    // Cortex namespace-keyed envelope: take every array-valued field and
+    // flatten — namespaces are already filtered server-side by the URL, so
+    // this is safe even if multiple keys appear.
+    const fromEnvelope: GeneratedRuleGroup[] = [];
+    let sawArrayField = false;
+    for (const value of Object.values(record)) {
+      if (Array.isArray(value)) {
+        sawArrayField = true;
+        for (const entry of value) {
+          const group = coerceRuleGroup(entry);
+          if (group) fromEnvelope.push(group);
+        }
+      }
+    }
+    if (sawArrayField) return fromEnvelope;
+    // Single-group shape: `{ name, interval, rules }`.
+    const single = coerceRuleGroup(doc);
+    return single ? [single] : [];
+  }
+  return [];
+}
+
+function isGeneratedRuleGroup(group: GeneratedRuleGroup | null): group is GeneratedRuleGroup {
+  return group !== null;
+}
+
+function coerceRule(raw: unknown): GeneratedRule | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const record = raw as Record<string, unknown>;
+  const record_ = record.record;
+  const alert = record.alert;
+  const expr = record.expr;
+  if (typeof expr !== 'string') return null;
+
+  let type: 'recording' | 'alerting';
+  let name: string;
+  if (typeof record_ === 'string' && record_.length > 0) {
+    type = 'recording';
+    name = record_;
+  } else if (typeof alert === 'string' && alert.length > 0) {
+    type = 'alerting';
+    name = alert;
+  } else {
+    return null;
+  }
+
+  const out: GeneratedRule = {
+    type,
+    name,
+    expr,
+    labels: coerceStringMap(record.labels),
+    description: '',
+  };
+  if (typeof record.for === 'string') out.for = record.for;
+  const annotations = coerceStringMap(record.annotations);
+  if (Object.keys(annotations).length > 0) out.annotations = annotations;
+  return out;
+}
+
+function coerceStringMap(raw: unknown): Record<string, string> {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof v === 'string') out[k] = v;
+    else if (typeof v === 'number' || typeof v === 'boolean') out[k] = String(v);
+  }
+  return out;
+}
+
+/**
+ * Parse a Prometheus duration like "30s", "1m", "2h" back into seconds.
+ * Also accepts a raw number (seconds) in case the transport pre-numerified.
+ * Unknown / missing input falls back to 60s — the SLO generator's default.
+ */
+function parseIntervalSeconds(raw: unknown): number {
+  if (typeof raw === 'number' && Number.isFinite(raw) && raw > 0) return raw;
+  if (typeof raw !== 'string') return 60;
+  const match = /^(\d+)([smh])$/.exec(raw.trim());
+  if (!match) return 60;
+  const n = Number.parseInt(match[1], 10);
+  switch (match[2]) {
+    case 's':
+      return n;
+    case 'm':
+      return n * 60;
+    case 'h':
+      return n * 3600;
+    default:
+      return 60;
+  }
+}
+
 // ============================================================================
 // MockRulerClient — dev / test
 // ============================================================================
@@ -266,5 +543,26 @@ export class MockRulerClient implements RulerClient {
     groupName: string
   ): Promise<void> {
     this.logger.debug(`MockRuler delete: ds=${datasource.id} ns=${namespace} group=${groupName}`);
+  }
+
+  async getRuleGroup(
+    _client: AlertingOSClient,
+    datasource: Datasource,
+    namespace: string,
+    groupName: string
+  ): Promise<GeneratedRuleGroup | null> {
+    this.logger.debug(
+      `MockRuler getRuleGroup: ds=${datasource.id} ns=${namespace} group=${groupName} → null`
+    );
+    return null;
+  }
+
+  async listRuleGroups(
+    _client: AlertingOSClient,
+    datasource: Datasource,
+    namespace: string
+  ): Promise<GeneratedRuleGroup[]> {
+    this.logger.debug(`MockRuler listRuleGroups: ds=${datasource.id} ns=${namespace} → []`);
+    return [];
   }
 }

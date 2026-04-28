@@ -12,7 +12,7 @@
  *   - No retry: transport.request called exactly once on failure
  */
 
-import { load as yamlLoad } from 'js-yaml';
+import { dump as yamlDump, load as yamlLoad } from 'js-yaml';
 import { DirectQueryRulerClient, ruleGroupToYaml } from '../ruler_client';
 import { SloRulerError } from '../../../../common/slo/slo_errors';
 import type { AlertingOSClient, Datasource, Logger } from '../../../../common/types/alerting/types';
@@ -279,6 +279,271 @@ describe('DirectQueryRulerClient error classification', () => {
     await expect(
       svc.deleteRuleGroup(client, promDatasource(), 'ns', 'group-1')
     ).rejects.toMatchObject({ code: 'RULER_AUTH_FAILED', httpStatus: 401 });
+    expect(requestMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ============================================================================
+// W1.1 — Ruler probe (getRuleGroup, listRuleGroups, 404-tolerant delete)
+// ============================================================================
+
+/**
+ * Build a transport handler that inspects the requested path/method and
+ * returns/rejects accordingly. Mirrors `mockClient` but with a richer matcher
+ * so probe tests can assert the exact path + method in one place.
+ */
+function rejectWithStatus(statusCode: number, body: unknown) {
+  return { statusCode, body };
+}
+
+describe('DirectQueryRulerClient.getRuleGroup', () => {
+  it('GETs /_plugins/_directquery/_resources/{dqName}/api/v1/rules/{namespace}/{groupName} and parses YAML', async () => {
+    const group = sampleGroup();
+    const yamlBody = ruleGroupToYaml(group);
+    const { client, requestMock } = mockClient(async () => ({
+      statusCode: 200,
+      body: yamlBody,
+    }));
+    const svc = new DirectQueryRulerClient(noopLogger());
+
+    const parsed = await svc.getRuleGroup(
+      client,
+      promDatasource(),
+      'slo-generated-ws1',
+      group.groupName
+    );
+
+    expect(requestMock).toHaveBeenCalledTimes(1);
+    const call = requestMock.mock.calls[0][0] as { method: string; path: string };
+    expect(call.method).toBe('GET');
+    expect(call.path).toBe(
+      `/_plugins/_directquery/_resources/my-cortex-connection/api/v1/rules/slo-generated-ws1/${encodeURIComponent(
+        group.groupName
+      )}`
+    );
+
+    expect(parsed).not.toBeNull();
+    expect(parsed!.groupName).toBe(group.groupName);
+    expect(parsed!.interval).toBe(60);
+    expect(parsed!.rules).toHaveLength(2);
+    expect(parsed!.rules[0]).toMatchObject({
+      type: 'recording',
+      name: 'slo:sli_error:ratio_rate_5m:checkout_a1b2c3d4',
+    });
+    expect(parsed!.rules[1]).toMatchObject({
+      type: 'alerting',
+      name: 'SLO_BurnRate_PageQuick_checkout_a1b2c3d4',
+      for: '2m',
+    });
+  });
+
+  it('accepts a pre-parsed object body (transport decoded the YAML for us)', async () => {
+    const { client } = mockClient(async () => ({
+      statusCode: 200,
+      body: {
+        name: 'slo:probe_group_xyz',
+        interval: '30s',
+        rules: [{ record: 'rec_a', expr: 'vector(1)' }],
+      },
+    }));
+    const svc = new DirectQueryRulerClient(noopLogger());
+
+    const parsed = await svc.getRuleGroup(client, promDatasource(), 'ns', 'slo:probe_group_xyz');
+
+    expect(parsed).not.toBeNull();
+    expect(parsed!.groupName).toBe('slo:probe_group_xyz');
+    expect(parsed!.interval).toBe(30);
+    expect(parsed!.rules).toEqual([
+      expect.objectContaining({ type: 'recording', name: 'rec_a', expr: 'vector(1)' }),
+    ]);
+  });
+
+  it('404 → resolves to null (caller distinguishes "missing" from "unreachable")', async () => {
+    const { client, requestMock } = mockClient(() =>
+      Promise.reject(rejectWithStatus(404, 'rule group not found'))
+    );
+    const svc = new DirectQueryRulerClient(noopLogger());
+
+    const result = await svc.getRuleGroup(client, promDatasource(), 'ns', 'group-missing');
+
+    expect(result).toBeNull();
+    expect(requestMock).toHaveBeenCalledTimes(1);
+    const call = requestMock.mock.calls[0][0] as { method: string };
+    expect(call.method).toBe('GET');
+  });
+
+  it('500 → throws SloRulerError with RULER_UNREACHABLE', async () => {
+    const { client, requestMock } = mockClient(() =>
+      Promise.reject(rejectWithStatus(500, 'internal server error'))
+    );
+    const svc = new DirectQueryRulerClient(noopLogger());
+
+    await expect(svc.getRuleGroup(client, promDatasource(), 'ns', 'group-1')).rejects.toMatchObject(
+      {
+        name: 'SloRulerError',
+        code: 'RULER_UNREACHABLE',
+        httpStatus: 500,
+      }
+    );
+    expect(requestMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('401 → throws SloRulerError with RULER_AUTH_FAILED', async () => {
+    const { client } = mockClient(() => Promise.reject(rejectWithStatus(401, 'no org id')));
+    const svc = new DirectQueryRulerClient(noopLogger());
+
+    await expect(svc.getRuleGroup(client, promDatasource(), 'ns', 'group-1')).rejects.toMatchObject(
+      {
+        name: 'SloRulerError',
+        code: 'RULER_AUTH_FAILED',
+        httpStatus: 401,
+        rawBody: 'no org id',
+      }
+    );
+  });
+
+  it('200 with unrecognized body shape → returns null (best-effort probe)', async () => {
+    const { client } = mockClient(async () => ({ statusCode: 200, body: { unrelated: 'blob' } }));
+    const svc = new DirectQueryRulerClient(noopLogger());
+
+    const result = await svc.getRuleGroup(client, promDatasource(), 'ns', 'group-1');
+    expect(result).toBeNull();
+  });
+});
+
+describe('DirectQueryRulerClient.listRuleGroups', () => {
+  it('GETs /_plugins/_directquery/_resources/{dqName}/api/v1/rules/{namespace}', async () => {
+    const { client, requestMock } = mockClient(async () => ({ statusCode: 200, body: '' }));
+    const svc = new DirectQueryRulerClient(noopLogger());
+
+    await svc.listRuleGroups(client, promDatasource(), 'slo-generated-ws1');
+
+    expect(requestMock).toHaveBeenCalledTimes(1);
+    const call = requestMock.mock.calls[0][0] as { method: string; path: string };
+    expect(call.method).toBe('GET');
+    expect(call.path).toBe(
+      '/_plugins/_directquery/_resources/my-cortex-connection/api/v1/rules/slo-generated-ws1'
+    );
+  });
+
+  it('Cortex namespace-keyed envelope → returns all groups parsed', async () => {
+    const yamlEnvelope = yamlDump({
+      'slo-generated-ws1': [
+        {
+          name: 'slo:group_aaa',
+          interval: '1m',
+          rules: [{ record: 'rec_a', expr: 'vector(1)', labels: { slo_id: 'slo-a' } }],
+        },
+        {
+          name: 'slo:group_bbb',
+          interval: '2m',
+          rules: [
+            { alert: 'SLO_Burn_b', expr: 'vector(2)', for: '5m', annotations: { summary: 'x' } },
+          ],
+        },
+      ],
+    });
+    const { client, requestMock } = mockClient(async () => ({
+      statusCode: 200,
+      body: yamlEnvelope,
+    }));
+    const svc = new DirectQueryRulerClient(noopLogger());
+
+    const groups = await svc.listRuleGroups(client, promDatasource(), 'slo-generated-ws1');
+
+    expect(requestMock).toHaveBeenCalledTimes(1);
+    expect(groups).toHaveLength(2);
+    expect(groups[0]).toMatchObject({
+      groupName: 'slo:group_aaa',
+      interval: 60,
+      rules: [
+        expect.objectContaining({
+          type: 'recording',
+          name: 'rec_a',
+          labels: { slo_id: 'slo-a' },
+        }),
+      ],
+    });
+    expect(groups[1]).toMatchObject({
+      groupName: 'slo:group_bbb',
+      interval: 120,
+      rules: [
+        expect.objectContaining({
+          type: 'alerting',
+          name: 'SLO_Burn_b',
+          for: '5m',
+          annotations: { summary: 'x' },
+        }),
+      ],
+    });
+  });
+
+  it('200 with empty-object body → returns []', async () => {
+    const { client } = mockClient(async () => ({ statusCode: 200, body: {} }));
+    const svc = new DirectQueryRulerClient(noopLogger());
+
+    const groups = await svc.listRuleGroups(client, promDatasource(), 'slo-generated-ws1');
+    expect(groups).toEqual([]);
+  });
+
+  it('404 → resolves to [] (namespace exists but empty / not yet created)', async () => {
+    const { client, requestMock } = mockClient(() =>
+      Promise.reject(rejectWithStatus(404, 'namespace not found'))
+    );
+    const svc = new DirectQueryRulerClient(noopLogger());
+
+    const groups = await svc.listRuleGroups(client, promDatasource(), 'slo-generated-ws-empty');
+    expect(groups).toEqual([]);
+    expect(requestMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('500 → throws SloRulerError with RULER_UNREACHABLE', async () => {
+    const { client, requestMock } = mockClient(() =>
+      Promise.reject(rejectWithStatus(500, 'upstream gone'))
+    );
+    const svc = new DirectQueryRulerClient(noopLogger());
+
+    await expect(svc.listRuleGroups(client, promDatasource(), 'ns')).rejects.toMatchObject({
+      name: 'SloRulerError',
+      code: 'RULER_UNREACHABLE',
+      httpStatus: 500,
+    });
+    expect(requestMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('DirectQueryRulerClient.deleteRuleGroup — 404 tolerance', () => {
+  it('404 → resolves successfully (target already gone)', async () => {
+    const { client, requestMock } = mockClient(() =>
+      Promise.reject(rejectWithStatus(404, 'rule group not found'))
+    );
+    const svc = new DirectQueryRulerClient(noopLogger());
+
+    await expect(
+      svc.deleteRuleGroup(client, promDatasource(), 'ns', 'group-already-gone')
+    ).resolves.toBeUndefined();
+
+    expect(requestMock).toHaveBeenCalledTimes(1);
+    const call = requestMock.mock.calls[0][0] as { method: string; path: string };
+    expect(call.method).toBe('DELETE');
+    expect(call.path).toBe(
+      '/_plugins/_directquery/_resources/my-cortex-connection/api/v1/rules/ns/group-already-gone'
+    );
+  });
+
+  it('500 still throws RULER_UNREACHABLE (only 404 is tolerated)', async () => {
+    const { client, requestMock } = mockClient(() =>
+      Promise.reject(rejectWithStatus(500, 'upstream crashed'))
+    );
+    const svc = new DirectQueryRulerClient(noopLogger());
+
+    await expect(
+      svc.deleteRuleGroup(client, promDatasource(), 'ns', 'group-1')
+    ).rejects.toMatchObject({
+      name: 'SloRulerError',
+      code: 'RULER_UNREACHABLE',
+      httpStatus: 500,
+    });
     expect(requestMock).toHaveBeenCalledTimes(1);
   });
 });

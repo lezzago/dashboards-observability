@@ -46,6 +46,40 @@ export interface SloRulerErrorEnvelope {
 }
 
 /**
+ * Rule-health state returned by `GET ${SLO_BASE}/{id}/rule_health`.
+ *
+ * - `ok`: every expected ruler group is present.
+ * - `rules_partial`: some (but not all) expected groups are present — typically
+ *   a half-finished create or a partial ruler purge.
+ * - `rules_missing`: ruler is reachable but no expected groups are present.
+ * - `ruler_unreachable`: the health probe could not contact the ruler; the
+ *   `rulerErrorCode` field carries the coarse failure mode for the UI to
+ *   surface a retry hint vs. a config-fix hint.
+ *
+ * Types are declared locally (rather than imported from `common/slo/slo_types`)
+ * because parallel workstreams are editing `slo_types.ts` in flight.
+ */
+export type RuleHealthState = 'ok' | 'rules_partial' | 'rules_missing' | 'ruler_unreachable';
+
+export interface RuleHealthResponse {
+  sloId: string;
+  state: RuleHealthState;
+  expectedGroups: string[];
+  presentGroups: string[];
+  missingGroups: string[];
+  rulerErrorCode?: 'RULER_UNREACHABLE' | 'RULER_AUTH_FAILED' | 'RULER_VALIDATION_FAILED';
+  computedAt: string;
+}
+
+export interface RepairResponse {
+  sloId: string;
+  /** Whether a ruler upsert actually happened this call (false = already healthy, no-op). */
+  repaired: boolean;
+  /** Post-repair rule-health snapshot so the UI can re-render in one round-trip. */
+  health: RuleHealthResponse;
+}
+
+/**
  * Extracts the ruler envelope from an OSD http error, if one is present.
  *
  * OSD's router wraps `res.customError({ body: { message, attributes } })`
@@ -139,5 +173,13 @@ export class SloApiClient {
 
   probeSli(body: ProbeSliRequest): Promise<ProbeSliResponse> {
     return this.http.post(`${SLO_BASE}/probe-sli`, { body: JSON.stringify(body) });
+  }
+
+  repair(id: string): Promise<RepairResponse> {
+    return this.http.post(`${SLO_BASE}/${encodeURIComponent(id)}/repair`);
+  }
+
+  getRuleHealth(id: string): Promise<RuleHealthResponse> {
+    return this.http.get(`${SLO_BASE}/${encodeURIComponent(id)}/rule_health`);
   }
 }
