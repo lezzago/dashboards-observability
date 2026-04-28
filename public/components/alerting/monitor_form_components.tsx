@@ -206,7 +206,7 @@ export const AnnotationEditor: React.FC<{
     summary: 'Brief alert summary, e.g. "CPU usage above 80% on {{ $labels.instance }}"',
     description: 'Detailed description of what this alert means and potential impact',
     runbook_url: 'https://wiki.example.com/runbooks/...',
-    dashboard_url: 'https://grafana.example.com/d/...',
+    dashboard_url: 'https://dashboards.example.com/d/...',
   };
 
   return (
