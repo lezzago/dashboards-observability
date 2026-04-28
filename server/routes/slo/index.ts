@@ -20,6 +20,7 @@ import { SloService, SloValidationError } from '../../../common/slo/slo_service'
 import type { AlertingOSClient, Datasource } from '../../../common/types/alerting/types';
 import type { InMemoryDatasourceService } from '../../services/alerting/datasource_service';
 import type { DatasourceDiscoveryService } from '../../services/alerting/datasource_discovery';
+import type { DirectQueryPrometheusBackend } from '../../services/alerting/directquery_prometheus_backend';
 import type { RulerClient } from '../../services/slo/ruler_client';
 import {
   handleCreateSLO,
@@ -32,6 +33,7 @@ import {
   handlePreviewSLORules,
   handleUpdateSLO,
 } from './handlers';
+import { registerProbeSliRoute } from './probe_sli';
 
 /**
  * OSD context type with the optional `dataSource` plugin extension. Same
@@ -408,8 +410,12 @@ export function registerSloRoutes(
   logger: Logger,
   rulerClient?: RulerClient,
   datasourceService?: InMemoryDatasourceService,
-  discoveryService?: DatasourceDiscoveryService
+  discoveryService?: DatasourceDiscoveryService,
+  prometheusBackend?: DirectQueryPrometheusBackend
 ) {
+  if (prometheusBackend) {
+    registerProbeSliRoute(router, logger, prometheusBackend, datasourceService, discoveryService);
+  }
   router.get(
     {
       path: SLO_BASE,
@@ -435,7 +441,7 @@ export function registerSloRoutes(
       const filters = {
         page: q.page ? parseInt(q.page, 10) : undefined,
         pageSize: q.pageSize ? parseInt(q.pageSize, 10) : undefined,
-        datasourceId: q.datasourceId,
+        datasourceId: q.datasourceId ? q.datasourceId.split(',').filter(Boolean) : undefined,
         state: q.state
           ? (q.state.split(',') as Array<
               'breached' | 'warning' | 'ok' | 'no_data' | 'stale' | 'disabled'

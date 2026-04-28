@@ -131,7 +131,8 @@ export function setupRoutes({
       logger,
       rulerClient,
       alertingDatasourceService,
-      datasourceDiscoveryService
+      datasourceDiscoveryService,
+      promBackend
     );
   }
 }
