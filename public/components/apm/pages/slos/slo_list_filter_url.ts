@@ -39,6 +39,9 @@ export function deserializeFiltersFromSearch(search: string): SloListFilters {
   const params = new URLSearchParams(search.startsWith('?') ? search.slice(1) : search);
   const out: SloListFilters = {};
 
+  const datasourceId = parseList(params.get('datasourceId'));
+  if (datasourceId.length) out.datasourceId = datasourceId;
+
   const state = parseList(params.get('state')).filter((s): s is SloHealthState =>
     STATES.has(s as SloHealthState)
   );
@@ -79,6 +82,7 @@ export function deserializeFiltersFromSearch(search: string): SloListFilters {
 /** Serialize listing filters into a stable URL query string (no leading ?). */
 export function serializeFiltersToSearch(filters: SloListFilters): string {
   const params = new URLSearchParams();
+  if (filters.datasourceId?.length) params.set('datasourceId', filters.datasourceId.join(','));
   if (filters.state?.length) params.set('state', filters.state.join(','));
   if (filters.sliBackend?.length) params.set('sliBackend', filters.sliBackend.join(','));
   if (filters.sliLeafType?.length) params.set('sliLeafType', filters.sliLeafType.join(','));

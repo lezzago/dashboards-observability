@@ -18,10 +18,11 @@ export class InMemorySloStore implements ISloStore {
     return this.docs.get(id) ?? null;
   }
 
-  async list(datasourceId?: string): Promise<SloDocument[]> {
+  async list(datasourceIds?: string[]): Promise<SloDocument[]> {
     const all = Array.from(this.docs.values());
-    if (!datasourceId) return all;
-    return all.filter((d) => d.spec.datasourceId === datasourceId);
+    if (!datasourceIds || datasourceIds.length === 0) return all;
+    const set = new Set(datasourceIds);
+    return all.filter((d) => set.has(d.spec.datasourceId));
   }
 
   async save(doc: SloDocument): Promise<void> {

@@ -16,13 +16,21 @@ import React, { useMemo, useState } from 'react';
 import {
   EuiAccordion,
   EuiButtonGroup,
+  EuiCheckbox,
   EuiCheckboxGroup,
   EuiFieldSearch,
+  EuiFlexGroup,
+  EuiFlexItem,
   EuiHealth,
   EuiHorizontalRule,
+  EuiIcon,
+  EuiLoadingSpinner,
   EuiSpacer,
   EuiText,
+  EuiToolTip,
 } from '@elastic/eui';
+import { euiThemeVars } from '@osd/ui-shared-deps/theme';
+import type { Datasource } from '../../../../../common/types/alerting/types';
 import type {
   SloHealthState,
   SloListFilters,
@@ -30,7 +38,13 @@ import type {
 } from '../../../../../common/slo/slo_types';
 import { SLO_HEALTH_COLOR, SLO_HEALTH_ORDER } from '../../../../../common/slo/state';
 
-type SliBackend = 'prometheus' | 'opensearch';
+/**
+ * Max number of Prometheus datasources that can be selected simultaneously.
+ * Matches the Alert Manager cap so users see consistent behavior across the
+ * plugin's cross-datasource views.
+ */
+export const DATASOURCE_SELECTION_CAP = 5;
+
 type SloMode = 'active' | 'shadow';
 
 const STATE_LABEL: Record<SloHealthState, string> = {
@@ -40,11 +54,6 @@ const STATE_LABEL: Record<SloHealthState, string> = {
   no_data: 'No data',
   stale: 'Stale',
   disabled: 'Disabled',
-};
-
-const SLI_BACKEND_LABEL: Record<SliBackend, string> = {
-  prometheus: 'Prometheus',
-  opensearch: 'OpenSearch',
 };
 
 const MODE_LABEL: Record<SloMode, string> = {
@@ -60,6 +69,12 @@ export interface SloListFilterPanelProps {
    * Deliberately the *filtered* set — we don't fire a second unfiltered fetch.
    */
   items: SloSummary[];
+  /** Prometheus datasources available to select (cap = 5). */
+  datasources?: Datasource[];
+  datasourcesLoading?: boolean;
+  datasourcesError?: Error | null;
+  /** Fires when the user hits the selection cap; the parent can show a toast. */
+  onDatasourceCapReached?: () => void;
 }
 
 function distinctValues<T>(items: T[], pick: (t: T) => string | string[] | undefined): string[] {
@@ -163,10 +178,203 @@ const FacetAccordion: React.FC<FacetAccordionProps> = ({
   );
 };
 
+/**
+ * Capped multi-select for Prometheus datasources. Differs from FacetAccordion
+ * because unchecked options are disabled once the cap is reached — the Alert
+ * Manager precedent for the same UX.
+ */
+interface DatasourceFacetProps {
+  datasources: Datasource[];
+  selected: string[] | undefined;
+  onChange: (next: string[] | undefined) => void;
+  loading: boolean;
+  error: Error | null;
+  cap: number;
+  onCapReached?: () => void;
+}
+
+const DatasourceFacet: React.FC<DatasourceFacetProps> = ({
+  datasources,
+  selected,
+  onChange,
+  loading,
+  error,
+  cap,
+  onCapReached,
+}) => {
+  const [query, setQuery] = useState('');
+  const selectedSet = useMemo(() => new Set(selected ?? []), [selected]);
+  const visible = useMemo(() => {
+    if (!query.trim()) return datasources;
+    const q = query.toLowerCase();
+    return datasources.filter((d) => d.name.toLowerCase().includes(q));
+  }, [datasources, query]);
+
+  const atCap = selectedSet.size >= cap;
+
+  const toggle = (id: string) => {
+    if (selectedSet.has(id)) {
+      const next = Array.from(selectedSet);
+      const idx = next.indexOf(id);
+      next.splice(idx, 1);
+      onChange(next.length === 0 ? undefined : next);
+      return;
+    }
+    if (atCap) {
+      onCapReached?.();
+      return;
+    }
+    const next = [...selectedSet, id];
+    onChange(next);
+  };
+
+  const buttonContent = (
+    <EuiFlexGroup gutterSize="xs" alignItems="center" responsive={false}>
+      <EuiFlexItem grow={false}>
+        <EuiText size="xs">
+          <strong>Prometheus datasources</strong>
+          {selectedSet.size > 0 ? (
+            <span style={{ fontWeight: 400, marginLeft: 4 }}>
+              ({selectedSet.size}/{cap})
+            </span>
+          ) : null}
+        </EuiText>
+      </EuiFlexItem>
+    </EuiFlexGroup>
+  );
+
+  return (
+    <EuiAccordion
+      id="slosFilterAccordion-datasource"
+      buttonContent={buttonContent}
+      initialIsOpen
+      data-test-subj="slosFilterAccordion-datasource"
+    >
+      <EuiSpacer size="xs" />
+      <EuiText size="xs" color="subdued">
+        Scope the catalog to up to {cap} datasources.
+      </EuiText>
+      <EuiSpacer size="xs" />
+
+      {loading ? (
+        <EuiFlexGroup gutterSize="xs" alignItems="center" responsive={false}>
+          <EuiFlexItem grow={false}>
+            <EuiLoadingSpinner size="s" />
+          </EuiFlexItem>
+          <EuiFlexItem grow={false}>
+            <EuiText size="xs" color="subdued">
+              Loading datasources…
+            </EuiText>
+          </EuiFlexItem>
+        </EuiFlexGroup>
+      ) : error ? (
+        <EuiFlexGroup gutterSize="xs" alignItems="center" responsive={false}>
+          <EuiFlexItem grow={false}>
+            <EuiIcon type="alert" color="danger" size="s" />
+          </EuiFlexItem>
+          <EuiFlexItem grow={false}>
+            <EuiText size="xs" color="danger">
+              Failed to load datasources
+            </EuiText>
+          </EuiFlexItem>
+        </EuiFlexGroup>
+      ) : datasources.length === 0 ? (
+        <EuiText size="xs" color="subdued">
+          No Prometheus datasources registered.
+        </EuiText>
+      ) : (
+        <>
+          <EuiFieldSearch
+            placeholder="Search datasources"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            isClearable
+            compressed
+            fullWidth
+            data-test-subj="slosFilterAccordion-datasource-search"
+          />
+          <EuiSpacer size="xs" />
+          {atCap && (
+            <>
+              <EuiFlexGroup gutterSize="xs" alignItems="center" responsive={false}>
+                <EuiFlexItem grow={false}>
+                  <EuiIcon type="iInCircle" color="warning" size="s" />
+                </EuiFlexItem>
+                <EuiFlexItem>
+                  <EuiText size="xs" color="warning">
+                    Cap reached ({cap} of {cap}). Deselect one to pick another.
+                  </EuiText>
+                </EuiFlexItem>
+              </EuiFlexGroup>
+              <EuiSpacer size="xs" />
+            </>
+          )}
+          <div
+            style={{
+              maxHeight: 200,
+              overflowY: 'auto',
+              paddingRight: 4,
+              marginRight: -4,
+            }}
+            data-test-subj="slosFilterAccordion-datasource-list"
+          >
+            {visible.map((ds) => {
+              const isSelected = selectedSet.has(ds.id);
+              const disabled = !isSelected && atCap;
+              const checkbox = (
+                <EuiCheckbox
+                  id={`slos-ds-${ds.id}`}
+                  label={
+                    <EuiText size="xs" style={{ lineHeight: '16px' }}>
+                      {ds.name}
+                    </EuiText>
+                  }
+                  checked={isSelected}
+                  disabled={disabled}
+                  onChange={() => toggle(ds.id)}
+                  compressed
+                  data-test-subj={`slosFilterDatasourceCheckbox-${ds.id}`}
+                />
+              );
+              return (
+                <div
+                  key={ds.id}
+                  style={{
+                    padding: '2px 0',
+                    opacity: disabled ? 0.55 : 1,
+                    borderBottom: `1px solid ${euiThemeVars.euiColorLightestShade}`,
+                  }}
+                >
+                  {disabled ? (
+                    <EuiToolTip content={`Max ${cap} datasources; deselect one first.`}>
+                      <span>{checkbox}</span>
+                    </EuiToolTip>
+                  ) : (
+                    checkbox
+                  )}
+                </div>
+              );
+            })}
+            {visible.length === 0 && (
+              <EuiText size="xs" color="subdued">
+                No datasources match &quot;{query}&quot;.
+              </EuiText>
+            )}
+          </div>
+        </>
+      )}
+    </EuiAccordion>
+  );
+};
+
 export const SloListFilterPanel: React.FC<SloListFilterPanelProps> = ({
   filters,
   onChange,
   items,
+  datasources = [],
+  datasourcesLoading = false,
+  datasourcesError = null,
+  onDatasourceCapReached,
 }) => {
   const allServices = useMemo(() => distinctValues(items, (s) => s.service), [items]);
   const allTeams = useMemo(() => distinctValues(items, (s) => s.owner.teams), [items]);
@@ -177,6 +385,17 @@ export const SloListFilterPanel: React.FC<SloListFilterPanelProps> = ({
 
   return (
     <div data-test-subj="slosListingFilterPanel">
+      <DatasourceFacet
+        datasources={datasources}
+        selected={filters.datasourceId}
+        onChange={(next) => patch({ datasourceId: next })}
+        loading={datasourcesLoading}
+        error={datasourcesError}
+        cap={DATASOURCE_SELECTION_CAP}
+        onCapReached={onDatasourceCapReached}
+      />
+      <EuiHorizontalRule margin="xs" />
+
       <FacetAccordion
         id="slosFilterAccordion-state"
         label="State"
@@ -201,21 +420,6 @@ export const SloListFilterPanel: React.FC<SloListFilterPanelProps> = ({
         options={allLeafTypes.map((v) => ({ id: v, label: v }))}
         selected={filters.sliLeafType}
         onToggle={(id) => patch({ sliLeafType: toggleInArray(filters.sliLeafType, id) })}
-      />
-      <EuiHorizontalRule margin="xs" />
-
-      <FacetAccordion
-        id="slosFilterAccordion-sliBackend"
-        label="SLI backend"
-        dataTestSubj="slosFilterAccordion-sliBackend"
-        options={(['prometheus', 'opensearch'] as const).map((v) => ({
-          id: v,
-          label: SLI_BACKEND_LABEL[v],
-        }))}
-        selected={filters.sliBackend}
-        onToggle={(id) =>
-          patch({ sliBackend: toggleInArray(filters.sliBackend, id as SliBackend) })
-        }
       />
       <EuiHorizontalRule margin="xs" />
 

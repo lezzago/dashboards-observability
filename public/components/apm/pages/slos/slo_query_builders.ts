@@ -184,6 +184,55 @@ export function buildTotalEventsCountQuery(
   return `sum(increase(${bucket}{${dim}, le="+Inf"}[${window}]))`;
 }
 
+/**
+ * "Any-data" coverage probe — a PromQL expression that returns a non-empty
+ * vector when the SLI's source metric has *any* matching series in the
+ * datasource, regardless of whether the current chart window is populated.
+ *
+ * Subtlety: `sum(<metric>{<sel>})` over an empty selector yields `0`, not an
+ * empty vector. That would mask the "no matching series" case. To avoid the
+ * false positive we probe the *raw* selector (no aggregation) for availability
+ * / latency SLIs, and for custom SLIs we require a nonzero value over a
+ * lookback window — stale zero is treated as "metric missing from operator's
+ * point of view".
+ *
+ *   - availability: `count(last_over_time(<metric>{<dim>}[1h]))`
+ *   - latency:      `count(last_over_time(<bucket>{<dim>, le="+Inf"}[1h]))`
+ *   - custom:       `(max_over_time((<totalQuery>)[1h:5m])) > bool 0`
+ *
+ * Returns `null` for SLIs where a probe can't be formed (composite, opensearch
+ * backend, or custom without an expression).
+ */
+export function buildCoverageProbeQuery(slo: SloDocument, _objective: Objective): string | null {
+  if (slo.spec.sli.type !== 'single') return null;
+  const def = slo.spec.sli.definition;
+  if (def.backend !== 'prometheus') return null;
+
+  if (def.type === 'custom') {
+    if (!def.customExpr) return null;
+    const base =
+      def.customExpr.mode === 'raw' ? def.customExpr.errorRatioQuery : def.customExpr.totalQuery;
+    if (!base) return null;
+    // `max_over_time(<expr>[1h:5m]) > 0` keeps the result vector only when
+    // the expression produced a nonzero value in the last hour. An expression
+    // whose selectors match nothing emits `sum=0` → filtered out; a real
+    // traffic-backed service emits >0 at least once per hour → kept.
+    return `(max_over_time((${base})[1h:5m])) > 0`;
+  }
+
+  const dim = buildSelectors(slo, false);
+  if (def.type === 'availability') {
+    const metric = def.metric;
+    if (!metric) return null;
+    const counter = metric.endsWith('_total') ? metric : ensureCountMetric(metric);
+    return `count(last_over_time(${counter}{${dim}}[1h]))`;
+  }
+
+  // latency_threshold
+  const bucket = ensureBucketMetric(def.metric ?? '');
+  return `count(last_over_time(${bucket}{${dim}, le="+Inf"}[1h]))`;
+}
+
 /** Request rate per second, evaluated with the SLI's dimensions. */
 export function buildRequestRateQuery(slo: SloDocument): string | null {
   if (slo.spec.sli.type !== 'single') return null;

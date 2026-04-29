@@ -106,7 +106,7 @@ export class SavedObjectSloStore implements ISloStore {
     }
   }
 
-  async list(datasourceId?: string): Promise<SloDocument[]> {
+  async list(datasourceIds?: string[]): Promise<SloDocument[]> {
     const results: SloDocument[] = [];
     let page = 1;
     const perPage = 1000;
@@ -117,9 +117,12 @@ export class SavedObjectSloStore implements ISloStore {
         page: number;
         filter?: string;
       } = { type: SO_TYPE, perPage, page };
-      if (datasourceId) {
-        const escaped = datasourceId.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-        findOpts.filter = `${SO_TYPE}.attributes.datasourceId: "${escaped}"`;
+      if (datasourceIds && datasourceIds.length > 0) {
+        const esc = (v: string) => v.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+        const clauses = datasourceIds
+          .map((id) => `${SO_TYPE}.attributes.datasourceId: "${esc(id)}"`)
+          .join(' OR ');
+        findOpts.filter = `(${clauses})`;
       }
       const response = await this.client.find(findOpts);
       for (const obj of response.saved_objects as SavedObjectEnvelope[]) {
