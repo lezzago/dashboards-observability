@@ -28,12 +28,8 @@
  * surface the service consumes — no OSD SavedObjectsClient required.
  */
 
-import {
-  SloDeployContext,
-  SloRulerClient,
-  SloRuleRefStoreLite,
-  SloService,
-} from '../slo_service';
+/* eslint-disable max-classes-per-file */
+import { SloDeployContext, SloRulerClient, SloRuleRefStoreLite, SloService } from '../slo_service';
 import { InMemorySloStore } from '../slo_store';
 import {
   DEFAULT_MWMBR_TIERS,
@@ -42,10 +38,15 @@ import {
 } from '../slo_promql_generator';
 import { computeSliFingerprint } from '../slo_sli_fingerprint';
 import type { AlertingOSClient, Datasource, Logger } from '../../types/alerting/types';
-import type { GeneratedRuleGroup, ISloStore, SloDocument, SloSpec } from '../slo_types';
+import type { GeneratedRuleGroup, ISloStore, SloSpec } from '../slo_types';
 
 function noopLogger(): Logger {
-  return { info: () => undefined, warn: () => undefined, error: () => undefined, debug: () => undefined };
+  return {
+    info: () => undefined,
+    warn: () => undefined,
+    error: () => undefined,
+    debug: () => undefined,
+  };
 }
 
 function validSpec(overrides: Partial<SloSpec> = {}): SloSpec {
@@ -214,13 +215,14 @@ describe('SloService dedup — create (W3.8)', () => {
     expect(ruler.hasGroup(namespace, recGroupName)).toBe(true);
     expect(ruler.hasGroup(namespace, alertGroupName)).toBe(true);
     // SO carries the dedup fields
-    if (doc.status.provisioning.backend === 'prometheus') {
-      expect(doc.status.provisioning.recordingFingerprints).toEqual({
-        [spec.objectives[0].name]: fp,
-      });
-      expect(doc.status.provisioning.alertGroupName).toBe(alertGroupName);
-      expect(doc.status.provisioning.needsRedeploy).toBe(false);
-    }
+    const prov = doc.status.provisioning;
+    expect(prov.backend).toBe('prometheus');
+    const promProv = prov.backend === 'prometheus' ? prov : undefined;
+    expect(promProv?.recordingFingerprints).toEqual({
+      [spec.objectives[0].name]: fp,
+    });
+    expect(promProv?.alertGroupName).toBe(alertGroupName);
+    expect(promProv?.needsRedeploy).toBe(false);
   });
 
   it('second create sharing the same fingerprint: ref 1→2, recording NOT re-upserted', async () => {
@@ -325,11 +327,7 @@ describe('SloService dedup — update (W3.8)', () => {
       },
     };
     await svc.update(docA.id, { spec: nextSpec, version: docA.status.version }, 'alice', deploy);
-    const fpNew = computeSliFingerprint(
-      specA.datasourceId,
-      nextSpec.sli!,
-      specA.objectives[0]
-    )!;
+    const fpNew = computeSliFingerprint(specA.datasourceId, nextSpec.sli!, specA.objectives[0])!;
     expect(fpNew).not.toBe(fpOld);
     expect(refStore.refcount('ws-001', specA.datasourceId, fpOld)).toBe(1);
     expect(refStore.refcount('ws-001', specA.datasourceId, fpNew)).toBe(1);

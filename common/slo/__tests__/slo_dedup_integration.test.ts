@@ -25,29 +25,29 @@
  *      the recording group + ref SO are gone.
  */
 
-import {
-  SloDeployContext,
-  SloRuleRefStoreLite,
-  SloService,
-} from '../slo_service';
+import { SloDeployContext, SloRuleRefStoreLite, SloService } from '../slo_service';
 import { InMemorySloStore } from '../slo_store';
-import {
-  DEFAULT_MWMBR_TIERS,
-  dedupAlertGroupName,
-  dedupRecordingGroupName,
-} from '../slo_promql_generator';
+import { DEFAULT_MWMBR_TIERS, dedupRecordingGroupName } from '../slo_promql_generator';
 import { computeSliFingerprint } from '../slo_sli_fingerprint';
 import { FakeRulerClient } from './fake_ruler_client';
 import { createSloReconciler } from '../../../server/services/slo/reconciler';
 import { createReconcilerMetrics } from '../../../server/services/slo/reconciler_metrics';
 import { createRuleHealthChecker } from '../../../server/services/slo/rule_health_checker';
 import { InMemoryDatasourceService } from '../../../server/services/alerting/datasource_service';
-import type { SloRuleRefStore, SloRuleRefDoc } from '../../../server/services/slo/slo_rule_ref_store';
-import type { AlertingOSClient, Datasource, Logger } from '../../types/alerting/types';
+import type {
+  SloRuleRefStore,
+  SloRuleRefDoc,
+} from '../../../server/services/slo/slo_rule_ref_store';
+import type { AlertingOSClient, Logger } from '../../types/alerting/types';
 import type { SloSpec } from '../slo_types';
 
 function noopLogger(): Logger {
-  return { info: () => undefined, warn: () => undefined, error: () => undefined, debug: () => undefined };
+  return {
+    info: () => undefined,
+    warn: () => undefined,
+    error: () => undefined,
+    debug: () => undefined,
+  };
 }
 
 function validSpec(overrides: Partial<SloSpec> = {}): SloSpec {
@@ -283,21 +283,22 @@ describe('SloService dedup integration (W3.15)', () => {
       await svc.create({ spec }, 'alice', deploy);
     }
 
-    const fps = metrics.map((m) =>
-      computeSliFingerprint(
-        ds.id,
-        {
-          type: 'single',
-          definition: {
-            backend: 'prometheus',
-            type: 'availability',
-            calcMethod: 'events',
-            metric: m,
+    const fps = metrics.map(
+      (m) =>
+        computeSliFingerprint(
+          ds.id,
+          {
+            type: 'single',
+            definition: {
+              backend: 'prometheus',
+              type: 'availability',
+              calcMethod: 'events',
+              metric: m,
+            },
+            dimensions: [{ name: 'service', value: 'api-gateway' }],
           },
-          dimensions: [{ name: 'service', value: 'api-gateway' }],
-        },
-        { name: 'availability-99-9', target: 0.999 }
-      )!
+          { name: 'availability-99-9', target: 0.999 }
+        )!
     );
     expect(new Set(fps).size).toBe(3);
 
@@ -348,12 +349,23 @@ describe('SloService dedup integration (W3.15)', () => {
       deploy
     );
 
-    const fpOld = computeSliFingerprint(ds.id, oldSli, { name: 'availability-99-9', target: 0.999 })!;
-    const fpNew = computeSliFingerprint(ds.id, newSli, { name: 'availability-99-9', target: 0.999 })!;
+    const fpOld = computeSliFingerprint(ds.id, oldSli, {
+      name: 'availability-99-9',
+      target: 0.999,
+    })!;
+    const fpNew = computeSliFingerprint(ds.id, newSli, {
+      name: 'availability-99-9',
+      target: 0.999,
+    })!;
     expect(refStore.refcount(ds.id, ds.id, fpOld)).toBe(2);
 
     // Move A to the new SLI.
-    await svc.update(docA.id, { spec: { sli: newSli }, version: docA.status.version }, 'alice', deploy);
+    await svc.update(
+      docA.id,
+      { spec: { sli: newSli }, version: docA.status.version },
+      'alice',
+      deploy
+    );
 
     expect(refStore.refcount(ds.id, ds.id, fpOld)).toBe(1);
     expect(refStore.refcount(ds.id, ds.id, fpNew)).toBe(1);
@@ -376,11 +388,7 @@ describe('SloService dedup integration (W3.15)', () => {
       deploy
     );
 
-    const fp = computeSliFingerprint(
-      ds.id,
-      docA.spec.sli,
-      docA.spec.objectives[0]
-    )!;
+    const fp = computeSliFingerprint(ds.id, docA.spec.sli, docA.spec.objectives[0])!;
     const namespace = `slo-generated-${ds.id}`;
     const recGroupName = dedupRecordingGroupName(fp);
 

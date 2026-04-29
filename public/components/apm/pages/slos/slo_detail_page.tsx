@@ -786,7 +786,9 @@ export const SloDetailPage: React.FC<SloDetailPageProps> = ({
                               ? [
                                   {
                                     title: 'Recording groups',
-                                    description: `${new Set(Object.values(dedupFingerprints)).size} shared`,
+                                    description: `${
+                                      new Set(Object.values(dedupFingerprints)).size
+                                    } shared`,
                                   },
                                 ]
                               : []),
@@ -898,17 +900,18 @@ export const SloDetailPage: React.FC<SloDetailPageProps> = ({
                 <p>
                   The per-SLO alert group (
                   <code>{prov?.alertGroupName ?? prov?.ruleGroupName}</code>) is removed
-                  immediately. Shared recording rules are reference-counted: if no other
-                  SLO references the same SLI shape the recording group is queued for
-                  deletion, with a 24h grace period in case you re-create the SLO.
+                  immediately. Shared recording rules are reference-counted: if no other SLO
+                  references the same SLI shape the recording group is queued for deletion, with a
+                  24h grace period in case you re-create the SLO.
                 </p>
-                <p>External dashboards or visualizations pinned to these recording-rule
-                  names will keep working as long as at least one SLO still references
-                  them. This action cannot be undone.</p>
+                <p>
+                  External dashboards or visualizations pinned to these recording-rule names will
+                  keep working as long as at least one SLO still references them. This action cannot
+                  be undone.
+                </p>
               </>
             ) : (
-              <p>This tears down all generated Prometheus rules. The action cannot be
-                undone.</p>
+              <p>This tears down all generated Prometheus rules. The action cannot be undone.</p>
             )}
           </EuiConfirmModal>
         )}
