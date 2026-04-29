@@ -1024,22 +1024,17 @@ export class SloService {
     const existing = await this.store.get(id);
     if (!existing) return { deleted: false, generatedRuleNames: [] };
 
-    const provisioning = existing.status.provisioning;
-    const isDedupSo =
-      provisioning.backend === 'prometheus' &&
-      (provisioning.recordingFingerprints !== undefined ||
-        (typeof provisioning.alertGroupName === 'string' &&
-          provisioning.alertGroupName.length > 0));
-
     // Phase 3 dedup path: tear down the per-SLO alert group, decrement refs,
     // but never synchronously delete a shared recording group — the
     // reconciler's grace-period sweep (W3.11) owns recording-group cleanup.
-    if (this.dedupEnabled && isDedupSo) {
+    if (this.dedupEnabled && isDedupSo(existing)) {
       if (!deploy) {
         throw new SloRulerTeardownRequiredError(id, existing.spec.datasourceId);
       }
       return this.deleteDedup(existing, deploy);
     }
+
+    const provisioning = existing.status.provisioning;
 
     const needsRulerTeardown =
       provisioning.backend === 'prometheus' && !!provisioning.ruleGroupName;
@@ -1172,6 +1167,10 @@ export class SloService {
     const doc = await this.store.get(id);
     if (!doc) throw new SloNotFoundError(id);
 
+    if (this.dedupEnabled && isDedupSo(doc)) {
+      return this.repairDedup(doc, ctx);
+    }
+
     const expectedGroups = deriveExpectedGroups(doc);
     const namespace =
       doc.status.provisioning.backend === 'prometheus'
@@ -1225,6 +1224,127 @@ export class SloService {
 
     this.logger.info(
       `Repaired SLO: ${doc.id} (namespace=${namespace}, groups=${expectedGroups.join(',')})`
+    );
+    return { sloId: doc.id, repaired: true, health: post };
+  }
+
+  /**
+   * Phase 3 dedup-aware repair (bug-fix for W1.5 gap).
+   *
+   * The legacy `repair()` path above calls `generateSloRuleGroup`, which emits
+   * a single monolithic `slo:<slug>_<suffix>` group carrying identity labels
+   * on recording rules and no alert-group annotation. For dedup-shape SOs the
+   * expected ruler state is a split: one shared `slo:rec:<fp>` per unique
+   * fingerprint (label-free so it's reusable across SLOs) plus one per-SLO
+   * `slo:alerts:<slug>_<suffix>` carrying the provenance annotation the
+   * Phase 4 adoption path reads during lost-SO recovery. A legacy upsert here
+   * produces a third garbage group and leaves the real ones missing.
+   *
+   * This method mirrors the `createDedup` / `updateDedup` rule-shape path but
+   * skips refcount bookkeeping — repair is recovering from ruler-side drift,
+   * not creating or dropping an SLO; the ref store already reflects this
+   * SLO's claim and the repair upsert is effectively a byte-equal replay.
+   *
+   * Recording groups deliberately get NO annotation — Cortex rejects
+   * annotations on recording rules (commit e25376c2).
+   */
+  private async repairDedup(
+    doc: SloDocument,
+    ctx: SloRepairContext
+  ): Promise<SloRepairResult> {
+    if (doc.status.provisioning.backend !== 'prometheus') {
+      // Non-prometheus backends fall through to the legacy path above — but
+      // `isDedupSo` gates on `backend === 'prometheus'`, so this is
+      // unreachable. Narrow for the type-checker; throw loudly if it ever
+      // trips so we catch the invariant drift in CI rather than at runtime.
+      throw new Error(`repairDedup invoked on non-prometheus SLO ${doc.id}`);
+    }
+    const provisioning = doc.status.provisioning;
+    const expectedGroups = deriveExpectedGroups(doc);
+    const namespace =
+      provisioning.rulerNamespace || sloRulerNamespaceFor(ctx.deploy.workspaceId);
+
+    const pre = await ctx.health.check({
+      workspaceId: ctx.deploy.workspaceId,
+      datasource: ctx.deploy.datasource,
+      client: ctx.deploy.client,
+      sloId: doc.id,
+      namespace,
+      expectedGroups,
+    });
+
+    if (pre.state === 'ok') {
+      return { sloId: doc.id, repaired: false, health: pre };
+    }
+    if (pre.state === 'ruler_unreachable') {
+      const code = pre.rulerErrorCode ?? 'RULER_UNREACHABLE';
+      const rawBody = `Rule-health probe reported ruler_unreachable for SLO ${doc.id}`;
+      throw new SloRulerError(code, 0, rawBody);
+    }
+
+    // Step 1: re-upsert each unique fingerprint's shared recording group.
+    // Recording-rule generation is pure in the fingerprint + representative
+    // SLI, so the bytes match whatever the original create/update wrote;
+    // Cortex replaces-in-place, which is correct whether the group was
+    // missing entirely or present with stale contents.
+    const recordingFingerprints = provisioning.recordingFingerprints ?? {};
+    const uniqueFps = uniqueValues(recordingFingerprints);
+    for (const fp of uniqueFps) {
+      const representative = pickRepresentativeForFingerprint(
+        doc.spec,
+        recordingFingerprints,
+        fp
+      );
+      if (!representative) continue;
+      const recGroup = generateRecordingGroupForFingerprint({
+        fingerprint: fp,
+        sli: representative.sli,
+        objectiveLatencyThreshold: representative.latencyThreshold,
+      });
+      if (recGroup) {
+        await ctx.deploy.ruler.upsertRuleGroup(
+          ctx.deploy.client,
+          ctx.deploy.datasource,
+          namespace,
+          recGroup
+        );
+      }
+    }
+
+    // Step 2: re-upsert the per-SLO alert group with fresh `updatedAt` and
+    // preserved `createdAt`. Sentinel alert is inserted inside
+    // `buildAlertGroupWithProvenance` when burn-rate tiers resolve to zero
+    // alerts, so the provenance annotation always has a home.
+    const now = new Date().toISOString();
+    const alertGroup = buildAlertGroupWithProvenance(
+      doc,
+      recordingFingerprints,
+      ctx.deploy.workspaceId,
+      ctx.deploy.datasource.id,
+      this.pluginVersion,
+      doc.status.createdAt,
+      now
+    );
+    await ctx.deploy.ruler.upsertRuleGroup(
+      ctx.deploy.client,
+      ctx.deploy.datasource,
+      namespace,
+      alertGroup
+    );
+
+    ctx.health.invalidate(ctx.deploy.workspaceId, ctx.deploy.datasource.id, doc.id);
+
+    const post = await ctx.health.check({
+      workspaceId: ctx.deploy.workspaceId,
+      datasource: ctx.deploy.datasource,
+      client: ctx.deploy.client,
+      sloId: doc.id,
+      namespace,
+      expectedGroups,
+    });
+
+    this.logger.info(
+      `Repaired SLO (dedup): ${doc.id} (namespace=${namespace}, fps=${uniqueFps.length}, alert=${alertGroup.groupName})`
     );
     return { sloId: doc.id, repaired: true, health: post };
   }
@@ -1955,6 +2075,21 @@ function normalizeSpec<T extends Partial<SloSpec>>(spec: T): T {
  *
  * Non-prometheus backends (reserved) return [] — nothing to probe.
  */
+/**
+ * Phase 3 dedup predicate — mirrors the gate the `delete`/`update` paths use.
+ * A dedup-shape SO has either `recordingFingerprints` or `alertGroupName`
+ * populated by `createDedup` / the slo_v2 migration. Legacy (flag-off /
+ * pre-migration) SOs have neither and fall through to the single-group path.
+ */
+function isDedupSo(doc: SloDocument): boolean {
+  if (doc.status.provisioning.backend !== 'prometheus') return false;
+  const p = doc.status.provisioning;
+  return (
+    p.recordingFingerprints !== undefined ||
+    (typeof p.alertGroupName === 'string' && p.alertGroupName.length > 0)
+  );
+}
+
 export function deriveExpectedGroups(doc: SloDocument): string[] {
   if (doc.status.provisioning.backend !== 'prometheus') return [];
   const p = doc.status.provisioning;

@@ -157,6 +157,10 @@ describe('handleRepairSLO', () => {
     const ruler = makeRuler();
     const deploy = makeDeploy(ruler);
     const svc = new SloService(noopLogger(), store);
+    // Pin legacy single-group contract — these handler tests predate Phase 3
+    // dedup and assert on a single upsert. Dedup-path handler coverage lives
+    // in `common/slo/__tests__/slo_service_repair_integration.test.ts`.
+    svc.setDedupEnabled(false);
     const doc = await svc.create({ spec: validSpec() }, 'alice', deploy);
     ruler.upsertRuleGroup.mockClear();
     const groups =
@@ -181,6 +185,10 @@ describe('handleRepairSLO', () => {
     const ruler = makeRuler();
     const deploy = makeDeploy(ruler);
     const svc = new SloService(noopLogger(), store);
+    // Pin legacy single-group contract — these handler tests predate Phase 3
+    // dedup and assert on a single upsert. Dedup-path handler coverage lives
+    // in `common/slo/__tests__/slo_service_repair_integration.test.ts`.
+    svc.setDedupEnabled(false);
     const doc = await svc.create({ spec: validSpec() }, 'alice', deploy);
     ruler.upsertRuleGroup.mockClear();
     const groups =
@@ -214,6 +222,10 @@ describe('handleRepairSLO', () => {
     const ruler = makeRuler();
     const deploy = makeDeploy(ruler);
     const svc = new SloService(noopLogger(), store);
+    // Pin legacy single-group contract — these handler tests predate Phase 3
+    // dedup and assert on a single upsert. Dedup-path handler coverage lives
+    // in `common/slo/__tests__/slo_service_repair_integration.test.ts`.
+    svc.setDedupEnabled(false);
     const doc = await svc.create({ spec: validSpec() }, 'alice', deploy);
     const groups =
       doc.status.provisioning.backend === 'prometheus'
@@ -242,6 +254,10 @@ describe('handleRepairSLO', () => {
     const ruler = makeRuler();
     const deploy = makeDeploy(ruler);
     const svc = new SloService(noopLogger(), store);
+    // Pin legacy single-group contract — these handler tests predate Phase 3
+    // dedup and assert on a single upsert. Dedup-path handler coverage lives
+    // in `common/slo/__tests__/slo_service_repair_integration.test.ts`.
+    svc.setDedupEnabled(false);
     const doc = await svc.create({ spec: validSpec() }, 'alice', deploy);
 
     const result = await handleRepairSLO(svc, doc.id, noopLogger(), { deploy });
@@ -277,6 +293,10 @@ describe('handleGetRuleHealth', () => {
     const ruler = makeRuler();
     const deploy = makeDeploy(ruler);
     const svc = new SloService(noopLogger(), store);
+    // Pin legacy single-group contract — these handler tests predate Phase 3
+    // dedup and assert on a single upsert. Dedup-path handler coverage lives
+    // in `common/slo/__tests__/slo_service_repair_integration.test.ts`.
+    svc.setDedupEnabled(false);
     const doc = await svc.create({ spec: validSpec() }, 'alice', deploy);
     const groups =
       doc.status.provisioning.backend === 'prometheus'
@@ -303,6 +323,10 @@ describe('handleGetRuleHealth', () => {
     const ruler = makeRuler();
     const deploy = makeDeploy(ruler);
     const svc = new SloService(noopLogger(), store);
+    // Pin legacy single-group contract — these handler tests predate Phase 3
+    // dedup and assert on a single upsert. Dedup-path handler coverage lives
+    // in `common/slo/__tests__/slo_service_repair_integration.test.ts`.
+    svc.setDedupEnabled(false);
     const doc = await svc.create({ spec: validSpec() }, 'alice', deploy);
     const groups =
       doc.status.provisioning.backend === 'prometheus'
@@ -337,6 +361,10 @@ describe('handleGetRuleHealth', () => {
     const ruler = makeRuler();
     const deploy = makeDeploy(ruler);
     const svc = new SloService(noopLogger(), store);
+    // Pin legacy single-group contract — these handler tests predate Phase 3
+    // dedup and assert on a single upsert. Dedup-path handler coverage lives
+    // in `common/slo/__tests__/slo_service_repair_integration.test.ts`.
+    svc.setDedupEnabled(false);
     const doc = await svc.create({ spec: validSpec() }, 'alice', deploy);
 
     const result = await handleGetRuleHealth(svc, doc.id, noopLogger(), { deploy });
