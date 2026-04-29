@@ -387,7 +387,8 @@ function buildStatusContext(
   ctx: SloHandlerContext,
   datasourceService: InMemoryDatasourceService | undefined,
   discoveryService: DatasourceDiscoveryService | undefined,
-  ruleHealthChecker: RuleHealthChecker | undefined
+  ruleHealthChecker: RuleHealthChecker | undefined,
+  ruleDedupEnabled?: boolean
 ): SloStatusAggregationContext | undefined {
   if (!datasourceService) return undefined;
   const client = ctx.core.opensearch.client.asCurrentUser;
@@ -412,6 +413,9 @@ function buildStatusContext(
     // the sample-derived state. When absent (offline dev / tests), the
     // aggregator falls through to the existing derivation.
     healthChecker: ruleHealthChecker,
+    // Phase 3 (W3.6): propagate the dedup flag so the aggregator (W3.9) can
+    // pick fingerprint-keyed selectors when true.
+    ruleDedupEnabled,
   };
 }
 
@@ -424,7 +428,8 @@ export function registerSloRoutes(
   discoveryService?: DatasourceDiscoveryService,
   prometheusBackend?: DirectQueryPrometheusBackend,
   ruleHealthChecker?: RuleHealthChecker,
-  reconciler?: SloReconciler
+  reconciler?: SloReconciler,
+  ruleDedupEnabled?: boolean
 ) {
   if (prometheusBackend) {
     registerProbeSliRoute(router, logger, prometheusBackend, datasourceService, discoveryService);
@@ -475,7 +480,8 @@ export function registerSloRoutes(
         ctx as SloHandlerContext,
         datasourceService,
         discoveryService,
-        ruleHealthChecker
+        ruleHealthChecker,
+        ruleDedupEnabled
       );
       const result = await handleListSLOs(sloService, filters, logger, statusCtx);
       if (result.status >= 400) {
@@ -545,7 +551,8 @@ export function registerSloRoutes(
         ctx as SloHandlerContext,
         datasourceService,
         discoveryService,
-        ruleHealthChecker
+        ruleHealthChecker,
+        ruleDedupEnabled
       );
       const result = await handleGetSLOStatuses(sloService, req.body.ids, logger, statusCtx);
       if (result.status === 200) return res.ok({ body: result.body });
@@ -566,7 +573,8 @@ export function registerSloRoutes(
         ctx as SloHandlerContext,
         datasourceService,
         discoveryService,
-        ruleHealthChecker
+        ruleHealthChecker,
+        ruleDedupEnabled
       );
       const result = await handleGetSLO(sloService, req.params.id, logger, statusCtx);
       if (result.status === 200) return res.ok({ body: result.body });

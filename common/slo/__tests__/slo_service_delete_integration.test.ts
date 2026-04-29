@@ -209,7 +209,9 @@ describe('SloService.delete — integration (W1.10)', () => {
       doc.status.provisioning.backend === 'prometheus'
         ? doc.status.provisioning.rulerNamespace
         : '',
-      doc.status.provisioning.backend === 'prometheus' ? doc.status.provisioning.ruleGroupName : ''
+      doc.status.provisioning.backend === 'prometheus' && doc.status.provisioning.ruleGroupName
+        ? doc.status.provisioning.ruleGroupName
+        : ''
     );
 
     const result = await svc.delete(doc.id, deploy);
@@ -250,7 +252,9 @@ describe('SloService.delete — integration (W1.10)', () => {
         ? doc.status.provisioning.rulerNamespace
         : '';
     const groupName =
-      doc.status.provisioning.backend === 'prometheus' ? doc.status.provisioning.ruleGroupName : '';
+      doc.status.provisioning.backend === 'prometheus' && doc.status.provisioning.ruleGroupName
+        ? doc.status.provisioning.ruleGroupName
+        : '';
 
     // First attempt: transient ruler failure.
     ruler.setDeleteError(new SloRulerError('RULER_UNREACHABLE', 503, 'down'));

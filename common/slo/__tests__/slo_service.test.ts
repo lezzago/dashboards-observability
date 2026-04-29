@@ -334,3 +334,18 @@ describe('SloService — aggregator routing (W3.1)', () => {
     expect(calls).toBe(1);
   });
 });
+
+describe('SloService dedup flag (Phase 3 W3.6)', () => {
+  it('defaults to enabled', () => {
+    const svc = new SloService(noopLogger());
+    expect(svc.isDedupEnabled()).toBe(true);
+  });
+
+  it('round-trips via setDedupEnabled', () => {
+    const svc = new SloService(noopLogger());
+    svc.setDedupEnabled(false);
+    expect(svc.isDedupEnabled()).toBe(false);
+    svc.setDedupEnabled(true);
+    expect(svc.isDedupEnabled()).toBe(true);
+  });
+});

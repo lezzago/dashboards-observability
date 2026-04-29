@@ -313,7 +313,9 @@ async function seedSlo(h: Harness, datasourceId: string, specOverrides: Partial<
   const spec = validSpec({ datasourceId, ...specOverrides });
   const doc = await h.svc.create({ spec }, 'alice', deploy);
   const groupName =
-    doc.status.provisioning.backend === 'prometheus' ? doc.status.provisioning.ruleGroupName : '';
+    doc.status.provisioning.backend === 'prometheus' && doc.status.provisioning.ruleGroupName
+      ? doc.status.provisioning.ruleGroupName
+      : '';
   return { doc, groupName, deploy };
 }
 

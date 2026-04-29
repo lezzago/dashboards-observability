@@ -228,7 +228,9 @@ describe('SloService.repair — integration (W1.10)', () => {
     const doc = await svc.create({ spec: validSpec() }, 'alice', deploy);
 
     const groupName =
-      doc.status.provisioning.backend === 'prometheus' ? doc.status.provisioning.ruleGroupName : '';
+      doc.status.provisioning.backend === 'prometheus' && doc.status.provisioning.ruleGroupName
+        ? doc.status.provisioning.ruleGroupName
+        : '';
 
     // Sanity: create wrote the group to the fake ruler.
     expect(ruler.hasGroup(namespace, groupName)).toBe(true);
@@ -273,7 +275,9 @@ describe('SloService.repair — integration (W1.10)', () => {
     const doc = await svc.create({ spec: validSpec() }, 'alice', deploy);
 
     const groupName =
-      doc.status.provisioning.backend === 'prometheus' ? doc.status.provisioning.ruleGroupName : '';
+      doc.status.provisioning.backend === 'prometheus' && doc.status.provisioning.ruleGroupName
+        ? doc.status.provisioning.ruleGroupName
+        : '';
     ruler.dropGroup(namespace, groupName);
 
     // Flip the fake into a 5xx posture — the probe should translate this into
@@ -298,7 +302,9 @@ describe('SloService.repair — integration (W1.10)', () => {
     const doc = await svc.create({ spec: validSpec() }, 'alice', deploy);
 
     const groupName =
-      doc.status.provisioning.backend === 'prometheus' ? doc.status.provisioning.ruleGroupName : '';
+      doc.status.provisioning.backend === 'prometheus' && doc.status.provisioning.ruleGroupName
+        ? doc.status.provisioning.ruleGroupName
+        : '';
     ruler.dropGroup(namespace, groupName);
 
     // Probe sees the missing group, repair moves to upsert — upsert rejects.
@@ -330,7 +336,9 @@ describe('SloService.repair — integration (W1.10)', () => {
     const doc = await svc.create({ spec: validSpec() }, 'alice', deploy);
 
     const groupName =
-      doc.status.provisioning.backend === 'prometheus' ? doc.status.provisioning.ruleGroupName : '';
+      doc.status.provisioning.backend === 'prometheus' && doc.status.provisioning.ruleGroupName
+        ? doc.status.provisioning.ruleGroupName
+        : '';
     expect(ruler.hasGroup(namespace, groupName)).toBe(true);
 
     // Pre-probe answers 'missing'; after repair re-upserts and re-probes, the

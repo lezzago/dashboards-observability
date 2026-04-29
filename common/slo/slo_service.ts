@@ -138,6 +138,13 @@ export interface SloStatusAggregationContext {
   client: AlertingOSClient;
   resolveDatasource: (datasourceId: string) => Promise<Datasource | undefined>;
   workspaceId: string;
+  /**
+   * Phase 3 (W3.6) — propagates the `observability.slo.ruleDedup.enabled`
+   * flag so the aggregator can pick fingerprint-keyed selectors (W3.9) when
+   * true, or fall back to the legacy `{slo_id="X"}` selectors when false.
+   * Undefined → legacy behavior (pre-Phase-3).
+   */
+  ruleDedupEnabled?: boolean;
 }
 
 /**
@@ -246,8 +253,26 @@ export class SloService {
    */
   private readonly loggedAggregatorFailures = new Set<string>();
 
+  /**
+   * Phase 3 (W3.6) — reflects `observability.slo.ruleDedup.enabled`. Flipped
+   * by `server/plugin.ts` at boot. Batch 2 workstreams (W3.8 service dedup,
+   * W3.9 aggregator) branch on this via `isDedupEnabled()`. Default `true`
+   * matches the schema default.
+   */
+  private dedupEnabled = true;
+
   constructor(private readonly logger: Logger, store?: ISloStore) {
     this.store = store ?? new InMemorySloStore();
+  }
+
+  /** Phase 3 (W3.6): update the dedup flag at runtime. See `plugin.ts`. */
+  setDedupEnabled(enabled: boolean): void {
+    this.dedupEnabled = enabled;
+    this.logger.info(`SloService: ruleDedup ${enabled ? 'enabled' : 'disabled'}`);
+  }
+
+  isDedupEnabled(): boolean {
+    return this.dedupEnabled;
   }
 
   setStore(store: ISloStore): void {
@@ -454,9 +479,19 @@ export class SloService {
       if (!deploy) {
         throw new SloRulerTeardownRequiredError(id, existing.spec.datasourceId);
       }
-      const namespace = existing.status.provisioning.rulerNamespace || SLO_RULER_NAMESPACE;
-      const groupName = existing.status.provisioning.ruleGroupName;
-      await deploy.ruler.deleteRuleGroup(deploy.client, deploy.datasource, namespace, groupName);
+      // `needsRulerTeardown` gated on the prometheus branch + a non-empty
+      // ruleGroupName; re-narrow explicitly because the branch predicate
+      // doesn't propagate through an intermediate boolean.
+      const provisioning = existing.status.provisioning;
+      if (provisioning.backend === 'prometheus' && provisioning.ruleGroupName) {
+        const namespace = provisioning.rulerNamespace || SLO_RULER_NAMESPACE;
+        await deploy.ruler.deleteRuleGroup(
+          deploy.client,
+          deploy.datasource,
+          namespace,
+          provisioning.ruleGroupName
+        );
+      }
     }
 
     await this.store.delete(id);

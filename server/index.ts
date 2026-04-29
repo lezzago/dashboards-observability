@@ -31,6 +31,13 @@ const observabilityConfig = {
     // purely server-side knob.
     slo: schema.object({
       reconcilerIntervalMs: schema.number({ defaultValue: 300_000, min: 1_000 }),
+      // Phase 3 (W3.6): dedup flag. Default-on in dev; operators flip off in
+      // prod during the staged rollout. When false the service falls back to
+      // the pre-Phase-3 single-group path and the aggregator uses legacy
+      // selectors.
+      ruleDedup: schema.object({
+        enabled: schema.boolean({ defaultValue: true }),
+      }),
     }),
   }),
 };

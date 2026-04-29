@@ -65,6 +65,7 @@ export function setupRoutes({
   ruleHealthChecker,
   rulerClient,
   reconciler,
+  ruleDedupEnabled,
 }: {
   router: IRouter;
   client: ILegacyClusterClient;
@@ -88,6 +89,12 @@ export function setupRoutes({
    * through so the plugin-level wiring doesn't need to change twice.
    */
   reconciler?: SloReconciler;
+  /**
+   * Phase 3 (W3.6) — `observability.slo.ruleDedup.enabled`. Forwarded into
+   * `registerSloRoutes` so the per-request status context carries it and
+   * the aggregator (W3.9) picks fingerprint-keyed selectors when true.
+   */
+  ruleDedupEnabled?: boolean;
 }): SetupRoutesResult {
   PanelsRouter(router);
   VisualizationsRouter(router);
@@ -165,6 +172,10 @@ export function setupRoutes({
     // `server/plugin.ts` so the reconciler can share the same TTL cache.
     // `reconciler` threads through to the admin `_reconcile` route registered
     // inside `registerSloRoutes`.
+    // Note (Phase 3 W3.6): `registerSloRoutes` now takes 9 positional args.
+    // This is the last time we extend positional args; a follow-up
+    // workstream converts to an options bag before another route needs to
+    // be added.
     registerSloRoutes(
       router,
       sloService,
@@ -174,7 +185,8 @@ export function setupRoutes({
       datasourceDiscoveryService,
       promBackend,
       ruleHealthChecker,
-      reconciler
+      reconciler,
+      ruleDedupEnabled
     );
   }
 

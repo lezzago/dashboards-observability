@@ -39,6 +39,8 @@ import { DirectQueryRulerClient } from './services/slo/ruler_client';
 import { createRuleHealthChecker, RuleHealthChecker } from './services/slo/rule_health_checker';
 import { createSloReconciler, SloReconciler } from './services/slo/reconciler';
 import { createReconcilerMetrics } from './services/slo/reconciler_metrics';
+import { sloRuleRefType } from './saved_objects/slo_rule_ref';
+import { SLO_V2_MIGRATION_VERSION, sloV2Migration } from './saved_objects/migrations/slo_v2';
 import type { InMemoryDatasourceService } from './services/alerting/datasource_service';
 import { AssistantPluginSetup, ObservabilityPluginSetup, ObservabilityPluginStart } from './types';
 
@@ -106,10 +108,18 @@ export class ObservabilityPlugin
     const observabilityConfig = await this.initializerContext.config
       .create<{
         alertManager?: { enabled: boolean };
-        slo?: { reconcilerIntervalMs: number };
+        slo?: {
+          reconcilerIntervalMs: number;
+          ruleDedup?: { enabled: boolean };
+        };
       }>()
       .pipe(first())
       .toPromise();
+
+    // Phase 3 (W3.6): dedup flag. Default-on; mirrors the schema default so
+    // offline/dev paths that skip config resolution still get the new
+    // codepath.
+    const ruleDedupEnabled = observabilityConfig.slo?.ruleDedup?.enabled ?? true;
 
     const dataSourceEnabled = !!dataSource;
     const openSearchObservabilityClient: ILegacyClusterClient = core.opensearch.legacy.createClient(
@@ -327,6 +337,13 @@ export class ObservabilityPlugin
           status: { type: 'object', enabled: false },
         },
       },
+      // Phase 3 (W3.5): slo_v2 migration extends status.provisioning with
+      // `recordingFingerprints`, `alertGroupName`, and `needsRedeploy`. Runs
+      // unconditionally — it's additive and preserves the old `ruleGroupName`
+      // during the dedup flag's rollout window.
+      migrations: {
+        [SLO_V2_MIGRATION_VERSION]: sloV2Migration,
+      },
       management: {
         importableAndExportable: true,
         getInAppUrl(obj) {
@@ -343,6 +360,11 @@ export class ObservabilityPlugin
     };
     core.savedObjects.registerType(sloDefinitionType);
 
+    // Phase 3 (W3.2): refcount registry — one SO per unique (workspace,
+    // datasource, fingerprint) tuple. Consumed by `SloRuleRefStore` and the
+    // reconciler's W3.11 grace-period sweep.
+    core.savedObjects.registerType(sloRuleRefType);
+
     // SLO service — starts with InMemorySloStore; upgraded to SavedObjectSloStore in start().
     const sloLogger = {
       info: (msg: string) => this.logger.info(msg),
@@ -356,6 +378,7 @@ export class ObservabilityPlugin
     // private `store` field.
     const initialStore: ISloStore = new InMemorySloStore();
     const sloService = new SloService(sloLogger, initialStore);
+    sloService.setDedupEnabled(ruleDedupEnabled);
     // Live-status aggregator (W3.1). DirectQuery-backed — queries the ruler
     // through the SQL plugin for recording-rule values + firing alerts.
     // Offline dev paths (no aggregator) fall through to the stub automatically.
@@ -450,6 +473,7 @@ export class ObservabilityPlugin
       ruleHealthChecker,
       rulerClient,
       reconciler,
+      ruleDedupEnabled,
     });
     datasourceServiceRef.current = alertingDatasourceService;
 

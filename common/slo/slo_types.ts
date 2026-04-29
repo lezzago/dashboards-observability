@@ -252,9 +252,36 @@ export interface SloSpec {
 
 export interface PrometheusProvisioning {
   backend: 'prometheus';
-  ruleGroupName: string;
+  /**
+   * @deprecated Phase 3: kept during the dedup rollout while the feature flag
+   * `observability.slo.ruleDedup.enabled` is toggleable. When the flag is off
+   * the service reads this single name; when on the service reads
+   * `recordingFingerprints` + `alertGroupName`. Removed in a future phase
+   * once the flag is permanently on.
+   */
+  ruleGroupName?: string;
   rulerNamespace: string;
   generatedRuleNames: string[];
+  /**
+   * Phase 3 (W3.4) — map from objective name to the recording-rule
+   * fingerprint that's written for that objective. Shared across SLOs that
+   * carry equivalent SLI shapes. The recording group on the ruler is named
+   * `slo:rec:<fingerprint>`.
+   */
+  recordingFingerprints?: Record<string, string>;
+  /**
+   * Phase 3 (W3.4) — per-SLO alert group name. Alerts retain full SLO
+   * identity labels; recording rules do not. Format:
+   * `slo:alerts:<slug>_<suffix>`.
+   */
+  alertGroupName?: string;
+  /**
+   * Phase 3 (W3.5 migration) — set by the slo_v2 migration when an existing
+   * SO is rewritten to the new shape. W3.10 SloRedeployTask consumes this
+   * flag during plugin start, upserts the new groups, deletes the old
+   * monolithic group, and clears the flag.
+   */
+  needsRedeploy?: boolean;
 }
 
 /** Reserved for P2. */
