@@ -214,12 +214,9 @@ interface Harness {
   tombstones: FakeTombstoneStore;
   svc: SloService;
   datasourceD1: Datasource;
-  datasourceD2: Datasource;
   client: AlertingOSClient;
   /** Deploy for workspace W1 / datasource D1 — the most common call. */
   deployW1D1: SloDeployContext;
-  deployW2D1: SloDeployContext;
-  deployW2D2: SloDeployContext;
 }
 
 function buildHarness(): Harness {
@@ -241,14 +238,6 @@ function buildHarness(): Harness {
     enabled: true,
     directQueryName: 'prom-d1',
   };
-  const datasourceD2: Datasource = {
-    id: 'prom-ds-002',
-    name: 'prom-d2',
-    type: 'prometheus',
-    url: '',
-    enabled: true,
-    directQueryName: 'prom-d2',
-  };
   const client = ({
     transport: { request: () => Promise.resolve({}) },
   } as unknown) as AlertingOSClient;
@@ -258,18 +247,6 @@ function buildHarness(): Harness {
     datasource: datasourceD1,
     workspaceId: 'W1',
   };
-  const deployW2D1: SloDeployContext = {
-    ruler,
-    client,
-    datasource: datasourceD1,
-    workspaceId: 'W2',
-  };
-  const deployW2D2: SloDeployContext = {
-    ruler,
-    client,
-    datasource: datasourceD2,
-    workspaceId: 'W2',
-  };
   return {
     store,
     ruler,
@@ -277,11 +254,8 @@ function buildHarness(): Harness {
     tombstones,
     svc,
     datasourceD1,
-    datasourceD2,
     client,
     deployW1D1,
-    deployW2D1,
-    deployW2D2,
   };
 }
 

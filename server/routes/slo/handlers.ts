@@ -11,6 +11,7 @@
 import type { Logger } from '../../../common/types/alerting/types';
 import {
   deriveExpectedGroups,
+  SloAdoptionError,
   SloDeployContext,
   SloNotFoundError,
   SloRepairContext,
@@ -28,41 +29,6 @@ import { computeSpecSha256 } from '../../../common/slo/slo_rule_provenance';
 import type { HandlerResult } from '../alerting/route_utils';
 import { toHandlerResult } from '../alerting/route_utils';
 
-// ============================================================================
-// Phase 4 W4.6 — adoption error codes.
-//
-// The concrete `SloAdoptionError` class is owned by the sibling W4.4/W4.5
-// agent in `common/slo/slo_errors.ts`. To stay import-safe before that agent
-// lands, we duck-type: the mapper checks `error.name === 'SloAdoptionError'`
-// and reads `error.code` — matching the same shape the real class will
-// expose. Once B2A's import is available the compiler-enforced path still
-// works because the narrow branches only need a structural check; the
-// `instanceof` flavor can be a follow-up swap without changing semantics.
-// ============================================================================
-
-/** Phase 4 (W4.6) — adoption error codes. Kept local so this file doesn't
- * depend on B2A's `common/slo/slo_adoption_types.ts` (which may not have
- * landed at the point this module is type-checked). The set mirrors the
- * contract called out in the orchestrator plan. */
-type AdoptionErrorCodeLite =
-  | 'ORPHAN_SPEC_DRIFT'
-  | 'ORPHAN_WORKSPACE_MISMATCH'
-  | 'ORPHAN_CLAIM_CONFLICT'
-  | 'ORPHAN_UNSUPPORTED_SCHEMA'
-  | 'ORPHAN_TOMBSTONED';
-
-interface SloAdoptionErrorLike {
-  name: 'SloAdoptionError';
-  code: AdoptionErrorCodeLite;
-  message: string;
-}
-
-function isSloAdoptionErrorLike(e: unknown): e is SloAdoptionErrorLike {
-  if (!e || typeof e !== 'object') return false;
-  const rec = e as { name?: unknown; code?: unknown };
-  return rec.name === 'SloAdoptionError' && typeof rec.code === 'string';
-}
-
 /**
  * Phase 4 W4.6 — map adoption error codes to HTTP status. Pulled out of the
  * generic `toSloError` because the response envelope is different (always
@@ -75,7 +41,7 @@ function isSloAdoptionErrorLike(e: unknown): e is SloAdoptionErrorLike {
  *   ORPHAN_CLAIM_CONFLICT     → 409
  *   ORPHAN_TOMBSTONED         → 409  (retry with acknowledgeTombstone: true)
  */
-function toAdoptionErrorResponse(err: SloAdoptionErrorLike): HandlerResult {
+function toAdoptionErrorResponse(err: SloAdoptionError): HandlerResult {
   const code = err.code;
   const status = code === 'ORPHAN_CLAIM_CONFLICT' || code === 'ORPHAN_TOMBSTONED' ? 409 : 422;
   return {
@@ -93,7 +59,7 @@ function toSloError(e: unknown, logger?: Logger): HandlerResult {
   // Checked before the generic typed-error ladder so the envelope stays
   // adoption-shaped (code + message) rather than the legacy validation
   // envelope.
-  if (isSloAdoptionErrorLike(e)) {
+  if (e instanceof SloAdoptionError) {
     if (logger) logger.warn(`SLO adoption error: ${e.code} — ${e.message}`);
     return toAdoptionErrorResponse(e);
   }

@@ -83,6 +83,21 @@ export class FakeRulerClient implements RulerClient, SloRulerClient {
     return this.groups.entries();
   }
 
+  // Seed + inspect — convenience accessors kept around so older call sites
+  // (e.g. the repair integration test) that predate `getGroup`/`allGroups`
+  // keep working without a local re-declaration of the fake.
+  groupByName(namespace: string, groupName: string): GeneratedRuleGroup | null {
+    return this.groups.get(this.key(namespace, groupName)) ?? null;
+  }
+  listGroupNames(namespace: string): string[] {
+    const prefix = `${namespace}|`;
+    const out: string[] = [];
+    for (const [k, v] of this.groups.entries()) {
+      if (k.startsWith(prefix)) out.push(v.groupName);
+    }
+    return out;
+  }
+
   async upsertRuleGroup(
     _client: AlertingOSClient,
     _datasource: Datasource,
@@ -91,6 +106,25 @@ export class FakeRulerClient implements RulerClient, SloRulerClient {
   ): Promise<void> {
     this.upsertCalls += 1;
     if (this.upsertError) throw this.upsertError;
+    // Mimic Cortex: recording rules may not carry annotations. Any rule with
+    // `type: 'recording'` that ships an annotation payload is a 400 the ruler
+    // would reject; fail the upsert loudly so a future regression that
+    // re-adds `osd_slo_recording_provenance` (or anything else) doesn't
+    // silently pass the in-memory fake.
+    for (const rule of group.rules) {
+      const isRecording = rule.type === 'recording';
+      const hasAnnotations =
+        typeof rule.annotations === 'object' &&
+        rule.annotations !== null &&
+        Object.keys(rule.annotations).length > 0;
+      if (isRecording && hasAnnotations) {
+        throw new SloRulerError(
+          'RULER_VALIDATION_FAILED',
+          400,
+          `recording rule ${rule.name} may not carry annotations`
+        );
+      }
+    }
     this.upserts.push({ namespace, group });
     this.groups.set(this.key(namespace, group.groupName), group);
   }

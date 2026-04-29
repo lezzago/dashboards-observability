@@ -29,7 +29,7 @@
  * never runs inside a test body.
  */
 
-import { SloDeployContext, SloRulerClient, SloService, sloRulerNamespaceFor } from '../slo_service';
+import { SloDeployContext, SloService, sloRulerNamespaceFor } from '../slo_service';
 import { InMemorySloStore } from '../slo_store';
 import { DEFAULT_MWMBR_TIERS } from '../slo_promql_generator';
 import { SloRulerError } from '../slo_errors';
@@ -37,9 +37,9 @@ import { createRuleHealthChecker } from '../../../server/services/slo/rule_healt
 import { createReconcilerMetrics } from '../../../server/services/slo/reconciler_metrics';
 import { createSloReconciler, SloReconciler } from '../../../server/services/slo/reconciler';
 import { InMemoryDatasourceService } from '../../../server/services/alerting/datasource_service';
-import type { RulerClient } from '../../../server/services/slo/ruler_client';
-import type { AlertingOSClient, Datasource, Logger } from '../../types/alerting/types';
-import type { GeneratedRuleGroup, SloSpec } from '../slo_types';
+import type { AlertingOSClient, Logger } from '../../types/alerting/types';
+import type { SloSpec } from '../slo_types';
+import { FakeRulerClient } from './fake_ruler_client';
 
 // ============================================================================
 // Test doubles
@@ -88,131 +88,6 @@ function validSpec(overrides: Partial<SloSpec> = {}): SloSpec {
     annotations: {},
     ...overrides,
   };
-}
-
-/**
- * Fake ruler backed by an in-memory Map. Shape satisfies both `RulerClient`
- * (for `createRuleHealthChecker` + the reconciler's `listRuleGroups` call)
- * and `SloRulerClient` (for `SloService`), which is why we keep the same
- * instance on both sides of the wiring.
- *
- * Copied from `slo_service_repair_integration.test.ts` per the W2.7 brief.
- * Minor enhancement: `setListError` adds the same error-injection knob to
- * `listRuleGroups` that the original fake already has for `getRuleGroup`.
- * Scenario 5 (per-datasource 5xx) needs the reconciler's `listRuleGroups`
- * call to fail without also breaking the health-probe path.
- */
-class FakeRulerClient implements RulerClient, SloRulerClient {
-  public upsertCalls = 0;
-  public getCalls = 0;
-  public deleteCalls = 0;
-  public listCalls = 0;
-
-  private groups = new Map<string, GeneratedRuleGroup>();
-  private getError: SloRulerError | null = null;
-  private upsertError: SloRulerError | null = null;
-  private deleteError: SloRulerError | null = null;
-  private listError: SloRulerError | null = null;
-  private nullOnceForGroup: string | null = null;
-  /** Per-namespace list-error override — scoped to a single namespace only. */
-  private listErrorByNamespace = new Map<string, SloRulerError>();
-
-  private key(ns: string, name: string): string {
-    return `${ns}|${name}`;
-  }
-
-  setGetError(err: SloRulerError | null): void {
-    this.getError = err;
-  }
-  setUpsertError(err: SloRulerError | null): void {
-    this.upsertError = err;
-  }
-  setDeleteError(err: SloRulerError | null): void {
-    this.deleteError = err;
-  }
-  /** W2.7 enhancement — flip `listRuleGroups` globally into a 5xx posture. */
-  setListError(err: SloRulerError | null): void {
-    this.listError = err;
-  }
-  /** W2.7 enhancement — flip `listRuleGroups` for a single namespace only. */
-  setListErrorForNamespace(namespace: string, err: SloRulerError | null): void {
-    if (err) this.listErrorByNamespace.set(namespace, err);
-    else this.listErrorByNamespace.delete(namespace);
-  }
-
-  setNullOnceForGroup(groupName: string): void {
-    this.nullOnceForGroup = groupName;
-  }
-
-  dropGroup(namespace: string, groupName: string): void {
-    this.groups.delete(this.key(namespace, groupName));
-  }
-
-  hasGroup(namespace: string, groupName: string): boolean {
-    return this.groups.has(this.key(namespace, groupName));
-  }
-
-  async upsertRuleGroup(
-    _client: AlertingOSClient,
-    _datasource: Datasource,
-    namespace: string,
-    group: GeneratedRuleGroup
-  ): Promise<void> {
-    this.upsertCalls += 1;
-    if (this.upsertError) throw this.upsertError;
-    this.groups.set(this.key(namespace, group.groupName), group);
-  }
-
-  async deleteRuleGroup(
-    _client: AlertingOSClient,
-    _datasource: Datasource,
-    namespace: string,
-    groupName: string
-  ): Promise<void> {
-    this.deleteCalls += 1;
-    if (this.deleteError) throw this.deleteError;
-    this.groups.delete(this.key(namespace, groupName));
-  }
-
-  async getRuleGroup(
-    _client: AlertingOSClient,
-    _datasource: Datasource,
-    namespace: string,
-    groupName: string
-  ): Promise<GeneratedRuleGroup | null> {
-    this.getCalls += 1;
-    if (this.getError) throw this.getError;
-    if (this.nullOnceForGroup === groupName) {
-      this.nullOnceForGroup = null;
-      return null;
-    }
-    return this.groups.get(this.key(namespace, groupName)) ?? null;
-  }
-
-  async listRuleGroups(
-    _client: AlertingOSClient,
-    _datasource: Datasource,
-    namespace: string
-  ): Promise<GeneratedRuleGroup[]> {
-    this.listCalls += 1;
-    const nsError = this.listErrorByNamespace.get(namespace);
-    if (nsError) throw nsError;
-    if (this.listError) throw this.listError;
-    const prefix = `${namespace}|`;
-    const out: GeneratedRuleGroup[] = [];
-    for (const [k, v] of this.groups.entries()) {
-      if (k.startsWith(prefix)) out.push(v);
-    }
-    return out;
-  }
-
-  /**
-   * Seed a rule group directly, bypassing `upsertRuleGroup`. Used by scenario
-   * 3 to simulate an orphan created by some other tool / out-of-band.
-   */
-  seedGroup(namespace: string, group: GeneratedRuleGroup): void {
-    this.groups.set(this.key(namespace, group.groupName), group);
-  }
 }
 
 interface Harness {

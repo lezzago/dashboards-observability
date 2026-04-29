@@ -22,6 +22,8 @@
 
 import { registerSloAdoptionRoutes } from '../adoption_route';
 import { InMemoryDatasourceService } from '../../../services/alerting';
+import { SloAdoptionError } from '../../../../common/slo/slo_errors';
+import type { AdoptionErrorCode } from '../../../../common/slo/slo_errors';
 import type { SloService } from '../../../../common/slo/slo_service';
 import type { SloReconciler } from '../../../services/slo/reconciler';
 
@@ -131,20 +133,6 @@ function makeFakeReconciler() {
       async () => baseResult
     ),
   };
-}
-
-type AdoptionErrorCode =
-  | 'ORPHAN_SPEC_DRIFT'
-  | 'ORPHAN_WORKSPACE_MISMATCH'
-  | 'ORPHAN_CLAIM_CONFLICT'
-  | 'ORPHAN_UNSUPPORTED_SCHEMA'
-  | 'ORPHAN_TOMBSTONED';
-
-class TestSloAdoptionError extends Error {
-  public readonly name = 'SloAdoptionError';
-  constructor(public readonly code: AdoptionErrorCode, message: string) {
-    super(message);
-  }
 }
 
 function makeFakeService() {
@@ -455,7 +443,7 @@ describe('W4.6 POST /_recover', () => {
       ruleAdoptionEnabled: true,
     });
 
-    service.recover.mockRejectedValueOnce(new TestSloAdoptionError(code, `simulated ${code}`));
+    service.recover.mockRejectedValueOnce(new SloAdoptionError(code, `simulated ${code}`));
 
     const handler = getHandler(router, 'post', (p) => p.endsWith('/_recover'));
     const res = makeRes();
