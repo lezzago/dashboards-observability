@@ -24,6 +24,14 @@ const observabilityConfig = {
     alertManager: schema.object({
       enabled: schema.boolean({ defaultValue: false }),
     }),
+    // SLO server-side behavior. `reconcilerIntervalMs` drives the Phase 2
+    // background sweep that reconciles SLO saved objects against the ruler.
+    // Default 5m; floor at 1s to stay safe against misconfig that would make
+    // the dev server hammer Cortex. Never exposed to the browser — this is a
+    // purely server-side knob.
+    slo: schema.object({
+      reconcilerIntervalMs: schema.number({ defaultValue: 300_000, min: 1_000 }),
+    }),
   }),
 };
 

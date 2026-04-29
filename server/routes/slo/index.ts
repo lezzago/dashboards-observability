@@ -23,6 +23,7 @@ import type { DatasourceDiscoveryService } from '../../services/alerting/datasou
 import type { DirectQueryPrometheusBackend } from '../../services/alerting/directquery_prometheus_backend';
 import type { RulerClient } from '../../services/slo/ruler_client';
 import type { RuleHealthChecker } from '../../services/slo/rule_health_checker';
+import type { SloReconciler } from '../../services/slo/reconciler';
 import {
   handleCreateSLO,
   handleDeleteSLO,
@@ -37,6 +38,7 @@ import {
   handleUpdateSLO,
 } from './handlers';
 import { registerProbeSliRoute } from './probe_sli';
+import { registerSloReconcileRoute } from './reconcile_route';
 
 /**
  * OSD context type with the optional `dataSource` plugin extension. Same
@@ -421,7 +423,8 @@ export function registerSloRoutes(
   datasourceService?: InMemoryDatasourceService,
   discoveryService?: DatasourceDiscoveryService,
   prometheusBackend?: DirectQueryPrometheusBackend,
-  ruleHealthChecker?: RuleHealthChecker
+  ruleHealthChecker?: RuleHealthChecker,
+  reconciler?: SloReconciler
 ) {
   if (prometheusBackend) {
     registerProbeSliRoute(router, logger, prometheusBackend, datasourceService, discoveryService);
@@ -850,4 +853,13 @@ export function registerSloRoutes(
       });
     }
   );
+
+  // --------------------------------------------------------------------------
+  // W2.4 — admin reconcile endpoint
+  //
+  // Registered unconditionally. When `reconciler` is undefined the route
+  // returns 501 via `handleReconcile` so tests / smoke probes can always
+  // hit the path.
+  // --------------------------------------------------------------------------
+  registerSloReconcileRoute(router, reconciler, logger);
 }

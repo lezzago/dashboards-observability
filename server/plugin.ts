@@ -31,8 +31,15 @@ import {
   notebookSavedObject,
 } from './saved_objects/observability_saved_object';
 import { SloService } from '../common/slo/slo_service';
+import { InMemorySloStore } from '../common/slo/slo_store';
+import type { ISloStore, SloDocument } from '../common/slo/slo_types';
 import { SavedObjectSloStore } from './services/slo/slo_saved_object_store';
 import { DirectQueryStatusAggregator } from './services/slo/status_aggregator';
+import { DirectQueryRulerClient } from './services/slo/ruler_client';
+import { createRuleHealthChecker, RuleHealthChecker } from './services/slo/rule_health_checker';
+import { createSloReconciler, SloReconciler } from './services/slo/reconciler';
+import { createReconcilerMetrics } from './services/slo/reconciler_metrics';
+import type { InMemoryDatasourceService } from './services/alerting/datasource_service';
 import { AssistantPluginSetup, ObservabilityPluginSetup, ObservabilityPluginStart } from './types';
 
 export interface ObservabilityPluginSetupDependencies {
@@ -40,10 +47,43 @@ export interface ObservabilityPluginSetupDependencies {
   dataSource: DataSourcePluginSetup;
 }
 
+/**
+ * Phase-2 reconciler wiring state kept on the plugin instance.
+ *
+ * `setup()` builds the ruler client, the rule-health checker (shared with
+ * route handlers), the reconciler itself (so the admin `_reconcile` route can
+ * hold a reference from day one), and two mutable refs that `start()`
+ * populates with CoreStart-only state (internal OS client + SO-backed store).
+ * `stop()` halts the reconciler interval.
+ */
+interface ReconcilerWiring {
+  ruler: DirectQueryRulerClient;
+  healthChecker: RuleHealthChecker;
+  /**
+   * Mutable reference to the store the reconciler reads from. `start()` swaps
+   * `.current` to the SavedObject-backed store at the same moment
+   * `SloService.setStore` does, so the reconciler and the service share one
+   * persistence backend.
+   */
+  storeRef: { current: ISloStore };
+  /**
+   * Mutable reference to the OS client the reconciler uses to talk to the
+   * ruler. Populated in `start()` with `core.opensearch.client.asInternalUser`
+   * — until then the reconciler is constructed but `start()` is not called, so
+   * timer sweeps never run without a real client.
+   */
+  clientRef: {
+    current: import('../common/types/alerting/types').AlertingOSClient | undefined;
+  };
+}
+
 export class ObservabilityPlugin
   implements Plugin<ObservabilityPluginSetup, ObservabilityPluginStart> {
   private readonly logger: Logger;
   private sloService?: SloService;
+  private ruleHealthChecker?: RuleHealthChecker;
+  private reconciler?: SloReconciler;
+  private reconcilerWiring?: ReconcilerWiring;
 
   constructor(private readonly initializerContext: PluginInitializerContext) {
     this.logger = initializerContext.logger.get();
@@ -60,6 +100,16 @@ export class ObservabilityPlugin
     const { assistantDashboards, dataSource } = deps;
     this.logger.debug('Observability: Setup');
     const router = core.http.createRouter();
+
+    // Read plugin config up-front so downstream wiring (reconciler interval,
+    // alertManager flag) can read from one materialized object.
+    const observabilityConfig = await this.initializerContext.config
+      .create<{
+        alertManager?: { enabled: boolean };
+        slo?: { reconcilerIntervalMs: number };
+      }>()
+      .pipe(first())
+      .toPromise();
 
     const dataSourceEnabled = !!dataSource;
     const openSearchObservabilityClient: ILegacyClusterClient = core.opensearch.legacy.createClient(
@@ -300,21 +350,115 @@ export class ObservabilityPlugin
       error: (msg: string) => this.logger.error(msg),
       debug: (msg: string) => this.logger.debug(msg),
     };
-    const sloService = new SloService(sloLogger);
+    // Explicitly construct the in-memory bootstrap store so the reconciler can
+    // share the same instance before `start()` swaps it for the SO-backed one.
+    // Without this, the reconciler would need a reference to SloService's
+    // private `store` field.
+    const initialStore: ISloStore = new InMemorySloStore();
+    const sloService = new SloService(sloLogger, initialStore);
     // Live-status aggregator (W3.1). DirectQuery-backed — queries the ruler
     // through the SQL plugin for recording-rule values + firing alerts.
     // Offline dev paths (no aggregator) fall through to the stub automatically.
     sloService.setStatusAggregator(new DirectQueryStatusAggregator(sloLogger));
     this.sloService = sloService;
 
-    // Register server side APIs
-    setupRoutes({
+    // Phase 2: hoist the DirectQuery ruler + rule-health checker here so both
+    // the route handlers (W1.5 repair / rule_health) and the Phase 2
+    // reconciler can share the same singleton — critical for the checker's
+    // TTL cache, and required for the reconciler's invalidate() hook to
+    // actually affect the probe results the UI sees.
+    const rulerClient = new DirectQueryRulerClient(this.logger);
+    const ruleHealthChecker = createRuleHealthChecker(rulerClient, this.logger);
+    this.ruleHealthChecker = ruleHealthChecker;
+
+    // Alerting datasource registry is built inside `setupRoutes` and shared
+    // with the reconciler (below) so a cold-start sweep doesn't report every
+    // SLO as "datasource not registered" before the first user request
+    // hydrated discovery.
+    //
+    // The reconciler has to exist *before* `setupRoutes` runs so the admin
+    // `_reconcile` route can hold a live reference; `setupRoutes` forwards it
+    // into `registerSloRoutes`. The order is therefore: build ruler/checker →
+    // build reconciler (with deferred client/store refs) → setupRoutes(...,
+    // reconciler) → populate refs in `start()`.
+    const reconcilerIntervalMs = observabilityConfig.slo?.reconcilerIntervalMs ?? 300_000;
+    const reconcilerMetrics = createReconcilerMetrics(this.logger);
+    const reconcilerStoreRef: { current: ISloStore } = { current: initialStore };
+    const reconcilerClientRef: {
+      current: import('../common/types/alerting/types').AlertingOSClient | undefined;
+    } = { current: undefined };
+    const storeProxy: ISloStore = {
+      list: (datasourceIds?: string[]) => reconcilerStoreRef.current.list(datasourceIds),
+      get: (id: string) => reconcilerStoreRef.current.get(id),
+      save: (doc: SloDocument) => reconcilerStoreRef.current.save(doc),
+      delete: (id: string) => reconcilerStoreRef.current.delete(id),
+    };
+
+    // Placeholder datasource service forwarded to the reconciler until
+    // setupRoutes returns the real one. Swapped below via ref update.
+    const datasourceServiceRef: { current: InMemoryDatasourceService | undefined } = {
+      current: undefined,
+    };
+
+    const reconciler = createSloReconciler({
+      store: storeProxy,
+      ruler: rulerClient,
+      healthChecker: ruleHealthChecker,
+      // Lazy resolver — setupRoutes populates datasourceServiceRef before any
+      // timer sweep fires (start() kicks the interval). If a sweep ever runs
+      // before that (admin endpoint called mid-setup), the reconciler surfaces
+      // an error entry per datasource instead of crashing.
+      datasourceService: new Proxy({} as InMemoryDatasourceService, {
+        get(_target, prop) {
+          const real = datasourceServiceRef.current;
+          if (!real) {
+            throw new Error(
+              'SLO reconciler: alerting datasource service not yet wired (setupRoutes has not completed)'
+            );
+          }
+          const value = ((real as unknown) as Record<string | symbol, unknown>)[prop];
+          return typeof value === 'function' ? value.bind(real) : value;
+        },
+      }),
+      logger: this.logger,
+      metrics: reconcilerMetrics,
+      // One shared internal OS client — populated in `start()`. Throws from
+      // the reconciler's own error-handling path if a sweep fires before
+      // `start()` wired the client, which is the correct behavior: the admin
+      // endpoint responds with an error entry per datasource, nothing dies.
+      buildClient: () => {
+        const client = reconcilerClientRef.current;
+        if (!client) {
+          throw new Error(
+            'SLO reconciler: internal OS client not yet wired (plugin start() has not completed)'
+          );
+        }
+        return client;
+      },
+      intervalMs: reconcilerIntervalMs,
+    });
+    this.reconciler = reconciler;
+
+    // Register server side APIs (routes receive the reconciler so the admin
+    // `_reconcile` endpoint is wired on day one).
+    const { alertingDatasourceService } = setupRoutes({
       router,
       client: openSearchObservabilityClient,
       dataSourceEnabled,
       logger: this.logger,
       sloService,
+      ruleHealthChecker,
+      rulerClient,
+      reconciler,
     });
+    datasourceServiceRef.current = alertingDatasourceService;
+
+    this.reconcilerWiring = {
+      ruler: rulerClient,
+      healthChecker: ruleHealthChecker,
+      storeRef: reconcilerStoreRef,
+      clientRef: reconcilerClientRef,
+    };
 
     core.savedObjects.registerType(getVisualizationSavedObject(dataSourceEnabled));
     core.savedObjects.registerType(getSearchSavedObject(dataSourceEnabled));
@@ -329,10 +473,6 @@ export class ObservabilityPlugin
 
     assistantDashboards?.registerMessageParser(PPLParsers);
 
-    const observabilityConfig = await this.initializerContext.config
-      .create<{ alertManager: { enabled: boolean } }>()
-      .pipe(first())
-      .toPromise();
     registerObservabilityUISettings(
       core.uiSettings,
       observabilityConfig.alertManager?.enabled ?? false
@@ -373,7 +513,14 @@ export class ObservabilityPlugin
     if (this.sloService) {
       try {
         const repository = core.savedObjects.createInternalRepository(['slo-definition']);
-        this.sloService.setStore(new SavedObjectSloStore(repository));
+        const soStore = new SavedObjectSloStore(repository);
+        this.sloService.setStore(soStore);
+        // Swap the reconciler's store reference to the same backend — they
+        // MUST share persistence; otherwise the reconciler sweeps an empty
+        // in-memory store while user-created SLOs live in saved objects.
+        if (this.reconcilerWiring) {
+          this.reconcilerWiring.storeRef.current = soStore;
+        }
         this.logger.info('Observability: SLO storage upgraded to SavedObjects');
       } catch (err: unknown) {
         this.logger.warn(
@@ -384,8 +531,47 @@ export class ObservabilityPlugin
       }
     }
 
+    // Populate the reconciler's deferred internal-client ref and start its
+    // interval. The reconciler instance itself was built in `setup()` so the
+    // admin `_reconcile` route could hold a live reference from day one; here
+    // we just finish wiring and kick the sweep timer.
+    //
+    // One shared internal client is fine for Phase 2 — MDS-per-datasource
+    // routing requires a request context we don't have on a timer, and lands
+    // with Phase 3.
+    if (this.reconciler && this.reconcilerWiring) {
+      try {
+        const internalClient = core.opensearch.client.asInternalUser;
+        const asAlertingClient = (internalClient as unknown) as import('../common/types/alerting/types').AlertingOSClient;
+        this.reconcilerWiring.clientRef.current = asAlertingClient;
+        this.reconciler.start();
+        this.logger.info('Observability: SLO reconciler started');
+      } catch (err: unknown) {
+        this.logger.warn(
+          `Observability: Failed to start SLO reconciler: ${
+            err instanceof Error ? err.message : String(err)
+          }`
+        );
+      }
+    }
+
     return {};
   }
 
-  public stop() {}
+  public stop() {
+    // Stop the reconciler and await any in-flight sweep so plugin teardown
+    // doesn't race a late log write. Fire-and-log the promise — OSD's
+    // `Plugin.stop` is sync in the public typing, but the underlying
+    // lifecycle tolerates async cleanup started here.
+    if (this.reconciler) {
+      this.reconciler.stop().catch((err: unknown) => {
+        this.logger.warn(
+          `Observability: SLO reconciler shutdown error: ${
+            err instanceof Error ? err.message : String(err)
+          }`
+        );
+      });
+      this.reconciler = undefined;
+    }
+  }
 }

@@ -1,0 +1,349 @@
+/*
+ * Copyright OpenSearch Contributors
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/**
+ * SloReconciler (Phase 2, W2.1 + W2.3) — background sweep that compares the
+ * recording/alert rule groups each SLO saved object *expects* against what the
+ * Prometheus-compatible ruler (Cortex / Mimir) actually hosts, then:
+ *
+ *   - Classifies every expected group as either `present` or `missing`.
+ *   - Classifies every actual group that no SLO claims as an `orphan`, and
+ *     (via the peer `detectOrphanDiff` helper in `orphan_detector.ts`) splits
+ *     orphans into `adoptable` vs `unknown` using provenance rules that are
+ *     stubbed in Phase 2 and completed in Phase 4.
+ *   - Calls `healthChecker.invalidate(ws, ds, sloId)` for every SLO that showed
+ *     up in `missingBySlo` so the next UI probe recomputes fresh instead of
+ *     waiting for the 30s TTL. This is the W2.3 hook — splitting it into its
+ *     own agent would force two workstreams to serialize on this file.
+ *   - Emits metric counters per sweep (`sweeps`, `missing_rule_groups`,
+ *     `orphans`, `errors`) via the injected `ReconcilerMetrics` surface. Phase
+ *     2 intentionally emits from the raw diff counts — NOT the merged
+ *     `SloHealthState` — so rate-of-change alerts on "rule groups vanished
+ *     unexpectedly" fire off the distinct `rulerErrorCode` rather than the
+ *     aggregator's priority-merged bucket.
+ *
+ * Algorithm note: the reconciler is read-only in Phase 2. It does NOT delete
+ * orphans, repair missing groups, or mutate the ruler. Surfacing the diff is
+ * enough for Phase 1's repair UX; Phase 3/4 bolt destructive actions on top.
+ *
+ * Lifecycle:
+ *   - `start()` schedules a timer. First sweep fires *after* `intervalMs` —
+ *     never on start — so plugin boot isn't paying for a Cortex round trip.
+ *   - A sweep that's still running when the next tick fires is skipped; this
+ *     keeps a slow ruler from queueing up overlapping sweeps that all hit the
+ *     same already-slow endpoint.
+ *   - `stop()` clears the interval AND awaits any in-flight sweep, so tests
+ *     and plugin teardown don't race a late log write.
+ *
+ * All timer side-effects are isolated behind the returned `SloReconciler`
+ * interface so consumers never see a raw NodeJS.Timeout handle.
+ */
+
+import type { AlertingOSClient, Datasource, Logger } from '../../../common/types/alerting/types';
+import type { ISloStore, SloDocument } from '../../../common/slo/slo_types';
+import { deriveExpectedGroups, sloRulerNamespaceFor } from '../../../common/slo/slo_service';
+import { SloRulerError } from '../../../common/slo/slo_errors';
+import type { InMemoryDatasourceService } from '../alerting/datasource_service';
+import type { RulerClient } from './ruler_client';
+import type { RuleHealthChecker } from './rule_health_checker';
+import { detectOrphanDiff } from './orphan_detector';
+import type { ReconcilerMetrics } from './reconciler_metrics';
+
+// Re-export for ergonomic consumers of the reconciler — they can pull the
+// metrics surface from one place without knowing it's physically defined by
+// the peer W2.5 module.
+export type { ReconcilerMetrics } from './reconciler_metrics';
+
+// ============================================================================
+// Public API
+// ============================================================================
+
+export interface ReconcileMissingEntry {
+  sloId: string;
+  datasourceId: string;
+  namespace: string;
+  missingGroups: string[];
+}
+
+export interface ReconcileOrphanEntry {
+  datasourceId: string;
+  namespace: string;
+  groupName: string;
+}
+
+export interface ReconcileErrorEntry {
+  datasourceId: string;
+  namespace: string;
+  message: string;
+}
+
+export interface ReconcileResult {
+  startedAt: string;
+  finishedAt: string;
+  durationMs: number;
+  datasourceIds: string[];
+  missingBySlo: ReconcileMissingEntry[];
+  orphans: ReconcileOrphanEntry[];
+  adoptableOrphans: ReconcileOrphanEntry[];
+  unknownOrphans: ReconcileOrphanEntry[];
+  errors: ReconcileErrorEntry[];
+}
+
+export interface SloReconciler {
+  start(): void;
+  stop(): Promise<void>;
+  /** Run one sweep and return the diff. Safe to call from tests / admin endpoint. */
+  reconcileOnce(opts?: { datasourceIds?: string[] }): Promise<ReconcileResult>;
+}
+
+export interface SloReconcilerDeps {
+  store: ISloStore;
+  ruler: RulerClient;
+  healthChecker: RuleHealthChecker;
+  datasourceService: InMemoryDatasourceService;
+  logger: Logger;
+  metrics: ReconcilerMetrics;
+  /**
+   * Build the OS client used to talk to the ruler for a given datasource.
+   * The reconciler runs on a timer without a request context, so it cannot
+   * use the usual per-request `asCurrentUser` client — the plugin wires an
+   * internal (`asInternalUser`) client in here at `start()`.
+   */
+  buildClient: (ds: Datasource) => AlertingOSClient;
+  /**
+   * workspaceId ⇄ datasourceId mapping. Today the datasourceId doubles as
+   * the tenant discriminator (matches `buildDeployContext` in
+   * `server/routes/slo/index.ts`); Phase 3+ replaces this with real
+   * workspace scoping.
+   */
+  workspaceIdForDatasource?: (datasourceId: string) => string;
+  /** Injected for deterministic tests. */
+  now?: () => Date;
+  intervalMs?: number;
+}
+
+const DEFAULT_INTERVAL_MS = 5 * 60_000;
+
+/**
+ * Factory. Keeps `setInterval` / in-flight state encapsulated so consumers only
+ * see the `SloReconciler` contract.
+ */
+export function createSloReconciler(deps: SloReconcilerDeps): SloReconciler {
+  const intervalMs = deps.intervalMs ?? DEFAULT_INTERVAL_MS;
+  const now = deps.now ?? (() => new Date());
+  const workspaceIdFor = deps.workspaceIdForDatasource ?? ((datasourceId: string) => datasourceId);
+
+  let timer: ReturnType<typeof setInterval> | undefined;
+  let inFlight: Promise<ReconcileResult> | undefined;
+
+  async function reconcileOnce(opts?: { datasourceIds?: string[] }): Promise<ReconcileResult> {
+    const startDate = now();
+    const startedAt = startDate.toISOString();
+    const startMs = startDate.getTime();
+
+    const all = await deps.store.list();
+
+    // Group SLOs by datasourceId. The optional caller-supplied filter applies
+    // *before* the per-datasource loop so the admin endpoint can sweep a
+    // single datasource without touching the others.
+    const filter =
+      opts?.datasourceIds && opts.datasourceIds.length > 0
+        ? new Set(opts.datasourceIds)
+        : undefined;
+
+    const byDatasource = new Map<string, SloDocument[]>();
+    for (const doc of all) {
+      const dsId = doc.spec.datasourceId;
+      if (filter && !filter.has(dsId)) continue;
+      const bucket = byDatasource.get(dsId);
+      if (bucket) bucket.push(doc);
+      else byDatasource.set(dsId, [doc]);
+    }
+
+    // If the caller filtered to datasources that have no SLOs (e.g. the
+    // "sweep this datasource so we surface its orphans" path), we still want
+    // the sweep to visit them — add every filtered datasource to the map
+    // with an empty SLO list so the loop below sees it.
+    if (filter) {
+      for (const id of filter) {
+        if (!byDatasource.has(id)) byDatasource.set(id, []);
+      }
+    }
+
+    const missingBySlo: ReconcileMissingEntry[] = [];
+    const orphans: ReconcileOrphanEntry[] = [];
+    const adoptableOrphans: ReconcileOrphanEntry[] = [];
+    const unknownOrphans: ReconcileOrphanEntry[] = [];
+    const errors: ReconcileErrorEntry[] = [];
+    const sweptDatasources: string[] = [];
+
+    for (const [datasourceId, docs] of byDatasource.entries()) {
+      const workspaceId = workspaceIdFor(datasourceId);
+      const namespace = sloRulerNamespaceFor(workspaceId);
+
+      let datasource: Datasource | null;
+      try {
+        datasource = await deps.datasourceService.get(datasourceId);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        errors.push({ datasourceId, namespace, message });
+        continue;
+      }
+      if (!datasource) {
+        errors.push({
+          datasourceId,
+          namespace,
+          message: `Datasource "${datasourceId}" is not registered`,
+        });
+        continue;
+      }
+      if (!datasource.directQueryName) {
+        errors.push({
+          datasourceId,
+          namespace,
+          message: `Datasource "${datasource.name}" is not a DirectQuery Prometheus connection`,
+        });
+        continue;
+      }
+
+      const client = deps.buildClient(datasource);
+
+      let actualGroups;
+      try {
+        actualGroups = await deps.ruler.listRuleGroups(client, datasource, namespace);
+      } catch (err) {
+        const message =
+          err instanceof SloRulerError
+            ? `${err.code} (HTTP ${err.httpStatus}): ${err.rawBody}`
+            : err instanceof Error
+            ? err.message
+            : String(err);
+        errors.push({ datasourceId, namespace, message });
+        continue;
+      }
+
+      sweptDatasources.push(datasourceId);
+
+      // Build `expectedGroupsBySlo` from every SLO targeting this datasource.
+      // Non-prometheus / un-provisioned SLOs return `[]` and never contribute
+      // to the diff — keeping them in the map would confuse orphan detection.
+      const expectedGroupsBySlo: Record<string, string[]> = {};
+      for (const doc of docs) {
+        const expected = deriveExpectedGroups(doc);
+        if (expected.length > 0) expectedGroupsBySlo[doc.id] = expected;
+      }
+
+      const actualGroupNames = actualGroups.map((g) => g.groupName);
+
+      const diff = detectOrphanDiff({
+        expectedGroupsBySlo,
+        actualGroupNames,
+        datasourceId,
+        namespace,
+      });
+
+      for (const entry of diff.missingBySlo) {
+        missingBySlo.push({
+          sloId: entry.sloId,
+          datasourceId: entry.datasourceId,
+          namespace: entry.namespace,
+          missingGroups: entry.missingGroups,
+        });
+        // W2.3 hook — invalidate the cache so the next UI probe returns
+        // `rules_missing` immediately instead of waiting for the 30s TTL.
+        deps.healthChecker.invalidate(workspaceId, datasourceId, entry.sloId);
+      }
+
+      for (const entry of diff.orphans) {
+        orphans.push(entry);
+      }
+      for (const entry of diff.adoptableOrphans) {
+        adoptableOrphans.push(entry);
+      }
+      for (const entry of diff.unknownOrphans) {
+        unknownOrphans.push(entry);
+      }
+    }
+
+    const finishedDate = now();
+    const finishedAt = finishedDate.toISOString();
+    const durationMs = Math.max(0, finishedDate.getTime() - startMs);
+
+    deps.metrics.incSweeps();
+    deps.metrics.incMissingRuleGroups(missingBySlo.length);
+    deps.metrics.incOrphans(orphans.length);
+    deps.metrics.incErrors(errors.length);
+
+    deps.logger.info(
+      `SloReconciler: swept ${sweptDatasources.length} datasources, missing=${missingBySlo.length} orphans=${orphans.length} errors=${errors.length} in ${durationMs}ms`
+    );
+
+    return {
+      startedAt,
+      finishedAt,
+      durationMs,
+      datasourceIds: sweptDatasources,
+      missingBySlo,
+      orphans,
+      adoptableOrphans,
+      unknownOrphans,
+      errors,
+    };
+  }
+
+  async function runGuarded(): Promise<ReconcileResult> {
+    const promise = reconcileOnce();
+    inFlight = promise;
+    try {
+      return await promise;
+    } finally {
+      // Clear the in-flight marker only if this sweep is still the current
+      // one — otherwise a late-finishing sweep would clobber a concurrent
+      // admin-triggered `reconcileOnce` call's own tracking.
+      if (inFlight === promise) inFlight = undefined;
+    }
+  }
+
+  return {
+    start(): void {
+      if (timer) return;
+      timer = setInterval(() => {
+        // Re-entrant guard: if the previous sweep hasn't finished, skip this
+        // tick. Keeps a slow ruler from queueing up overlapping sweeps.
+        if (inFlight) {
+          deps.logger.debug('SloReconciler: previous sweep still in flight, skipping this tick');
+          return;
+        }
+        runGuarded().catch((err: unknown) => {
+          // Swallow scheduled-sweep errors at WARN so a transient failure
+          // doesn't kill the interval. `reconcileOnce` is already partial-
+          // error-tolerant per-datasource, so the only way to land here is
+          // a catastrophic pre-loop failure (e.g. store.list() throwing).
+          const message = err instanceof Error ? err.message : String(err);
+          deps.logger.warn(`SloReconciler: scheduled sweep failed — ${message}`);
+        });
+      }, intervalMs);
+    },
+
+    async stop(): Promise<void> {
+      if (timer) {
+        clearInterval(timer);
+        timer = undefined;
+      }
+      // Await any in-flight sweep so plugin teardown / tests don't race the
+      // final log write. We don't care about its result here — callers that
+      // need it used `reconcileOnce` directly.
+      if (inFlight) {
+        try {
+          await inFlight;
+        } catch {
+          // Already logged upstream.
+        }
+      }
+    },
+
+    reconcileOnce,
+  };
+}

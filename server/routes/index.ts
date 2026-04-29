@@ -38,8 +38,23 @@ import {
 import { PrometheusMetadataService } from '../services/alerting/prometheus_metadata_service';
 import { registerSloRoutes } from './slo';
 import type { SloService } from '../../common/slo/slo_service';
-import { DirectQueryRulerClient } from '../services/slo/ruler_client';
-import { createRuleHealthChecker } from '../services/slo/rule_health_checker';
+import type { RulerClient } from '../services/slo/ruler_client';
+import type { RuleHealthChecker } from '../services/slo/rule_health_checker';
+import type { SloReconciler } from '../services/slo/reconciler';
+
+/**
+ * Wiring returned from `setupRoutes` so the plugin-level orchestrator
+ * (`server/plugin.ts`) can reuse internals — specifically the alerting
+ * `InMemoryDatasourceService` — when constructing the Phase 2 reconciler.
+ *
+ * The reconciler needs the *same* datasource registry the routes populate,
+ * otherwise a cold-start reconciler sweep would see an empty map and every
+ * SLO's datasource would be reported as "not registered" until the first
+ * user request hydrated discovery.
+ */
+export interface SetupRoutesResult {
+  alertingDatasourceService: InMemoryDatasourceService;
+}
 
 export function setupRoutes({
   router,
@@ -47,13 +62,33 @@ export function setupRoutes({
   dataSourceEnabled,
   logger,
   sloService,
+  ruleHealthChecker,
+  rulerClient,
+  reconciler,
 }: {
   router: IRouter;
   client: ILegacyClusterClient;
   dataSourceEnabled: boolean;
   logger: Logger;
   sloService?: SloService;
-}) {
+  /**
+   * Phase 2 hoisted the RuleHealthChecker singleton out of this file so the
+   * reconciler can share the same TTL cache. When omitted, SLO repair/health
+   * routes still register but their handlers will surface 501 — matches the
+   * existing offline-dev fallback.
+   */
+  ruleHealthChecker?: RuleHealthChecker;
+  /** Shared DirectQuery ruler client. Optional for the same offline-dev reason. */
+  rulerClient?: RulerClient;
+  /**
+   * Reserved for the admin `_reconcile` route registered by peer agent W2.4.
+   * Forwarded into `registerSloRoutes` so W2.4 can wire it without reaching
+   * back into plugin.ts. Unused here until W2.4 extends
+   * `registerSloRoutes`' signature — the parameter is preserved as a pass-
+   * through so the plugin-level wiring doesn't need to change twice.
+   */
+  reconciler?: SloReconciler;
+}): SetupRoutesResult {
   PanelsRouter(router);
   VisualizationsRouter(router);
   registerPplRoute({ router, facet: new PPLFacet(client) });
@@ -125,11 +160,11 @@ export function setupRoutes({
     // otherwise a DELETE arriving before the first /api/alerting/* call
     // would see an empty map and reject with "Datasource ds-N is not
     // registered" even though the datasource exists.
-    const rulerClient = new DirectQueryRulerClient(logger);
-    // One RuleHealthChecker per plugin instance — it owns the TTL cache the
-    // W1.5 repair + rule_health routes (and the Phase 2 reconciler) all
-    // share. Default TTL (30s) is fine for the UI poll cadence.
-    const ruleHealthChecker = createRuleHealthChecker(rulerClient, logger);
+    //
+    // Phase 2: the ruler client and rule-health checker are hoisted to
+    // `server/plugin.ts` so the reconciler can share the same TTL cache.
+    // `reconciler` threads through to the admin `_reconcile` route registered
+    // inside `registerSloRoutes`.
     registerSloRoutes(
       router,
       sloService,
@@ -138,7 +173,10 @@ export function setupRoutes({
       alertingDatasourceService,
       datasourceDiscoveryService,
       promBackend,
-      ruleHealthChecker
+      ruleHealthChecker,
+      reconciler
     );
   }
+
+  return { alertingDatasourceService };
 }
