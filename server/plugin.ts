@@ -40,6 +40,7 @@ import { createRuleHealthChecker, RuleHealthChecker } from './services/slo/rule_
 import { createSloReconciler, SloReconciler } from './services/slo/reconciler';
 import { createReconcilerMetrics } from './services/slo/reconciler_metrics';
 import { SloRuleRefStore } from './services/slo/slo_rule_ref_store';
+import { createSloRedeployTask } from './services/slo/slo_redeploy_task';
 import { SLO_RULE_REF_SO_TYPE, sloRuleRefType } from './saved_objects/slo_rule_ref';
 import { SLO_V2_MIGRATION_VERSION, sloV2Migration } from './saved_objects/migrations/slo_v2';
 import type { InMemoryDatasourceService } from './services/alerting/datasource_service';
@@ -85,6 +86,14 @@ interface ReconcilerWiring {
    * passes through to the reconciler as "no extensions").
    */
   refStoreRef: { current: SloRuleRefStore | undefined };
+  /**
+   * Alerting datasource service built inside `setupRoutes`. Phase 3 W3.10's
+   * post-migration redeploy task reads it to resolve a per-SLO datasource
+   * before upserting into the ruler.
+   */
+  datasourceService: InMemoryDatasourceService;
+  /** Whether the dedup flag was enabled at boot — W3.10 redeploy skips when off. */
+  ruleDedupEnabled: boolean;
 }
 
 export class ObservabilityPlugin
@@ -540,6 +549,8 @@ export class ObservabilityPlugin
       storeRef: reconcilerStoreRef,
       clientRef: reconcilerClientRef,
       refStoreRef: reconcilerRefStoreRef,
+      datasourceService: alertingDatasourceService,
+      ruleDedupEnabled,
     };
 
     core.savedObjects.registerType(getVisualizationSavedObject(dataSourceEnabled));
@@ -613,11 +624,6 @@ export class ObservabilityPlugin
           );
           this.reconcilerWiring.refStoreRef.current = refStore;
           this.sloService.setRuleRefStore(refStore);
-          // Phase 3 W3.10 redeploy task is available via
-          // `createSloRedeployTask`; wiring it into boot alongside the
-          // alerting datasource service is tracked for a follow-up since the
-          // datasource service is constructed inside `setupRoutes` (see
-          // reconciler wiring above for the pattern it would adopt).
         }
         this.logger.info('Observability: SLO storage upgraded to SavedObjects');
       } catch (err: unknown) {
@@ -651,6 +657,58 @@ export class ObservabilityPlugin
           }`
         );
       }
+    }
+
+    // Phase 3 W3.10 — post-migration redeploy sweep. Runs once on boot (not
+    // on a timer): any `slo-definition` SO with `needsRedeploy: true` (set
+    // by the slo_v2 migration) gets its ruler groups re-emitted into the
+    // dedup shape (shared recording group per fingerprint + per-SLO alert
+    // group with provenance), the old monolithic group is deleted, and the
+    // flag is cleared. Idempotent — a second boot after partial completion
+    // resumes where it left off.
+    //
+    // Fire-and-forget via `setImmediate` so it doesn't delay boot; guarded
+    // by the dedup flag since the legacy codepath doesn't use the new
+    // group shape. Requires the ref store (W3.11) to be wired, which
+    // happens above when storage upgrades to SavedObjects.
+    if (
+      this.sloService &&
+      this.reconcilerWiring &&
+      this.reconcilerWiring.ruleDedupEnabled &&
+      this.reconcilerWiring.refStoreRef.current &&
+      this.reconcilerWiring.clientRef.current
+    ) {
+      const wiring = this.reconcilerWiring;
+      const storeForRedeploy = wiring.storeRef.current;
+      const refStore = wiring.refStoreRef.current;
+      const clientForRedeploy = wiring.clientRef.current;
+      const redeployTask = createSloRedeployTask({
+        store: storeForRedeploy,
+        ruler: wiring.ruler,
+        refStore,
+        datasourceService: wiring.datasourceService,
+        buildClient: () => clientForRedeploy,
+        logger: this.logger,
+        pluginVersion: this.initializerContext.env.packageInfo.version,
+      });
+      setImmediate(() => {
+        redeployTask
+          .redeployOnce()
+          .then((result) => {
+            if (result.candidates > 0) {
+              this.logger.info(
+                `Observability: SLO redeploy sweep completed — candidates=${result.candidates} redeployed=${result.redeployed} errors=${result.errors.length}`
+              );
+            }
+          })
+          .catch((err: unknown) => {
+            this.logger.warn(
+              `Observability: SLO redeploy sweep failed: ${
+                err instanceof Error ? err.message : String(err)
+              }`
+            );
+          });
+      });
     }
 
     return {};
