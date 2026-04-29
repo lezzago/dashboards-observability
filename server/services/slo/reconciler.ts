@@ -234,6 +234,27 @@ export function createSloReconciler(deps: SloReconcilerDeps): SloReconciler {
       for (const id of filter) {
         if (!byDatasource.has(id)) byDatasource.set(id, []);
       }
+    } else {
+      // No filter — sweep every enabled Prometheus datasource, not just those
+      // with live SOs. Without this, a datasource whose SOs were all lost
+      // out-of-band would never surface its orphan rule groups via the
+      // sweep-all path (`GET /_orphans` with no query). We tolerate a
+      // datasource-service failure by leaving the map as-is; the per-slice
+      // error handling below still reports errors for datasources we *do*
+      // know about.
+      try {
+        const registered = await deps.datasourceService.list();
+        for (const ds of registered) {
+          if (ds.enabled === false) continue;
+          if (!ds.directQueryName) continue;
+          if (!byDatasource.has(ds.id)) byDatasource.set(ds.id, []);
+        }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        deps.logger.warn(
+          `SloReconciler: datasource enumeration failed during sweep-all — ${message}`
+        );
+      }
     }
 
     const missingBySlo: ReconcileMissingEntry[] = [];

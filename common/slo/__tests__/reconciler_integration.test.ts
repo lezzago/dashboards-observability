@@ -578,10 +578,11 @@ describe('SloReconciler — integration (W2.7)', () => {
     const before = harness.metrics.snapshot();
     const result = await harness.reconciler.reconcileOnce();
 
-    // With no SLOs and no registered filter, the reconciler's byDatasource
-    // map is empty — `datasourceIds` reports zero swept datasources, but
-    // the sweep still counts as one tick of the loop.
-    expect(result.datasourceIds).toEqual([]);
+    // Phase 4: the unfiltered sweep-all path enumerates every registered
+    // enabled Prometheus datasource so a datasource whose SOs were all lost
+    // still surfaces its orphans. With one fixture datasource and no rule
+    // groups, the sweep visits it and finds nothing — no missing, no orphans.
+    expect(result.datasourceIds).toHaveLength(1);
     expect(result.missingBySlo).toEqual([]);
     expect(result.orphans).toEqual([]);
     expect(result.adoptableOrphans).toEqual([]);
