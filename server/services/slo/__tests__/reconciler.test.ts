@@ -164,6 +164,8 @@ function buildMocks(): Mocks {
       incErrors: jest.fn(),
       incDanglingRefs: jest.fn(),
       incGraceDeletions: jest.fn(),
+      incAdoptableOrphans: jest.fn(),
+      incUnknownOrphans: jest.fn(),
       snapshot: jest.fn(),
       reset: jest.fn(),
     },

@@ -37,6 +37,8 @@ describe('ReconcilerMetrics — zero state', () => {
       errors: 0,
       danglingRefs: 0,
       graceDeletions: 0,
+      adoptableOrphans: 0,
+      unknownOrphans: 0,
     });
   });
 });
@@ -89,7 +91,33 @@ describe('ReconcilerMetrics — increments', () => {
       errors: 4,
       danglingRefs: 0,
       graceDeletions: 0,
+      adoptableOrphans: 0,
+      unknownOrphans: 0,
     });
+  });
+
+  // Phase 4 W4.2 — the detector splits `orphans` into adoptable/unknown buckets;
+  // the reconciler bumps these counters in parallel with `orphans` so operators
+  // can graph the adoption vs drift split separately.
+  it('incAdoptableOrphans() defaults to +1 per call', () => {
+    const metrics = createReconcilerMetrics(mockLogger());
+    metrics.incAdoptableOrphans();
+    metrics.incAdoptableOrphans();
+    expect(metrics.snapshot().adoptableOrphans).toBe(2);
+  });
+
+  it('incUnknownOrphans() defaults to +1 per call', () => {
+    const metrics = createReconcilerMetrics(mockLogger());
+    metrics.incUnknownOrphans();
+    expect(metrics.snapshot().unknownOrphans).toBe(1);
+  });
+
+  it('incAdoptableOrphans / incUnknownOrphans accept custom n', () => {
+    const metrics = createReconcilerMetrics(mockLogger());
+    metrics.incAdoptableOrphans(3);
+    metrics.incUnknownOrphans(7);
+    expect(metrics.snapshot().adoptableOrphans).toBe(3);
+    expect(metrics.snapshot().unknownOrphans).toBe(7);
   });
 
   it('treats n=0 as a no-op but still emits a debug log', () => {
@@ -144,6 +172,8 @@ describe('ReconcilerMetrics — reset', () => {
     metrics.incOrphans(20);
     metrics.incMissingRuleGroups(30);
     metrics.incErrors(40);
+    metrics.incAdoptableOrphans(50);
+    metrics.incUnknownOrphans(60);
 
     metrics.reset();
 
@@ -154,6 +184,8 @@ describe('ReconcilerMetrics — reset', () => {
       errors: 0,
       danglingRefs: 0,
       graceDeletions: 0,
+      adoptableOrphans: 0,
+      unknownOrphans: 0,
     });
   });
 
@@ -175,6 +207,8 @@ describe('ReconcilerMetrics — reset', () => {
       errors: 0,
       danglingRefs: 0,
       graceDeletions: 0,
+      adoptableOrphans: 0,
+      unknownOrphans: 0,
     });
   });
 });
@@ -214,7 +248,24 @@ describe('ReconcilerMetrics — negative-n clamping', () => {
       errors: 0,
       danglingRefs: 0,
       graceDeletions: 0,
+      adoptableOrphans: 0,
+      unknownOrphans: 0,
     });
+  });
+
+  it('clamps negative incAdoptableOrphans / incUnknownOrphans', () => {
+    const logger = mockLogger();
+    const metrics = createReconcilerMetrics(logger);
+    metrics.incAdoptableOrphans(-2);
+    metrics.incUnknownOrphans(-3);
+    expect(metrics.snapshot().adoptableOrphans).toBe(0);
+    expect(metrics.snapshot().unknownOrphans).toBe(0);
+    expect(logger.debug).toHaveBeenCalledWith(
+      expect.stringMatching(/negative increment clamped to 0.*counter=adoptableOrphans/)
+    );
+    expect(logger.debug).toHaveBeenCalledWith(
+      expect.stringMatching(/negative increment clamped to 0.*counter=unknownOrphans/)
+    );
   });
 });
 

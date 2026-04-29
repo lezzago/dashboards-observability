@@ -40,8 +40,10 @@ import { createRuleHealthChecker, RuleHealthChecker } from './services/slo/rule_
 import { createSloReconciler, SloReconciler } from './services/slo/reconciler';
 import { createReconcilerMetrics } from './services/slo/reconciler_metrics';
 import { SloRuleRefStore } from './services/slo/slo_rule_ref_store';
+import { SloTombstoneStore } from './services/slo/slo_tombstone_store';
 import { createSloRedeployTask } from './services/slo/slo_redeploy_task';
 import { SLO_RULE_REF_SO_TYPE, sloRuleRefType } from './saved_objects/slo_rule_ref';
+import { SLO_TOMBSTONE_SO_TYPE, sloTombstoneType } from './saved_objects/slo_tombstone';
 import { SLO_V2_MIGRATION_VERSION, sloV2Migration } from './saved_objects/migrations/slo_v2';
 import type { InMemoryDatasourceService } from './services/alerting/datasource_service';
 import { AssistantPluginSetup, ObservabilityPluginSetup, ObservabilityPluginStart } from './types';
@@ -386,6 +388,11 @@ export class ObservabilityPlugin
     // reconciler's W3.11 grace-period sweep.
     core.savedObjects.registerType(sloRuleRefType);
 
+    // Phase 4 (W4.1): tombstone registry — one SO per deliberately-deleted
+    // SLO. Consumed by the reconciler / Recover UI (W4.2) so orphan rule
+    // groups from a known delete don't get re-surfaced as "adopt?" candidates.
+    core.savedObjects.registerType(sloTombstoneType);
+
     // SLO service — starts with InMemorySloStore; upgraded to SavedObjectSloStore in start().
     const sloLogger = {
       info: (msg: string) => this.logger.info(msg),
@@ -608,6 +615,7 @@ export class ObservabilityPlugin
         const repository = core.savedObjects.createInternalRepository([
           'slo-definition',
           SLO_RULE_REF_SO_TYPE,
+          SLO_TOMBSTONE_SO_TYPE,
         ]);
         const soStore = new SavedObjectSloStore(repository);
         this.sloService.setStore(soStore);
@@ -624,6 +632,14 @@ export class ObservabilityPlugin
           );
           this.reconcilerWiring.refStoreRef.current = refStore;
           this.sloService.setRuleRefStore(refStore);
+
+          // Phase 4 W4.1: tombstone store. Written unconditionally from the
+          // delete paths; the adoption feature that reads tombstones is gated
+          // elsewhere by `observability.slo.ruleAdoption.enabled`.
+          const tombstoneStore = new SloTombstoneStore(
+            (repository as unknown) as import('../../../src/core/server').SavedObjectsClientContract
+          );
+          this.sloService.setTombstoneStore(tombstoneStore);
         }
         this.logger.info('Observability: SLO storage upgraded to SavedObjects');
       } catch (err: unknown) {

@@ -436,7 +436,7 @@ describe('SloReconciler — integration (W2.7)', () => {
     expect(postB.state).toBe('ok');
   });
 
-  it('orphan detection: a stray ruler group with no owning SLO shows up in unknownOrphans; adoptable stays empty (Phase 2)', async () => {
+  it('orphan detection: a stray ruler group with no owning SLO shows up in unknownOrphans; adoptable stays empty (Phase 4 pre-Phase-3-layout path)', async () => {
     harness = await makeHarness([{ name: 'prom-a', directQueryName: 'prom-a-connection' }]);
     const dsId = Array.from(harness.deploys.keys())[0];
     await seedSlo(harness, dsId, { name: 'slo-real' });
@@ -464,12 +464,15 @@ describe('SloReconciler — integration (W2.7)', () => {
 
     expect(result.missingBySlo).toEqual([]);
     expect(result.orphans).toHaveLength(1);
-    expect(result.orphans[0]).toEqual({
+    // Phase 4 (W4.2) — the orphan is tagged with the "pre-Phase-3 rule
+    // layout" diagnostic because it carries no provenance annotation.
+    // Legacy-group adoption is out of scope per orchestrator decision D2.
+    expect(result.orphans[0]).toMatchObject({
       datasourceId: dsId,
       namespace: ns,
       groupName: strayGroupName,
+      diagnostic: 'pre-Phase-3 rule layout; not eligible for adoption',
     });
-    // Phase 2: provenance-parse is stubbed, every orphan is "unknown".
     expect(result.unknownOrphans).toEqual(result.orphans);
     expect(result.adoptableOrphans).toEqual([]);
     expect(result.errors).toEqual([]);
@@ -479,6 +482,9 @@ describe('SloReconciler — integration (W2.7)', () => {
     expect(after.orphans - before.orphans).toBe(1);
     expect(after.missingRuleGroups - before.missingRuleGroups).toBe(0);
     expect(after.errors - before.errors).toBe(0);
+    // Phase 4 — new counters parallel the adoptable/unknown split.
+    expect(after.adoptableOrphans - before.adoptableOrphans).toBe(0);
+    expect(after.unknownOrphans - before.unknownOrphans).toBe(1);
   });
 
   it("multi-workspace isolation: dropping ds-A's group does not produce a missing entry under ds-B", async () => {

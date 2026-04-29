@@ -38,6 +38,13 @@ const observabilityConfig = {
       ruleDedup: schema.object({
         enabled: schema.boolean({ defaultValue: true }),
       }),
+      // Phase 4 (W4.1): rule-adoption feature flag. Default-off. Tombstones
+      // are written unconditionally during SLO delete (cheap, always useful
+      // for debugging), but the adoption feature that *reads* tombstones and
+      // surfaces orphan rule groups in a Recover UI is gated on this flag.
+      ruleAdoption: schema.object({
+        enabled: schema.boolean({ defaultValue: false }),
+      }),
       // Phase 3 (W3.11): grace period before the reconciler deletes a
       // zero-ref recording group. Default 24h; floor at 60s so tests can
       // pick a tight window without risking accidental prod misconfig.

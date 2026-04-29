@@ -22,9 +22,12 @@
  *     `missingRuleGroups` per actual diff entry — sourced from the distinct
  *     `rulerErrorCode` field on `RuleHealthReport`). This file just tallies.
  *   - Phase 3 extends this module to carry `dangling_refs` and
- *     `grace_deletions`; Phase 4 adds `adoptable_orphans` and
+ *     `grace_deletions`; Phase 4 (W4.2) adds `adoptable_orphans` and
  *     `unknown_orphans`. Adding them later is a pure extension — no existing
- *     counter semantics change.
+ *     counter semantics change. `orphans` continues to track the total
+ *     orphan count (= adoptable + unknown) so existing alerts keep firing;
+ *     the two new counters let operators graph the adoption-vs-unknown
+ *     split separately.
  */
 
 import type { Logger } from '../../../common/types/alerting/types';
@@ -42,6 +45,13 @@ export interface ReconcilerMetricsSnapshot {
    * hit zero longer than `observability.slo.recordingGraceMs` ago.
    */
   graceDeletions: number;
+  /** Phase 4 W4.2 — orphans whose provenance integrity verified ('ok'). */
+  adoptableOrphans: number;
+  /**
+   * Phase 4 W4.2 — orphans that couldn't be adopted (no provenance, drift,
+   * unsupported schema, or recording-only without a paired alert).
+   */
+  unknownOrphans: number;
 }
 
 /**
@@ -58,6 +68,10 @@ export interface ReconcilerMetrics {
   incDanglingRefs(n?: number): void;
   /** Phase 3 W3.11 — zero-ref recording groups swept past the grace period. */
   incGraceDeletions(n?: number): void;
+  /** Phase 4 W4.2 — alert-group orphans whose provenance integrity verified. */
+  incAdoptableOrphans(n?: number): void;
+  /** Phase 4 W4.2 — orphans the reconciler refused to classify as adoptable. */
+  incUnknownOrphans(n?: number): void;
   /**
    * Return a frozen copy of the current counters. Mutating the returned
    * object does not affect internal state; subsequent `snapshot()` calls
@@ -80,7 +94,9 @@ type CounterName =
   | 'missingRuleGroups'
   | 'errors'
   | 'danglingRefs'
-  | 'graceDeletions';
+  | 'graceDeletions'
+  | 'adoptableOrphans'
+  | 'unknownOrphans';
 
 /**
  * Factory. Keeps the counter state in a closure so callers can't reach past
@@ -94,6 +110,8 @@ export function createReconcilerMetrics(logger: Logger): ReconcilerMetrics {
     errors: 0,
     danglingRefs: 0,
     graceDeletions: 0,
+    adoptableOrphans: 0,
+    unknownOrphans: 0,
   };
 
   /**
@@ -134,6 +152,12 @@ export function createReconcilerMetrics(logger: Logger): ReconcilerMetrics {
     incGraceDeletions(n: number = 1): void {
       bump('graceDeletions', n);
     },
+    incAdoptableOrphans(n: number = 1): void {
+      bump('adoptableOrphans', n);
+    },
+    incUnknownOrphans(n: number = 1): void {
+      bump('unknownOrphans', n);
+    },
     snapshot(): ReconcilerMetricsSnapshot {
       // `Object.freeze` on a fresh object literal prevents the caller from
       // mutating the returned snapshot while leaving `counters` untouched.
@@ -144,6 +168,8 @@ export function createReconcilerMetrics(logger: Logger): ReconcilerMetrics {
         errors: counters.errors,
         danglingRefs: counters.danglingRefs,
         graceDeletions: counters.graceDeletions,
+        adoptableOrphans: counters.adoptableOrphans,
+        unknownOrphans: counters.unknownOrphans,
       });
     },
     reset(): void {
@@ -153,6 +179,8 @@ export function createReconcilerMetrics(logger: Logger): ReconcilerMetrics {
       counters.errors = 0;
       counters.danglingRefs = 0;
       counters.graceDeletions = 0;
+      counters.adoptableOrphans = 0;
+      counters.unknownOrphans = 0;
     },
   };
 }

@@ -54,10 +54,7 @@ import {
   SloValidationError,
   SloVersionConflictError,
 } from './slo_errors';
-import {
-  computeSliFingerprint,
-  FINGERPRINT_VERSION,
-} from './slo_sli_fingerprint';
+import { computeSliFingerprint, FINGERPRINT_VERSION } from './slo_sli_fingerprint';
 import {
   annotateAlertGroup,
   annotateRecordingGroup,
@@ -168,6 +165,37 @@ export interface SloRuleRefStoreLite {
     datasourceId: string;
     fingerprint: string;
   }): Promise<{ droppedToZero: boolean; underflow: boolean }>;
+}
+
+// ============================================================================
+// Phase 4 adoption: tombstone registry surface (W4.1)
+// ============================================================================
+
+/**
+ * Minimal tombstone-store surface the delete path consumes. The real
+ * implementation lives in `server/services/slo/slo_tombstone_store.ts`;
+ * declared structurally here so `slo_service.ts` (common/) does not reach into
+ * the server tree. Mirrors the `SloRuleRefStoreLite` pattern.
+ *
+ * `write` is called unconditionally during `delete`; the adoption feature that
+ * *reads* tombstones is flagged (`observability.slo.ruleAdoption.enabled`),
+ * but the write itself is cheap + always useful for debugging. Failures are
+ * logged warn and swallowed — tombstone absence is a UX degradation, not a
+ * data-integrity issue.
+ */
+export interface SloTombstoneAttributesLite {
+  sloId: string;
+  workspaceId: string;
+  datasourceId: string;
+  name: string;
+  reason?: string;
+  createdAt: string;
+}
+
+export interface SloTombstoneStoreLite {
+  write(attrs: SloTombstoneAttributesLite): Promise<void>;
+  get(sloId: string): Promise<{ attributes: SloTombstoneAttributesLite } | null>;
+  remove(sloId: string): Promise<boolean>;
 }
 
 // ============================================================================
@@ -328,6 +356,12 @@ export class SloService {
    */
   private refStore?: SloRuleRefStoreLite;
   /**
+   * Phase 4 (W4.1) — tombstone registry. Optional. When undefined (unit tests
+   * without SO wiring, or early boot before `start()` runs), the delete path
+   * silently skips the tombstone write; the delete itself still succeeds.
+   */
+  private tombstoneStore?: SloTombstoneStoreLite;
+  /**
    * Plugin version stamped into provenance annotations (W3.3). Defaults to
    * '0.0.0' — production wires the real `kibana.version` from the plugin
    * initializer context.
@@ -352,9 +386,17 @@ export class SloService {
   setRuleRefStore(refStore: SloRuleRefStoreLite | undefined): void {
     this.refStore = refStore;
     this.logger.info(
-      refStore
-        ? 'SloService: rule-ref store configured'
-        : 'SloService: rule-ref store cleared'
+      refStore ? 'SloService: rule-ref store configured' : 'SloService: rule-ref store cleared'
+    );
+  }
+
+  /** Phase 4 (W4.1): wire the tombstone registry. Optional — writes are best-effort. */
+  setTombstoneStore(tombstoneStore: SloTombstoneStoreLite | undefined): void {
+    this.tombstoneStore = tombstoneStore;
+    this.logger.info(
+      tombstoneStore
+        ? 'SloService: tombstone store configured'
+        : 'SloService: tombstone store cleared'
     );
   }
 
@@ -978,7 +1020,8 @@ export class SloService {
     const isDedupSo =
       provisioning.backend === 'prometheus' &&
       (provisioning.recordingFingerprints !== undefined ||
-        (typeof provisioning.alertGroupName === 'string' && provisioning.alertGroupName.length > 0));
+        (typeof provisioning.alertGroupName === 'string' &&
+          provisioning.alertGroupName.length > 0));
 
     // Phase 3 dedup path: tear down the per-SLO alert group, decrement refs,
     // but never synchronously delete a shared recording group — the
@@ -1021,8 +1064,11 @@ export class SloService {
     await this.store.delete(id);
     this.statusCache.delete(id);
 
-    const names =
-      provisioning.backend === 'prometheus' ? provisioning.generatedRuleNames : [];
+    // Phase 4 W4.1: best-effort tombstone write. Never rolls the delete back —
+    // tombstone absence is a UX degradation, not a data-integrity failure.
+    await this.writeTombstone(existing, deploy?.workspaceId);
+
+    const names = provisioning.backend === 'prometheus' ? provisioning.generatedRuleNames : [];
 
     this.logger.info(`Deleted SLO: ${id}`);
     return { deleted: true, generatedRuleNames: names };
@@ -1062,12 +1108,7 @@ export class SloService {
       provisioning.alertGroupName ||
       dedupAlertGroupName(existing.spec.name, deploy.workspaceId, existing.id);
 
-    await deploy.ruler.deleteRuleGroup(
-      deploy.client,
-      deploy.datasource,
-      namespace,
-      alertGroupName
-    );
+    await deploy.ruler.deleteRuleGroup(deploy.client, deploy.datasource, namespace, alertGroupName);
 
     await this.store.delete(existing.id);
     this.statusCache.delete(existing.id);
@@ -1091,6 +1132,9 @@ export class SloService {
         }
       }
     }
+
+    // Phase 4 W4.1: best-effort tombstone write. Never rolls the delete back.
+    await this.writeTombstone(existing, deploy.workspaceId);
 
     this.logger.info(`Deleted SLO (dedup): ${existing.id}`);
     return { deleted: true, generatedRuleNames: provisioning.generatedRuleNames };
@@ -1193,6 +1237,41 @@ export class SloService {
       updatedBy,
       deploy
     );
+  }
+
+  /**
+   * Phase 4 W4.1 — best-effort tombstone write called from both delete paths.
+   *
+   * Silently skips when the store isn't wired (tests / early boot). When the
+   * store throws, logs `warn` and swallows — the SO is already gone and a
+   * tombstone-write failure doesn't justify a user-facing error.
+   *
+   * `workspaceId` is derived from the deploy context when present; otherwise
+   * falls back to `spec.datasourceId`, which matches the Phase 3 convention
+   * elsewhere in this plugin (FIXME thread a real workspace id through).
+   */
+  private async writeTombstone(
+    existing: SloDocument,
+    workspaceIdFromDeploy: string | undefined
+  ): Promise<void> {
+    if (!this.tombstoneStore) return;
+    const workspaceId = workspaceIdFromDeploy ?? existing.spec.datasourceId;
+    try {
+      await this.tombstoneStore.write({
+        sloId: existing.id,
+        workspaceId,
+        datasourceId: existing.spec.datasourceId,
+        name: existing.spec.name,
+        reason: 'user_delete',
+        createdAt: new Date().toISOString(),
+      });
+    } catch (err) {
+      this.logger.warn(
+        `SloService: tombstone write failed for ${existing.id}: ${
+          err instanceof Error ? err.message : String(err)
+        }`
+      );
+    }
   }
 
   /**

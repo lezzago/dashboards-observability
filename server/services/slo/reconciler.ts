@@ -50,6 +50,7 @@ import type { InMemoryDatasourceService } from '../alerting/datasource_service';
 import type { RulerClient } from './ruler_client';
 import type { RuleHealthChecker } from './rule_health_checker';
 import { detectOrphanDiff } from './orphan_detector';
+import type { OrphanEntry } from './orphan_detector';
 import type { ReconcilerMetrics } from './reconciler_metrics';
 import type { SloRuleRefStore } from './slo_rule_ref_store';
 
@@ -69,10 +70,24 @@ export interface ReconcileMissingEntry {
   missingGroups: string[];
 }
 
-export interface ReconcileOrphanEntry {
-  datasourceId: string;
-  namespace: string;
-  groupName: string;
+/**
+ * Phase 4 W4.2 — same shape as `OrphanEntry` from `orphan_detector.ts`. Kept
+ * as its own alias so consumers of the reconciler don't have to reach into
+ * the detector module.
+ */
+export type ReconcileOrphanEntry = OrphanEntry;
+
+/** Re-export for ergonomic Phase 4 consumers. */
+export type { SpecIntegrity } from './orphan_detector';
+
+/**
+ * Phase 4 W4.2 — minimal shape the reconciler needs to read tombstones. The
+ * real SO-backed tombstone store (owned by W4.1) structurally satisfies
+ * this interface. Kept here rather than imported so this file compiles
+ * regardless of W4.1's exact export layout at sync time.
+ */
+export interface SloTombstoneReaderLite {
+  get(sloId: string): Promise<{ createdAt: string } | null>;
 }
 
 export interface ReconcileErrorEntry {
@@ -150,6 +165,20 @@ export interface SloReconcilerDeps {
    * deleted. Defaults to 24 hours (`observability.slo.recordingGraceMs`).
    */
   recordingGraceMs?: number;
+  /**
+   * Phase 4 W4.2 — optional tombstone reader. Gated on presence, just like
+   * `refStore`: when absent, every orphan's `tombstoned` field is left
+   * `undefined`. The detector doesn't read this — the reconciler enriches
+   * adoptable + unknown orphans post-diff.
+   */
+  tombstoneStore?: SloTombstoneReaderLite;
+  /**
+   * Phase 4 W4.2 — optional TTL override for tests. Defaults to 30 days
+   * (matching `SLO_TOMBSTONE_TTL_MS` in `slo_tombstone_store.ts`).
+   * Tombstones older than the TTL are treated as if they never existed
+   * for adoption purposes — the orphan surfaces with `tombstoned: false`.
+   */
+  tombstoneTtlMs?: number;
   /** Injected for deterministic tests. */
   now?: () => Date;
   intervalMs?: number;
@@ -157,6 +186,7 @@ export interface SloReconcilerDeps {
 
 const DEFAULT_INTERVAL_MS = 5 * 60_000;
 const DEFAULT_RECORDING_GRACE_MS = 24 * 60 * 60_000;
+const DEFAULT_TOMBSTONE_TTL_MS = 30 * 24 * 60 * 60_000;
 
 /**
  * Factory. Keeps `setInterval` / in-flight state encapsulated so consumers only
@@ -166,6 +196,7 @@ export function createSloReconciler(deps: SloReconcilerDeps): SloReconciler {
   const intervalMs = deps.intervalMs ?? DEFAULT_INTERVAL_MS;
   const now = deps.now ?? (() => new Date());
   const recordingGraceMs = deps.recordingGraceMs ?? DEFAULT_RECORDING_GRACE_MS;
+  const tombstoneTtlMs = deps.tombstoneTtlMs ?? DEFAULT_TOMBSTONE_TTL_MS;
   const workspaceIdFor = deps.workspaceIdForDatasource ?? ((datasourceId: string) => datasourceId);
 
   let timer: ReturnType<typeof setInterval> | undefined;
@@ -272,9 +303,13 @@ export function createSloReconciler(deps: SloReconcilerDeps): SloReconciler {
 
       const actualGroupNames = actualGroups.map((g) => g.groupName);
 
+      // Phase 4 W4.2 — pass the full group objects so the detector can read
+      // `osd_slo_provenance` annotations and split orphans into
+      // adoptable / unknown buckets.
       const diff = detectOrphanDiff({
         expectedGroupsBySlo,
         actualGroupNames,
+        actualGroups,
         datasourceId,
         namespace,
       });
@@ -289,6 +324,37 @@ export function createSloReconciler(deps: SloReconcilerDeps): SloReconciler {
         // W2.3 hook — invalidate the cache so the next UI probe returns
         // `rules_missing` immediately instead of waiting for the 30s TTL.
         deps.healthChecker.invalidate(workspaceId, datasourceId, entry.sloId);
+      }
+
+      // Phase 4 W4.2 — enrich each adoptable/unknown orphan that has a
+      // resolved `sourceSloId` with tombstone presence. Runs only when a
+      // tombstone store is wired; failures are logged at warn and treated
+      // as "no tombstone" so a tombstone-store outage doesn't block the
+      // orphan sweep.
+      if (deps.tombstoneStore) {
+        const enrichable = [...diff.adoptableOrphans, ...diff.unknownOrphans];
+        const nowMs = now().getTime();
+        for (const entry of enrichable) {
+          if (!entry.sourceSloId) continue;
+          try {
+            const tombstone = await deps.tombstoneStore.get(entry.sourceSloId);
+            if (!tombstone) continue;
+            const createdAtMs = Date.parse(tombstone.createdAt);
+            const isExpired =
+              !Number.isFinite(createdAtMs) || createdAtMs + tombstoneTtlMs <= nowMs;
+            if (isExpired) {
+              entry.tombstoned = false;
+            } else {
+              entry.tombstoned = true;
+              entry.tombstoneCreatedAt = tombstone.createdAt;
+            }
+          } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            deps.logger.warn(
+              `SloReconciler: tombstone lookup failed for slo=${entry.sourceSloId} — ${message}`
+            );
+          }
+        }
       }
 
       for (const entry of diff.orphans) {
@@ -374,9 +440,11 @@ export function createSloReconciler(deps: SloReconcilerDeps): SloReconciler {
     deps.metrics.incErrors(errors.length);
     deps.metrics.incDanglingRefs(danglingRefs.length);
     deps.metrics.incGraceDeletions(graceDeletions.length);
+    deps.metrics.incAdoptableOrphans(adoptableOrphans.length);
+    deps.metrics.incUnknownOrphans(unknownOrphans.length);
 
     deps.logger.info(
-      `SloReconciler: swept ${sweptDatasources.length} datasources, missing=${missingBySlo.length} orphans=${orphans.length} danglingRefs=${danglingRefs.length} graceDeletions=${graceDeletions.length} errors=${errors.length} in ${durationMs}ms`
+      `SloReconciler: swept ${sweptDatasources.length} datasources, missing=${missingBySlo.length} orphans=${orphans.length} (adoptable=${adoptableOrphans.length} unknown=${unknownOrphans.length}) danglingRefs=${danglingRefs.length} graceDeletions=${graceDeletions.length} errors=${errors.length} in ${durationMs}ms`
     );
 
     return {
