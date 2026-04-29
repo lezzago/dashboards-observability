@@ -55,7 +55,14 @@ export interface SloDetailPageProps {
   parentBreadcrumb: { text: string; href: string };
 }
 
-type FullDoc = SloDocument & { liveStatus: SloLiveStatus };
+type FullDoc = SloDocument & {
+  liveStatus: SloLiveStatus;
+  /**
+   * Phase 3 W3.12 — refcount per recording fingerprint. `{}` for legacy /
+   * non-dedup SLOs.
+   */
+  recordingFingerprintRefcounts?: Record<string, number>;
+};
 
 /** Strip trailing zeros from a target/attainment percentage for compact rendering. */
 function formatTightPct(value: number, decimals = 3): string {
@@ -549,6 +556,21 @@ export const SloDetailPage: React.FC<SloDetailPageProps> = ({
       ? legacyRecordingNames
       : allRuleNames;
 
+  // Phase 3 W3.12 — "Shared with N other SLOs" pill. Refcount includes the
+  // current SLO's own claim, so N others = max(refcount-1, 0). We pick the
+  // highest other-count across fingerprints the SLO references; a single
+  // number conveys the signal without listing per-fingerprint specifics.
+  // Falls back to 0 when the server didn't return refcounts (legacy docs /
+  // refstore not wired).
+  const refcounts = doc.recordingFingerprintRefcounts ?? {};
+  const sharedOtherCount = dedupFingerprints
+    ? [...new Set(Object.values(dedupFingerprints))].reduce((max, fp) => {
+        const count = refcounts[fp] ?? 0;
+        const others = Math.max(0, count - 1);
+        return others > max ? others : max;
+      }, 0)
+    : 0;
+
   const summaryListItems: Array<{ title: React.ReactNode; description: React.ReactNode }> = [
     { title: 'ID', description: doc.id },
     { title: 'Datasource', description: doc.spec.datasourceId },
@@ -800,6 +822,23 @@ export const SloDetailPage: React.FC<SloDetailPageProps> = ({
                             to chart SLI error ratios.
                           </p>
                         </EuiText>
+                        {sharedOtherCount > 0 && (
+                          <>
+                            <EuiSpacer size="s" />
+                            <EuiBadge
+                              color="hollow"
+                              iconType="link"
+                              data-test-subj="slosDetailSharedWithPill"
+                              title={`These recording rules are also referenced by ${sharedOtherCount} other SLO${
+                                sharedOtherCount === 1 ? '' : 's'
+                              } sharing the same SLI shape.`}
+                            >
+                              {`Shared with ${sharedOtherCount} other SLO${
+                                sharedOtherCount === 1 ? '' : 's'
+                              }`}
+                            </EuiBadge>
+                          </>
+                        )}
                         <EuiSpacer size="s" />
                         {recordingRuleNames.map((ruleName, idx) => (
                           <EuiFlexGroup

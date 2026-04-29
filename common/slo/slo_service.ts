@@ -363,6 +363,43 @@ export class SloService {
     this.pluginVersion = version;
   }
 
+  /**
+   * Phase 3 (W3.12) — look up the current refcount for each recording
+   * fingerprint the SLO references. Returns `{}` when the SLO doesn't carry
+   * dedup fields (legacy / pre-migration), when the ref store isn't wired
+   * (tests, offline), or when a fingerprint has no corresponding ref SO
+   * (drift; reconciler surfaces it separately).
+   *
+   * The UI uses this for the "Shared with N other SLOs" pill: N = refcount
+   * of the fingerprint − 1 (subtract the current SLO's own claim).
+   */
+  async getFingerprintRefcounts(
+    doc: SloDocument,
+    workspaceId: string
+  ): Promise<Record<string, number>> {
+    if (!this.refStore) return {};
+    if (doc.status.provisioning.backend !== 'prometheus') return {};
+    const fps = doc.status.provisioning.recordingFingerprints;
+    if (!fps) return {};
+    const unique = [...new Set(Object.values(fps))];
+    const out: Record<string, number> = {};
+    await Promise.all(
+      unique.map(async (fp) => {
+        try {
+          const entry = await this.refStore!.get(workspaceId, doc.spec.datasourceId, fp);
+          if (entry) out[fp] = entry.attributes.refcount;
+        } catch (err) {
+          this.logger.warn(
+            `SloService.getFingerprintRefcounts: lookup failed for fp=${fp}: ${
+              err instanceof Error ? err.message : String(err)
+            }`
+          );
+        }
+      })
+    );
+    return out;
+  }
+
   setStore(store: ISloStore): void {
     this.store = store;
     this.statusCache.clear();

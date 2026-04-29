@@ -118,7 +118,16 @@ export async function handleGetSLO(
     const doc = await svc.get(id);
     if (!doc) return { status: 404, body: { error: 'SLO not found' } };
     const liveStatus = await svc.getStatus(id, statusCtx);
-    return { status: 200, body: { ...doc, liveStatus } };
+    // Phase 3 W3.12 — include the refcount per recording fingerprint so the
+    // detail page can render "Shared with N other SLOs". When no ref store
+    // is wired (offline / tests / legacy docs) the map is `{}` and the UI
+    // treats every fingerprint as unshared.
+    const workspaceId = statusCtx?.workspaceId ?? 'default';
+    const recordingFingerprintRefcounts = await svc.getFingerprintRefcounts(doc, workspaceId);
+    return {
+      status: 200,
+      body: { ...doc, liveStatus, recordingFingerprintRefcounts },
+    };
   } catch (e) {
     return toSloError(e, logger);
   }

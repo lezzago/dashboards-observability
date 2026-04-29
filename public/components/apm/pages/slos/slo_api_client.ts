@@ -137,7 +137,19 @@ export class SloApiClient {
     return this.http.get(SLO_BASE, { query: serializeFilters(filters) });
   }
 
-  get(id: string): Promise<SloDocument & { liveStatus: SloLiveStatus }> {
+  get(
+    id: string
+  ): Promise<
+    SloDocument & {
+      liveStatus: SloLiveStatus;
+      /**
+       * Phase 3 W3.12 — refcount per recording fingerprint, so the detail
+       * page can render "Shared with N other SLOs". `{}` for legacy / non-
+       * dedup SLOs.
+       */
+      recordingFingerprintRefcounts?: Record<string, number>;
+    }
+  > {
     return this.http.get(`${SLO_BASE}/${encodeURIComponent(id)}`);
   }
 
