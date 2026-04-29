@@ -655,6 +655,336 @@ export function extractGeneratedRuleNames(group: GeneratedRuleGroup): string[] {
 }
 
 // ============================================================================
+// Phase 3 (W3.7) — dedup-era split generation
+//
+// In dedup mode the service layer emits two kinds of ruler groups:
+//
+//   - N shared *recording* groups (one per unique SLI fingerprint).
+//     Group name: `slo:rec:<fp>`. Recording rules are named
+//     `slo:sli_error:ratio_rate_<w>:sli_<fp>` and carry NO SLO-identity
+//     labels — they evaluate the same expression regardless of which SLO
+//     references them, so attaching identity labels would defeat the dedup.
+//
+//   - 1 per-SLO *alert* group. Group name: `slo:alerts:<slug>_<suffix>`.
+//     Alerts look up recording rules by their fingerprint-derived name; no
+//     `{slo_id=...}` selector (the recording series doesn't carry that
+//     label any more). Alerts attach the full SLO identity labels
+//     themselves, so downstream routing still gets everything it needs.
+//
+// Shared with the legacy path:
+//   - The alerting-rule templates (burn-rate MWMBR, sli_health, attainment,
+//     budget warnings, no_data). Only their recording-rule references are
+//     rewritten to use fingerprint-named rules.
+//   - `commonLabels`, `slugifySloObjective`, `ruleSuffix`.
+//
+// Pure. Identical inputs → identical outputs, byte for byte. Specifically:
+//
+//     recordingRulesFor(fpA) === recordingRulesFor(fpB)   iff fpA === fpB
+//
+// Which is the invariant that lets the registry skip the ruler upsert when
+// `incrementRef.wasZero === false`.
+// ============================================================================
+
+/**
+ * Name of the recording rule for a given fingerprint + window.
+ * Phase 3 dedup rules: `slo:sli_error:ratio_rate_<w>:sli_<fp>`.
+ */
+export function dedupRecordingRuleName(fingerprint: string, window: string): string {
+  return `slo:sli_error:ratio_rate_${window}:sli_${fingerprint}`;
+}
+
+/** Name of the shared recording group for a fingerprint: `slo:rec:<fp>`. */
+export function dedupRecordingGroupName(fingerprint: string): string {
+  return `slo:rec:${fingerprint}`;
+}
+
+/**
+ * Build the shared recording group for a single fingerprint. Returns `null`
+ * when the SLI is composite / OpenSearch-backed — those cases have no
+ * Prometheus recording rules. The returned group's rules carry ONLY
+ * `slo_window` labels (and `slo_window_approximated` when relevant via
+ * alerts — recording rules themselves don't need approximation flags).
+ *
+ * Note: the input requires a "representative" `SingleSli` that produced
+ * the fingerprint. Any SLO that matches the same fingerprint will produce
+ * byte-equal output; the service layer picks one arbitrarily per
+ * fingerprint when deploying.
+ */
+export function generateRecordingGroupForFingerprint(input: {
+  fingerprint: string;
+  sli: SingleSli;
+  /** Required only when the SLI is a `latency_threshold` type. */
+  objectiveLatencyThreshold?: number;
+}): GeneratedRuleGroup | null {
+  if (input.sli.definition.backend !== 'prometheus') return null;
+  const { fingerprint, sli } = input;
+  const prom = sli.definition;
+
+  // Build a minimal Objective stand-in so `errorRatioExpr` can read
+  // `latencyThreshold` the same way it does for legacy rules. Name/target
+  // aren't referenced here, so any placeholder is fine.
+  const objectiveStub: Objective = {
+    name: `fp-${fingerprint}`,
+    target: 0,
+    latencyThreshold: input.objectiveLatencyThreshold,
+  };
+
+  const rules: GeneratedRule[] = [];
+  for (const window of RECORDING_WINDOWS) {
+    const name = dedupRecordingRuleName(fingerprint, window);
+    const expr = errorRatioExpr(prom, sli, window, objectiveStub);
+    rules.push({
+      type: 'recording',
+      name,
+      expr,
+      labels: { slo_window: window },
+      description: `Pre-computed error ratio over the ${window} window (fingerprint ${fingerprint})`,
+    });
+  }
+
+  const groupName = dedupRecordingGroupName(fingerprint);
+  return {
+    groupName,
+    interval: DEFAULT_INTERVAL_SECONDS,
+    rules,
+    yaml: rulesToYaml(groupName, DEFAULT_INTERVAL_SECONDS, rules),
+  };
+}
+
+/**
+ * Build the per-SLO alert group. Alerts reference fingerprint-named
+ * recording rules (no `{slo_id="X"}` selector) and carry full SLO
+ * identity labels themselves so downstream routing keeps working.
+ *
+ * Shadow mode and `createAlarm: false` tiers still suppress their
+ * alert bodies; the resulting group can be empty. The caller is
+ * responsible for injecting a W3.3 sentinel alert when the group is
+ * empty.
+ */
+export function generateAlertGroupFor(
+  doc: SloDocument,
+  recordingFingerprints: Record<string, string>,
+  opts: { workspaceId?: string } = {}
+): GeneratedRuleGroup {
+  const { spec, id } = doc;
+  const workspaceId = opts.workspaceId ?? 'default';
+  const groupSlug = slugifySloObjective(spec.name, 'group');
+  const firstSuffix = ruleSuffix(workspaceId, id, 'group');
+  const groupName = `slo:alerts:${groupSlug}_${firstSuffix}`;
+
+  const rules: GeneratedRule[] = [];
+  if (spec.sli.type !== 'single') {
+    return {
+      groupName,
+      interval: DEFAULT_INTERVAL_SECONDS,
+      rules: [],
+      yaml: rulesToYaml(groupName, DEFAULT_INTERVAL_SECONDS, rules),
+    };
+  }
+
+  for (const objective of spec.objectives) {
+    const fingerprint = recordingFingerprints[objective.name];
+    if (!fingerprint) {
+      // Fingerprint map is missing this objective — can happen for
+      // OpenSearch/composite SLIs. Skip; the caller shouldn't have passed
+      // this objective in.
+      continue;
+    }
+    const suffix = ruleSuffix(workspaceId, id, objective.name);
+    const slug = slugifySloObjective(spec.name, objective.name);
+    rules.push(...generateDedupBurnRateAlerts(spec, id, suffix, slug, objective, fingerprint));
+    const sliHealth = generateDedupSliHealthAlert(spec, id, suffix, slug, objective, fingerprint);
+    if (sliHealth) rules.push(sliHealth);
+    const attainment = generateDedupAttainmentAlert(spec, id, suffix, slug, objective, fingerprint);
+    if (attainment) rules.push(attainment);
+    rules.push(...generateDedupBudgetWarningAlerts(spec, id, suffix, slug, objective, fingerprint));
+    const noData = generateNoDataAlert(spec, id, suffix, slug, objective);
+    if (noData) rules.push(noData);
+  }
+
+  return {
+    groupName,
+    interval: DEFAULT_INTERVAL_SECONDS,
+    rules,
+    yaml: rulesToYaml(groupName, DEFAULT_INTERVAL_SECONDS, rules),
+  };
+}
+
+// Dedup-mode alert rule helpers — references fingerprint-named recording
+// rules directly. Alert expressions drop the `{slo_id=...}` selector because
+// dedup recording rules don't carry that label any more.
+
+function generateDedupBurnRateAlerts(
+  spec: SloSpec,
+  sloId: string,
+  suffix: string,
+  slug: string,
+  objective: Objective,
+  fingerprint: string
+): GeneratedRule[] {
+  const errorBudget = 1 - objective.target;
+  const base = commonLabels(spec, sloId, objective);
+  const tiers = spec.alerting.strategy === 'mwmbr' ? spec.alerting.burnRates : [];
+  const rules: GeneratedRule[] = [];
+
+  for (let i = 0; i < tiers.length; i++) {
+    const tier = tiers[i];
+    if (spec.mode === 'shadow' || !tier.createAlarm) continue;
+
+    const threshold = roundThreshold(tier.burnRateMultiplier * errorBudget);
+    const shortRec = dedupRecordingRuleName(fingerprint, tier.shortWindow);
+    const longRec = dedupRecordingRuleName(fingerprint, tier.longWindow);
+    const tierLabel = MWMBR_TIER_LABELS[i] ?? `Tier${i + 1}`;
+    const name = `SLO_BurnRate_${tierLabel}_${slug}_${suffix}`;
+
+    // No `{slo_id=...}` selector — dedup recording series no longer carry
+    // identity labels. The `and ignoring(slo_window)` join still lets the
+    // short/long series align on the remaining (empty, modulo slo_window)
+    // label set.
+    const expr =
+      `${shortRec} > ${threshold}\n` + `and ignoring(slo_window)\n` + `${longRec} > ${threshold}`;
+
+    rules.push({
+      type: 'alerting',
+      name,
+      expr,
+      for: tier.forDuration,
+      labels: {
+        ...base,
+        slo_severity: tier.severity,
+        slo_alarm_type: 'burn_rate',
+        slo_burn_rate_multiplier: String(tier.burnRateMultiplier),
+        slo_window: `${tier.shortWindow}/${tier.longWindow}`,
+      },
+      annotations: {
+        summary: `SLO burn rate ${tier.severity} — ${tier.burnRateMultiplier}x budget consumption (${tier.shortWindow}/${tier.longWindow})`,
+        description:
+          `Error budget for ${spec.name} (${objective.name}) is being consumed at ` +
+          `${tier.burnRateMultiplier}x the allowed rate. Both the ${tier.shortWindow} and ` +
+          `${tier.longWindow} error ratios exceed ${threshold}.`,
+      },
+      description: `MWMBR burn-rate alert: ${tier.burnRateMultiplier}x (${tier.shortWindow}/${tier.longWindow}), severity=${tier.severity}`,
+    });
+  }
+
+  return rules;
+}
+
+function generateDedupSliHealthAlert(
+  spec: SloSpec,
+  sloId: string,
+  suffix: string,
+  slug: string,
+  objective: Objective,
+  fingerprint: string
+): GeneratedRule | null {
+  if (!spec.alarms.sliHealth.enabled || spec.mode === 'shadow') return null;
+  const errorBudget = 1 - objective.target;
+  const base = commonLabels(spec, sloId, objective);
+  const rec = dedupRecordingRuleName(fingerprint, '5m');
+  return {
+    type: 'alerting',
+    name: `SLO_SLIHealth_${slug}_${suffix}`,
+    expr: `${rec} > ${roundThreshold(errorBudget)}`,
+    for: '5m',
+    labels: {
+      ...base,
+      slo_severity: 'warning',
+      slo_alarm_type: 'sli_health',
+      slo_window: '5m',
+    },
+    annotations: {
+      summary: `SLI health degraded — error ratio exceeds error budget for ${spec.name} (${objective.name})`,
+    },
+    description: `SLI health alert — fires when 5m error ratio exceeds error budget`,
+  };
+}
+
+function generateDedupAttainmentAlert(
+  spec: SloSpec,
+  sloId: string,
+  suffix: string,
+  slug: string,
+  objective: Objective,
+  fingerprint: string
+): GeneratedRule | null {
+  if (!spec.alarms.attainmentBreach.enabled || spec.mode === 'shadow') return null;
+  if (spec.window.type !== 'rolling') return null;
+  const errorBudget = 1 - objective.target;
+  const recWindow = findClosestRecordingWindow(spec.window.duration);
+  const approximated = recWindow !== spec.window.duration;
+  const rec = dedupRecordingRuleName(fingerprint, recWindow);
+  const base = commonLabels(spec, sloId, objective);
+  const labels: Record<string, string> = {
+    ...base,
+    slo_severity: 'critical',
+    slo_alarm_type: 'attainment',
+    slo_window: recWindow,
+  };
+  if (approximated) labels.slo_window_approximated = 'true';
+  return {
+    type: 'alerting',
+    name: `SLO_Attainment_${slug}_${suffix}`,
+    expr: `${rec} > ${roundThreshold(errorBudget)}`,
+    for: '5m',
+    labels,
+    annotations: {
+      summary: `SLO attainment breached — ${spec.name} (${objective.name}) below target over ${spec.window.duration}`,
+    },
+    description: `Attainment breach — full-window error ratio exceeds budget${
+      approximated ? ' (3d proxy)' : ''
+    }`,
+  };
+}
+
+function generateDedupBudgetWarningAlerts(
+  spec: SloSpec,
+  sloId: string,
+  suffix: string,
+  slug: string,
+  objective: Objective,
+  fingerprint: string
+): GeneratedRule[] {
+  if (!spec.alarms.budgetWarning.enabled || spec.mode === 'shadow') return [];
+  if (spec.window.type !== 'rolling') return [];
+  const errorBudget = 1 - objective.target;
+  const recWindow = findClosestRecordingWindow(spec.window.duration);
+  const approximated = recWindow !== spec.window.duration;
+  const rec = dedupRecordingRuleName(fingerprint, recWindow);
+  const base = commonLabels(spec, sloId, objective);
+
+  return spec.budgetWarningThresholds.map((bw, i) => {
+    const expr =
+      `1 - (\n` +
+      `  ${rec}\n` +
+      `  / ${roundThreshold(errorBudget)}\n` +
+      `) < ${roundThreshold(bw.threshold)}`;
+    const pct = Math.round(bw.threshold * 100);
+    const labels: Record<string, string> = {
+      ...base,
+      slo_severity: bw.severity,
+      slo_alarm_type: 'error_budget_warning',
+      slo_budget_threshold: String(bw.threshold),
+      slo_window: recWindow,
+    };
+    if (approximated) labels.slo_window_approximated = 'true';
+    return {
+      type: 'alerting',
+      name: `SLO_Warning_${pct}pct_${slug}_${suffix}${
+        spec.budgetWarningThresholds.length > 1 ? `_${i}` : ''
+      }`,
+      expr,
+      for: '15m',
+      labels,
+      annotations: {
+        summary: `SLO warning — less than ${pct}% error budget remaining for ${spec.name} (${objective.name})`,
+      },
+      description: `Budget warning — remaining budget < ${pct}%`,
+    };
+  });
+}
+
+// ============================================================================
 // Probe SLI query builder — W8 (Probe SLI wizard feature)
 // ============================================================================
 
