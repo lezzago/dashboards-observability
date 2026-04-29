@@ -49,8 +49,7 @@ type AdoptionErrorCodeLite =
   | 'ORPHAN_WORKSPACE_MISMATCH'
   | 'ORPHAN_CLAIM_CONFLICT'
   | 'ORPHAN_UNSUPPORTED_SCHEMA'
-  | 'ORPHAN_TOMBSTONED'
-  | 'CLONE_NAME_COLLISION';
+  | 'ORPHAN_TOMBSTONED';
 
 interface SloAdoptionErrorLike {
   name: 'SloAdoptionError';
@@ -75,16 +74,10 @@ function isSloAdoptionErrorLike(e: unknown): e is SloAdoptionErrorLike {
  *   ORPHAN_WORKSPACE_MISMATCH → 422
  *   ORPHAN_CLAIM_CONFLICT     → 409
  *   ORPHAN_TOMBSTONED         → 409  (retry with acknowledgeTombstone: true)
- *   CLONE_NAME_COLLISION      → 409
  */
 function toAdoptionErrorResponse(err: SloAdoptionErrorLike): HandlerResult {
   const code = err.code;
-  const status =
-    code === 'ORPHAN_CLAIM_CONFLICT' ||
-    code === 'ORPHAN_TOMBSTONED' ||
-    code === 'CLONE_NAME_COLLISION'
-      ? 409
-      : 422;
+  const status = code === 'ORPHAN_CLAIM_CONFLICT' || code === 'ORPHAN_TOMBSTONED' ? 409 : 422;
   return {
     status,
     body: {
@@ -96,7 +89,7 @@ function toAdoptionErrorResponse(err: SloAdoptionErrorLike): HandlerResult {
 }
 
 function toSloError(e: unknown, logger?: Logger): HandlerResult {
-  // Phase 4 W4.6: adoption-specific errors from the recover/clone paths.
+  // Phase 4 W4.6: adoption-specific errors from the recover path.
   // Checked before the generic typed-error ladder so the envelope stays
   // adoption-shaped (code + message) rather than the legacy validation
   // envelope.
@@ -409,7 +402,7 @@ export async function handleGetRuleHealth(
 }
 
 // ============================================================================
-// W4.6 — Adoption endpoints (`_orphans`, `_recover`, `_clone`)
+// W4.6 — Adoption endpoints (`_orphans`, `_recover`)
 //
 // Framework-agnostic handler factories for the adoption endpoints. The 412
 // feature-flag gate lives in the route adapter (`adoption_route.ts`) so the
@@ -417,11 +410,8 @@ export async function handleGetRuleHealth(
 // assume the gate already passed and focus on service-call + error-code
 // translation.
 //
-// The `recover` and `clone` service methods are authored by the W4.4/W4.5
-// sibling agent on `SloService`. We type their inputs/outputs locally so
-// this module can compile before B2A's import surface lands; the shapes
-// mirror the orchestrator plan's contract verbatim so a later swap to the
-// real types is a mechanical rename.
+// Input/output shapes are typed structurally via `Lite` interfaces so this
+// module doesn't reach into the concrete `SloService` type.
 // ============================================================================
 
 /**
@@ -437,23 +427,8 @@ export interface RecoverSloInputLite {
 }
 
 /**
- * Phase 4 (W4.6) — input shape for `SloService.clone`. Same rationale as
- * `RecoverSloInputLite`.
- */
-export interface CloneSloInputLite {
-  sourceSloId: string;
-  sourceDatasourceId: string;
-  sourceWorkspaceId?: string;
-  targetDatasourceId: string;
-  targetWorkspaceId?: string;
-  overrideName?: string;
-  overrideId?: string;
-}
-
-/**
- * Structural mirror of B2A's `RecoverResult`. The handler treats it as
- * opaque pass-through shape — the service builds the response, we just
- * forward it 200.
+ * Structural mirror of `RecoverResult`. The handler treats it as opaque
+ * pass-through — the service builds the response, we just forward it 200.
  */
 export interface RecoverSloResultLite {
   slo: unknown;
@@ -461,26 +436,13 @@ export interface RecoverSloResultLite {
   refcountChanges: Array<{ fingerprint: string; previousRefcount: number; newRefcount: number }>;
 }
 
-/** Structural mirror of B2A's `CloneResult`. */
-export interface CloneSloResultLite {
-  slo: unknown;
-  sourceSpecSha256: string;
-}
-
 /**
- * Service-surface the adoption handlers call. We avoid extending the
- * concrete `SloService` type here because the `recover` / `clone` methods
- * are owned by B2A and may not be on the class at typecheck time. The
- * structural interface lets the handler compile today and seamlessly
- * narrow when B2A's additions land.
+ * Service-surface the adoption handlers call. Structural so `handlers.ts`
+ * does not need to import the concrete `SloService` — keeps this module
+ * framework-agnostic.
  */
 export interface SloAdoptionServiceLite {
   recover(input: RecoverSloInputLite, deploy: SloDeployContext): Promise<RecoverSloResultLite>;
-  clone(
-    input: CloneSloInputLite,
-    sourceDeploy: SloDeployContext,
-    targetDeploy: SloDeployContext
-  ): Promise<CloneSloResultLite>;
 }
 
 /**
@@ -596,29 +558,6 @@ export async function handleRecoverSlo(
   try {
     const result = await svc.recover(input, deploy);
     return { status: 200, body: result };
-  } catch (e) {
-    return toSloError(e, logger);
-  }
-}
-
-/**
- * `POST /api/observability/v1/slos/_clone` — copies a source SLO into a
- * (possibly different) target datasource/workspace, optionally renaming.
- *
- * Returns 201 (Created) on success because a new SLO resource is produced.
- * Source deploy context is read-only; target deploy context is used for
- * the ruler upsert.
- */
-export async function handleCloneSlo(
-  svc: SloAdoptionServiceLite,
-  input: CloneSloInputLite,
-  sourceDeploy: SloDeployContext,
-  targetDeploy: SloDeployContext,
-  logger?: Logger
-): Promise<HandlerResult> {
-  try {
-    const result = await svc.clone(input, sourceDeploy, targetDeploy);
-    return { status: 201, body: result };
   } catch (e) {
     return toSloError(e, logger);
   }

@@ -27,14 +27,9 @@ import { createReconcilerMetrics } from '../reconciler_metrics';
 import { FakeRulerClient } from '../../../../common/slo/__tests__/fake_ruler_client';
 import {
   annotateAlertGroup,
-  annotateRecordingGroup,
   buildAlertProvenance,
-  buildRecordingProvenance,
 } from '../../../../common/slo/slo_rule_provenance';
-import {
-  FINGERPRINT_VERSION,
-  computeSliFingerprint,
-} from '../../../../common/slo/slo_sli_fingerprint';
+import { computeSliFingerprint } from '../../../../common/slo/slo_sli_fingerprint';
 import { dedupRecordingGroupName } from '../../../../common/slo/slo_promql_generator';
 import type { AlertingOSClient, Datasource, Logger } from '../../../../common/types/alerting/types';
 import type {
@@ -164,17 +159,11 @@ function buildAdoptableGroups(
       spec,
     })
   );
-  const recordingGroup = annotateRecordingGroup(
-    bareGroup(dedupRecordingGroupName(fingerprint), [
-      stubRecordingRule(`slo:sli_error:ratio_rate_5m:sli_${fingerprint}`),
-    ]),
-    buildRecordingProvenance({
-      pluginVersion: '4.0.0',
-      fingerprint,
-      fingerprintVersion: FINGERPRINT_VERSION,
-      sliSnapshot: {},
-    })
-  );
+  // Recording groups are NOT annotated — Cortex/Prometheus reject annotations
+  // on recording rules. Detector recognizes them by the slo:rec:<fp> name.
+  const recordingGroup = bareGroup(dedupRecordingGroupName(fingerprint), [
+    stubRecordingRule(`slo:sli_error:ratio_rate_5m:sli_${fingerprint}`),
+  ]);
   return { alertGroup, recordingGroup, fingerprint };
 }
 

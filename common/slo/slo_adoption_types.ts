@@ -57,28 +57,6 @@ export interface RecoverResult {
 }
 
 // ============================================================================
-// Clone — W4.5
-// ============================================================================
-
-export interface CloneInput {
-  sourceSloId: string;
-  sourceDatasourceId: string;
-  sourceWorkspaceId: string;
-  targetDatasourceId: string;
-  targetWorkspaceId: string;
-  /** Optional name override. Falls back to source spec.name. */
-  overrideName?: string;
-  /** Optional id override. When unset, `create()` generates a fresh id. */
-  overrideId?: string;
-}
-
-export interface CloneResult {
-  slo: SloDocument;
-  /** sha256 pulled from the source provenance; handy for audit trails. */
-  sourceSpecSha256: string;
-}
-
-// ============================================================================
 // Orphan listing — consumed by W4.6 GET /_orphans response shaping
 // ============================================================================
 
@@ -101,8 +79,7 @@ export interface OrphanAdoptionCandidate {
   /**
    * Outcome of `verifyProvenance` for this candidate. When `ok === true`,
    * the UI can offer Recover without a warning banner; otherwise the
-   * `reason` carries the diagnostic and the candidate may still be
-   * cloneable even if not recoverable.
+   * `reason` carries the diagnostic and Recover is disabled for the row.
    */
   verification: {
     ok: boolean;

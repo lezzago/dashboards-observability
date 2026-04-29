@@ -175,21 +175,6 @@ export interface RecoverResponseBody {
   refcountChanges: RecoverRefcountChange[];
 }
 
-export interface CloneRequestBody {
-  sourceSloId: string;
-  sourceDatasourceId: string;
-  sourceWorkspaceId?: string;
-  targetDatasourceId: string;
-  targetWorkspaceId?: string;
-  overrideName?: string;
-  overrideId?: string;
-}
-
-export interface CloneResponseBody {
-  slo: SloDocument;
-  sourceSpecSha256: string;
-}
-
 /**
  * Envelope returned by the 412 feature-flag gate in `adoption_route.ts`.
  * Populated into `IHttpFetchError.body.attributes` by OSD's `res.customError`
@@ -323,9 +308,5 @@ export class SloApiClient {
 
   async recoverSlo(input: RecoverRequestBody): Promise<RecoverResponseBody> {
     return this.http.post(`${SLO_BASE}/_recover`, { body: JSON.stringify(input) });
-  }
-
-  async cloneSlo(input: CloneRequestBody): Promise<CloneResponseBody> {
-    return this.http.post(`${SLO_BASE}/_clone`, { body: JSON.stringify(input) });
   }
 }

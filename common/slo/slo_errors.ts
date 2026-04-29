@@ -92,7 +92,7 @@ export class SloRulerTeardownRequiredError extends Error {
 }
 
 /**
- * Stable error codes for Phase 4 SLO rule-adoption flows (recover / clone).
+ * Stable error codes for Phase 4 SLO orphan-recovery.
  * Route handlers map these to HTTP statuses and the UI branches on them to
  * render diagnostic copy.
  *
@@ -101,29 +101,25 @@ export class SloRulerTeardownRequiredError extends Error {
  *                              recording groups, or fails current validation).
  *   ORPHAN_WORKSPACE_MISMATCH — orphan belongs to a different
  *                              datasource / workspace than the caller's.
- *                              Suggests Clone instead of Recover.
  *   ORPHAN_CLAIM_CONFLICT    — another live SLO already owns the id or a
  *                              ref-store write collided mid-recover.
  *   ORPHAN_UNSUPPORTED_SCHEMA — provenance schemaVersion not recognized
  *                              (future plugin wrote it, or it's corrupted).
  *   ORPHAN_TOMBSTONED        — SLO was deliberately deleted; caller must
  *                              re-confirm before adoption proceeds.
- *   CLONE_NAME_COLLISION     — target workspace already has an SLO by that
- *                              name; caller must provide `overrideName`.
  */
 export type AdoptionErrorCode =
   | 'ORPHAN_SPEC_DRIFT'
   | 'ORPHAN_WORKSPACE_MISMATCH'
   | 'ORPHAN_CLAIM_CONFLICT'
   | 'ORPHAN_UNSUPPORTED_SCHEMA'
-  | 'ORPHAN_TOMBSTONED'
-  | 'CLONE_NAME_COLLISION';
+  | 'ORPHAN_TOMBSTONED';
 
 /**
- * Thrown by `SloService.recover` / `SloService.clone` when an adoption
- * precondition fails. `code` is the stable contract surface B2B's route
- * handlers map to HTTP statuses; `context` carries structured hints the
- * UI can surface without re-parsing the message.
+ * Thrown by `SloService.recover` when an adoption precondition fails. `code`
+ * is the stable contract surface B2B's route handlers map to HTTP statuses;
+ * `context` carries structured hints the UI can surface without re-parsing
+ * the message.
  */
 export class SloAdoptionError extends Error {
   constructor(

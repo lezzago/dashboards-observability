@@ -9,20 +9,12 @@ import { MemoryRouter } from 'react-router-dom';
 import { SloAdoptionPage } from '../slo_adoption_page';
 import type { SloApiClient } from '../../slo_api_client';
 
-// The Clone tab hits `GET /api/alerting/datasources` via
-// usePrometheusDatasources — stub the hook so the page test focuses on the
-// feature-flag gate without pulling in extra HTTP plumbing.
-jest.mock('../../use_prometheus_datasources', () => ({
-  usePrometheusDatasources: () => ({ datasources: [], loading: false, error: null }),
-}));
-
 function makeApiClient(
   overrides: Partial<jest.Mocked<SloApiClient>> = {}
 ): jest.Mocked<SloApiClient> {
   return ({
     listOrphans: jest.fn().mockResolvedValue({ candidates: [], unknowns: [] }),
     recoverSlo: jest.fn(),
-    cloneSlo: jest.fn(),
     ...overrides,
   } as unknown) as jest.Mocked<SloApiClient>;
 }
@@ -75,7 +67,7 @@ describe('SloAdoptionPage — feature-flag gate', () => {
     await waitFor(() => {
       expect(screen.getByTestId('sloAdoption-page-disabledPrompt')).toBeInTheDocument();
     });
-    expect(screen.queryByTestId('sloAdoption-tabs')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('sloAdoption-recoverTab')).not.toBeInTheDocument();
   });
 
   it('renders an error callout for non-412 errors', async () => {
@@ -89,28 +81,14 @@ describe('SloAdoptionPage — feature-flag gate', () => {
     expect(screen.getByText('kaboom')).toBeInTheDocument();
   });
 
-  it('renders the tabs with Recover active by default on 200', async () => {
+  it('renders the Recover tab on 200', async () => {
     const listOrphans = jest.fn().mockResolvedValue({ candidates: [], unknowns: [] });
     await act(async () => {
       renderPage(makeApiClient({ listOrphans }));
     });
     await waitFor(() => {
-      expect(screen.getByTestId('sloAdoption-tabs')).toBeInTheDocument();
+      expect(screen.getByTestId('sloAdoption-recoverTab')).toBeInTheDocument();
     });
-    // Recover tab body should be mounted.
-    expect(screen.getByTestId('sloAdoption-recoverTab')).toBeInTheDocument();
-    expect(screen.queryByTestId('sloAdoption-cloneTab')).not.toBeInTheDocument();
-  });
-
-  it('honors the ?tab=clone URL parameter on first render', async () => {
-    const listOrphans = jest.fn().mockResolvedValue({ candidates: [], unknowns: [] });
-    await act(async () => {
-      renderPage(makeApiClient({ listOrphans }), '?tab=clone');
-    });
-    await waitFor(() => {
-      expect(screen.getByTestId('sloAdoption-cloneTab')).toBeInTheDocument();
-    });
-    expect(screen.queryByTestId('sloAdoption-recoverTab')).not.toBeInTheDocument();
   });
 
   it('shows the loading state before the gate resolves', async () => {
@@ -127,7 +105,7 @@ describe('SloAdoptionPage — feature-flag gate', () => {
       resolver?.({ candidates: [], unknowns: [] });
     });
     await waitFor(() => {
-      expect(screen.getByTestId('sloAdoption-tabs')).toBeInTheDocument();
+      expect(screen.getByTestId('sloAdoption-recoverTab')).toBeInTheDocument();
     });
   });
 });

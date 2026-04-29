@@ -45,10 +45,8 @@ import type { GeneratedRuleGroup, Objective, SingleSli } from '../../../common/s
 import {
   ALERT_PROVENANCE_ANNOTATION_KEY,
   PROVENANCE_SCHEMA_VERSION,
-  RECORDING_PROVENANCE_ANNOTATION_KEY,
   computeSpecSha256,
   parseAlertProvenance,
-  parseRecordingProvenance,
 } from '../../../common/slo/slo_rule_provenance';
 import type { AlertProvenance } from '../../../common/slo/slo_rule_provenance';
 import { computeSliFingerprint } from '../../../common/slo/slo_sli_fingerprint';
@@ -278,25 +276,24 @@ export function detectOrphanDiff(input: OrphanDiffInput): OrphanDiffResult {
     orphans.push(entry);
   }
 
-  // Pass 2 — groups that didn't land on an alert-provenance annotation. May
-  // be a recording-only orphan (standalone or paired with an adoptable
-  // alert, which we drop), or a no-provenance orphan (pre-Phase-3 layout).
+  // Pass 2 — groups that didn't land on an alert-provenance annotation.
+  // Phase 3 emits recording groups without annotations (Cortex forbids
+  // annotations on recording rules), so we recognize them by name pattern
+  // `slo:rec:<fp>`. Recording groups whose fingerprint was covered by an
+  // adoptable alert-group in Pass 1 are suppressed (already adopted as a
+  // pair). Orphans that don't match either pattern are pre-Phase-3 layout
+  // and not eligible for adoption per D2.
   //
-  // Back-compat mode: when the caller didn't pass `actualGroups`, there's
-  // no annotation surface to inspect — every orphan gets the minimal
-  // three-field shape and surfaces in both `orphans` and `unknownOrphans`
-  // (matching the pre-Phase-4 detector contract).
+  // Back-compat mode: when the caller didn't pass `actualGroups`, the
+  // minimal three-field shape is emitted so pre-Phase-4 callers see the
+  // same structure they always saw.
   const categorizeByAnnotation = actualGroups !== undefined;
   for (const groupName of orphanNames) {
     if (alertGroupHandled.has(groupName)) continue;
-    const group = groupsByName.get(groupName);
-    const recAnnotationRaw = categorizeByAnnotation
-      ? findAnnotation(group, RECORDING_PROVENANCE_ANNOTATION_KEY)
-      : null;
+    const recordingFp = recordingGroupFingerprint(groupName);
 
-    if (recAnnotationRaw !== null) {
-      const recParsed = parseRecordingProvenance(recAnnotationRaw);
-      if (recParsed && coveredRecordingFingerprints.has(recParsed.fingerprint)) {
+    if (recordingFp !== null) {
+      if (coveredRecordingFingerprints.has(recordingFp)) {
         // Paired with an adoptable alert group in Pass 1 — suppress.
         continue;
       }
@@ -352,6 +349,18 @@ function findAnnotation(group: GeneratedRuleGroup | undefined, key: string): str
     if (ann && typeof ann[key] === 'string') return ann[key];
   }
   return null;
+}
+
+/**
+ * Extract the fingerprint from a Phase-3 dedup recording-group name. The name
+ * shape is `slo:rec:<fp>`; anything that doesn't match returns `null`. Kept
+ * here (rather than centrally) because the detector is the only consumer.
+ */
+function recordingGroupFingerprint(groupName: string): string | null {
+  const prefix = 'slo:rec:';
+  if (!groupName.startsWith(prefix)) return null;
+  const fp = groupName.slice(prefix.length);
+  return fp.length > 0 ? fp : null;
 }
 
 /**

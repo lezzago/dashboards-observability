@@ -22,16 +22,10 @@ import { detectOrphanDiff } from '../orphan_detector';
 import type { OrphanEntry } from '../orphan_detector';
 import {
   ALERT_PROVENANCE_ANNOTATION_KEY,
-  RECORDING_PROVENANCE_ANNOTATION_KEY,
   annotateAlertGroup,
-  annotateRecordingGroup,
   buildAlertProvenance,
-  buildRecordingProvenance,
 } from '../../../../common/slo/slo_rule_provenance';
-import {
-  FINGERPRINT_VERSION,
-  computeSliFingerprint,
-} from '../../../../common/slo/slo_sli_fingerprint';
+import { computeSliFingerprint } from '../../../../common/slo/slo_sli_fingerprint';
 import { dedupRecordingGroupName } from '../../../../common/slo/slo_promql_generator';
 import type { GeneratedRule, GeneratedRuleGroup, SloSpec } from '../../../../common/slo/slo_types';
 
@@ -122,18 +116,16 @@ function alertGroupWithProvenance(
   return annotateAlertGroup(base, provenance);
 }
 
-function recordingGroupWithProvenance(fingerprint: string): GeneratedRuleGroup {
+/**
+ * Build a recording group the way the Phase-3 service deploys it — NO
+ * annotation (Cortex/Prometheus reject annotations on recording rules). The
+ * detector recognizes recording groups by the `slo:rec:<fp>` name pattern.
+ */
+function recordingGroupForFingerprint(fingerprint: string): GeneratedRuleGroup {
   const groupName = dedupRecordingGroupName(fingerprint);
-  const base = bareGroup(groupName, [
+  return bareGroup(groupName, [
     stubRecordingRule(`slo:sli_error:ratio_rate_5m:sli_${fingerprint}`),
   ]);
-  const prov = buildRecordingProvenance({
-    pluginVersion: '4.0.0',
-    fingerprint,
-    fingerprintVersion: FINGERPRINT_VERSION,
-    sliSnapshot: {},
-  });
-  return annotateRecordingGroup(base, prov);
 }
 
 function findEntry(entries: OrphanEntry[], groupName: string): OrphanEntry | undefined {
@@ -172,7 +164,7 @@ describe('detectOrphanDiff — Phase 4 categorization', () => {
         'slo-1',
         spec
       );
-      const recordingGroup = recordingGroupWithProvenance(fingerprint!);
+      const recordingGroup = recordingGroupForFingerprint(fingerprint!);
 
       const result = detectOrphanDiff({
         expectedGroupsBySlo: {},
@@ -331,7 +323,7 @@ describe('detectOrphanDiff — Phase 4 categorization', () => {
   describe('standalone recording-only orphan', () => {
     it('emits unknownOrphans entry with diagnostic "recording-only orphan"', () => {
       const fp = 'deadbeefcafefeed';
-      const recordingGroup = recordingGroupWithProvenance(fp);
+      const recordingGroup = recordingGroupForFingerprint(fp);
 
       const result = detectOrphanDiff({
         expectedGroupsBySlo: {},
@@ -354,7 +346,7 @@ describe('detectOrphanDiff — Phase 4 categorization', () => {
       const spec = validSpec();
       const fp = computeSliFingerprint(spec.datasourceId, spec.sli, spec.objectives[0])!;
       const alertGroup = alertGroupWithProvenance('slo:alerts:paired_ab1', 'slo-1', spec);
-      const recordingGroup = recordingGroupWithProvenance(fp);
+      const recordingGroup = recordingGroupForFingerprint(fp);
 
       const result = detectOrphanDiff({
         expectedGroupsBySlo: {},
@@ -400,8 +392,8 @@ describe('detectOrphanDiff — Phase 4 categorization', () => {
       const fp2 = computeSliFingerprint(spec.datasourceId, spec.sli, spec.objectives[1])!;
       expect(fp1).not.toBe(fp2);
       const alertGroup = alertGroupWithProvenance('slo:alerts:twoobj_ab1', 'slo-1', spec);
-      const rec1 = recordingGroupWithProvenance(fp1);
-      const rec2 = recordingGroupWithProvenance(fp2);
+      const rec1 = recordingGroupForFingerprint(fp1);
+      const rec2 = recordingGroupForFingerprint(fp2);
 
       const result = detectOrphanDiff({
         expectedGroupsBySlo: {},
@@ -420,11 +412,12 @@ describe('detectOrphanDiff — Phase 4 categorization', () => {
       expect(entry.specIntegrity).toBe('ok');
     });
 
-    it('backward-compat: name-only callers see minimal orphan entries (no Phase-4 metadata)', () => {
-      // When the reconciler (or any caller) forgets to pass `actualGroups`,
-      // there are no annotations to inspect. The detector preserves the
-      // pre-Phase-4 contract: minimal { datasourceId, namespace, groupName }
-      // shape in `orphans` and `unknownOrphans`, no diagnostic / metadata.
+    it('name-only callers: detector classifies by name pattern alone', () => {
+      // Recording groups are recognized by their `slo:rec:<fp>` name pattern;
+      // the name-only path surfaces the same recording-only diagnostic as the
+      // full-group path. Alert-group orphans without `actualGroups` carry no
+      // provenance to inspect, so they land in `unknownOrphans` with the
+      // minimal shape (no diagnostic / metadata).
       const result = detectOrphanDiff({
         expectedGroupsBySlo: {},
         actualGroupNames: ['slo:alerts:anything_ab1', 'slo:rec:ffff'],
@@ -434,11 +427,13 @@ describe('detectOrphanDiff — Phase 4 categorization', () => {
 
       expect(result.adoptableOrphans).toHaveLength(0);
       expect(result.unknownOrphans).toHaveLength(2);
-      for (const entry of result.unknownOrphans) {
-        expect(entry.diagnostic).toBeUndefined();
-        expect(entry.specIntegrity).toBeUndefined();
-        expect(entry.sourceSloId).toBeUndefined();
-      }
+      const alertEntry = findEntry(result.unknownOrphans, 'slo:alerts:anything_ab1');
+      expect(alertEntry?.diagnostic).toBeUndefined();
+      expect(alertEntry?.specIntegrity).toBeUndefined();
+      const recordingEntry = findEntry(result.unknownOrphans, 'slo:rec:ffff');
+      expect(recordingEntry?.diagnostic).toBe(
+        'recording-only orphan; matching alert group missing'
+      );
     });
   });
 
@@ -452,7 +447,7 @@ describe('detectOrphanDiff — Phase 4 categorization', () => {
       const spec = validSpec();
       const fp = computeSliFingerprint(spec.datasourceId, spec.sli, spec.objectives[0])!;
       const alertGroup = alertGroupWithProvenance('slo:alerts:live_ab1', 'slo-1', spec);
-      const rec = recordingGroupWithProvenance(fp);
+      const rec = recordingGroupForFingerprint(fp);
 
       const result = detectOrphanDiff({
         expectedGroupsBySlo: {
@@ -471,14 +466,14 @@ describe('detectOrphanDiff — Phase 4 categorization', () => {
     });
   });
 
-  describe('recording-only orphan annotation present but still unparseable peer', () => {
-    it('does not crash when a recording group carries RECORDING_PROVENANCE_ANNOTATION_KEY with junk', () => {
+  describe('recording group with unparseable/stray annotation', () => {
+    it('ignores any annotation and still classifies by name pattern', () => {
       const group = bareGroup('slo:rec:garbage1', [
         {
           ...stubRecordingRule('slo:sli_error:ratio_rate_5m:sli_garbage1'),
-          annotations: {
-            [RECORDING_PROVENANCE_ANNOTATION_KEY]: 'not json',
-          },
+          // Stray annotation from a pre-fix build — detector no longer reads
+          // recording-rule annotations; classification is name-pattern only.
+          annotations: { some_other_annotation: 'ignored' },
         },
       ]);
       const result = detectOrphanDiff({
@@ -488,8 +483,6 @@ describe('detectOrphanDiff — Phase 4 categorization', () => {
         datasourceId: DS,
         namespace: NS,
       });
-      // Unparseable recording provenance cannot be paired with an alert
-      // group, so it surfaces as a recording-only orphan.
       expect(result.unknownOrphans).toHaveLength(1);
       expect(result.unknownOrphans[0].diagnostic).toBe(
         'recording-only orphan; matching alert group missing'

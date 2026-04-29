@@ -59,9 +59,7 @@ import { computeSliFingerprint, FINGERPRINT_VERSION } from './slo_sli_fingerprin
 import {
   AlertProvenance,
   annotateAlertGroup,
-  annotateRecordingGroup,
   buildAlertProvenance,
-  buildRecordingProvenance,
   buildSentinelAlert,
   parseAlertProvenance,
   PROVENANCE_SCHEMA_VERSION,
@@ -71,13 +69,7 @@ import {
   deriveExpectedFingerprintsFromSpec,
   findAdoptableAlertGroup,
 } from './slo_adoption_verify';
-import type {
-  CloneInput,
-  CloneResult,
-  RecoverInput,
-  RecoverRefcountChange,
-  RecoverResult,
-} from './slo_adoption_types';
+import type { RecoverInput, RecoverRefcountChange, RecoverResult } from './slo_adoption_types';
 
 /**
  * Status cache TTL. Rationale (design §12.12 was open):
@@ -101,7 +93,7 @@ export {
   SloValidationError,
   SloVersionConflictError,
 };
-export type { CloneInput, CloneResult, RecoverInput, RecoverRefcountChange, RecoverResult };
+export type { RecoverInput, RecoverRefcountChange, RecoverResult };
 
 // ============================================================================
 // Ruler deployment context
@@ -668,19 +660,12 @@ export class SloService {
           objectiveLatencyThreshold: representative.latencyThreshold,
         });
         if (recGroup) {
-          const provenance = buildRecordingProvenance({
-            pluginVersion: this.pluginVersion,
-            fingerprint: fp,
-            fingerprintVersion: FINGERPRINT_VERSION,
-            sliSnapshot: representative.sli,
-          });
-          const annotated = annotateRecordingGroup(recGroup, provenance);
           try {
             await deploy.ruler.upsertRuleGroup(
               deploy.client,
               deploy.datasource,
               namespace,
-              annotated
+              recGroup
             );
             createdRecordingGroups.push(fp);
           } catch (err) {
@@ -929,19 +914,12 @@ export class SloService {
           objectiveLatencyThreshold: representative.latencyThreshold,
         });
         if (recGroup) {
-          const provenance = buildRecordingProvenance({
-            pluginVersion: this.pluginVersion,
-            fingerprint: fp,
-            fingerprintVersion: FINGERPRINT_VERSION,
-            sliSnapshot: representative.sli,
-          });
-          const annotated = annotateRecordingGroup(recGroup, provenance);
           try {
             await deploy.ruler.upsertRuleGroup(
               deploy.client,
               deploy.datasource,
               namespace,
-              annotated
+              recGroup
             );
             createdRecordingGroups.push(fp);
           } catch (err) {
@@ -1361,7 +1339,7 @@ export class SloService {
     if (provenance.datasourceId !== input.datasourceId) {
       throw new SloAdoptionError(
         'ORPHAN_WORKSPACE_MISMATCH',
-        `Orphan belongs to datasource ${provenance.datasourceId}, not ${input.datasourceId}; use Clone to cross-datasource adopt`,
+        `Orphan belongs to datasource ${provenance.datasourceId}, not ${input.datasourceId}`,
         {
           sloId: input.sloId,
           expectedDatasourceId: provenance.datasourceId,
@@ -1372,7 +1350,7 @@ export class SloService {
     if (provenance.workspaceId !== input.workspaceId) {
       throw new SloAdoptionError(
         'ORPHAN_WORKSPACE_MISMATCH',
-        `Orphan belongs to workspace ${provenance.workspaceId}, not ${input.workspaceId}; use Clone to cross-workspace adopt`,
+        `Orphan belongs to workspace ${provenance.workspaceId}, not ${input.workspaceId}`,
         {
           sloId: input.sloId,
           expectedWorkspaceId: provenance.workspaceId,
@@ -1579,153 +1557,6 @@ export class SloService {
     );
 
     return { slo: doc, tombstoneCleared, refcountChanges };
-  }
-
-  // ---------- clone (Phase 4 W4.5) ----------
-
-  /**
-   * Produce a new SLO in the target workspace from the source SLO's
-   * ruler-side provenance. Source is read-only — this method never
-   * upserts or deletes anything in the source namespace.
-   *
-   * Integrity checks (sha256 / schema / spec validity) mirror `recover` so
-   * the two paths stay consistent — a caller hitting drift on recover
-   * knows clone would drift the same way.
-   *
-   * `clone` defers dedup / ref / alert-group upsert to `create()` in the
-   * target workspace — the caller doesn't see any of the bookkeeping
-   * complexity.
-   */
-  async clone(
-    input: CloneInput,
-    sourceDeploy: SloDeployContext,
-    targetDeploy: SloDeployContext
-  ): Promise<CloneResult> {
-    if (!this.dedupEnabled) {
-      throw new SloValidationError({
-        adoption: 'Adoption requires observability.slo.ruleDedup.enabled',
-      });
-    }
-
-    if (typeof sourceDeploy.ruler.listRuleGroups !== 'function') {
-      throw new SloAdoptionError(
-        'ORPHAN_SPEC_DRIFT',
-        'Source ruler client does not support listRuleGroups; cannot verify clone source',
-        { sloId: input.sourceSloId }
-      );
-    }
-    const sourceNamespace = sloRulerNamespaceFor(input.sourceWorkspaceId);
-    const groups = await sourceDeploy.ruler.listRuleGroups(
-      sourceDeploy.client,
-      sourceDeploy.datasource,
-      sourceNamespace
-    );
-    const match = findAdoptableAlertGroup(groups, input.sourceSloId);
-    if (!match) {
-      throw new SloNotFoundError(input.sourceSloId);
-    }
-
-    const provenance = provenanceFrom(match.provenanceValue);
-    if (!provenance) {
-      throw new SloAdoptionError(
-        'ORPHAN_UNSUPPORTED_SCHEMA',
-        `Provenance annotation for SLO ${input.sourceSloId} could not be parsed or uses an unsupported schema version`,
-        { sloId: input.sourceSloId }
-      );
-    }
-    if (provenance.schemaVersion !== PROVENANCE_SCHEMA_VERSION) {
-      throw new SloAdoptionError(
-        'ORPHAN_UNSUPPORTED_SCHEMA',
-        `Provenance schemaVersion ${provenance.schemaVersion} is not supported (expected ${PROVENANCE_SCHEMA_VERSION})`,
-        { sloId: input.sourceSloId }
-      );
-    }
-    if (provenance.datasourceId !== input.sourceDatasourceId) {
-      throw new SloAdoptionError(
-        'ORPHAN_WORKSPACE_MISMATCH',
-        `Source provenance datasource ${provenance.datasourceId} does not match requested source datasource ${input.sourceDatasourceId}`,
-        { sloId: input.sourceSloId }
-      );
-    }
-    if (provenance.workspaceId !== input.sourceWorkspaceId) {
-      throw new SloAdoptionError(
-        'ORPHAN_WORKSPACE_MISMATCH',
-        `Source provenance workspace ${provenance.workspaceId} does not match requested source workspace ${input.sourceWorkspaceId}`,
-        { sloId: input.sourceSloId }
-      );
-    }
-
-    const recomputed = computeSpecSha256(provenance.spec);
-    if (recomputed !== provenance.specSha256) {
-      throw new SloAdoptionError(
-        'ORPHAN_SPEC_DRIFT',
-        'Spec SHA-256 mismatch — source rules may have been edited out-of-band',
-        { sloId: input.sourceSloId }
-      );
-    }
-
-    const { errors } = validateSloSpec(provenance.spec);
-    if (Object.keys(errors).length > 0) {
-      throw new SloAdoptionError(
-        'ORPHAN_SPEC_DRIFT',
-        `Source spec failed current validation: ${JSON.stringify(errors)}`,
-        { sloId: input.sourceSloId }
-      );
-    }
-
-    // Target spec: deep clone so we never mutate the provenance object, then
-    // substitute datasourceId + name.
-    const targetSpec: SloSpec = JSON.parse(JSON.stringify(provenance.spec));
-    targetSpec.datasourceId = input.targetDatasourceId;
-    if (input.overrideName !== undefined && input.overrideName !== null) {
-      targetSpec.name = input.overrideName;
-    }
-
-    // Delegate to create() — this handles refcount, recording-group upsert,
-    // alert-group upsert, and SO save in the target workspace. Source is
-    // untouched.
-    let created: SloDocument;
-    try {
-      created = await this.create(
-        { id: input.overrideId, spec: targetSpec },
-        'system',
-        targetDeploy
-      );
-    } catch (err) {
-      // Name collision in the target workspace surfaces as SloValidationError
-      // from `assertNameUnique`. Re-wrap so the route layer can map it.
-      if (
-        err instanceof SloValidationError &&
-        Object.prototype.hasOwnProperty.call(err.errors, 'spec.name')
-      ) {
-        throw new SloAdoptionError(
-          'CLONE_NAME_COLLISION',
-          `Target workspace already has an SLO named "${targetSpec.name}"; set overrideName`,
-          { sloId: input.sourceSloId, name: targetSpec.name }
-        );
-      }
-      throw err;
-    }
-
-    // Stamp adoption provenance on the new doc so the listing UI can label
-    // it "cloned from <source>". `create()` doesn't know this context, so
-    // we patch the SO once after-the-fact. Safe — save() is idempotent and
-    // this only mutates the status.provisioning sub-object.
-    if (created.status.provisioning.backend === 'prometheus') {
-      created.status.provisioning.adoptionSource = {
-        source: 'clone',
-        recoveredAt: new Date().toISOString(),
-        sourceSloId: input.sourceSloId,
-        sourceDatasourceId: input.sourceDatasourceId,
-      };
-      await this.store.save(created);
-    }
-
-    this.logger.info(
-      `SloService: cloned SLO ${input.sourceSloId} (${input.sourceWorkspaceId}) → ${created.id} (${input.targetWorkspaceId})`
-    );
-
-    return { slo: created, sourceSpecSha256: provenance.specSha256 };
   }
 
   /**

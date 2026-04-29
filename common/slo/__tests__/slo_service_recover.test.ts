@@ -36,13 +36,11 @@ import {
   generateAlertGroupFor,
   generateRecordingGroupForFingerprint,
 } from '../slo_promql_generator';
-import { computeSliFingerprint, FINGERPRINT_VERSION } from '../slo_sli_fingerprint';
+import { computeSliFingerprint } from '../slo_sli_fingerprint';
 import {
   ALERT_PROVENANCE_ANNOTATION_KEY,
   annotateAlertGroup,
-  annotateRecordingGroup,
   buildAlertProvenance,
-  buildRecordingProvenance,
 } from '../slo_rule_provenance';
 import type { AlertingOSClient, Datasource, Logger } from '../../types/alerting/types';
 import type { GeneratedRuleGroup, SloDocument, SloSpec } from '../slo_types';
@@ -280,16 +278,9 @@ function seedRuler(
       objectiveLatencyThreshold: objective.latencyThreshold,
     });
     if (recording) {
-      const annotated = annotateRecordingGroup(
-        recording,
-        buildRecordingProvenance({
-          pluginVersion: opts.pluginVersion ?? '9.9.9',
-          fingerprint: fp,
-          fingerprintVersion: FINGERPRINT_VERSION,
-          sliSnapshot: opts.spec.sli,
-        })
-      );
-      ruler.seed(namespace, annotated);
+      // Recording groups are NOT annotated — Cortex forbids annotations on
+      // recording rules. The detector relies on the slo:rec:<fp> name pattern.
+      ruler.seed(namespace, recording);
     }
   }
 

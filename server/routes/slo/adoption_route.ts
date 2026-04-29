@@ -8,9 +8,8 @@
  *
  *   GET  /api/observability/v1/slos/_orphans
  *   POST /api/observability/v1/slos/_recover
- *   POST /api/observability/v1/slos/_clone
  *
- * All three are admin-gated by the combination of two feature flags:
+ * Both are admin-gated by the combination of two feature flags:
  *   - `observability.slo.ruleDedup.enabled`   (Phase 3)
  *   - `observability.slo.ruleAdoption.enabled` (Phase 4)
  *
@@ -42,13 +41,8 @@ import type { InMemoryDatasourceService } from '../../services/alerting/datasour
 import type { DatasourceDiscoveryService } from '../../services/alerting/datasource_discovery';
 import type { RulerClient } from '../../services/slo/ruler_client';
 import type { SloReconciler } from '../../services/slo/reconciler';
-import { handleCloneSlo, handleListOrphans, handleRecoverSlo } from './handlers';
-import type {
-  CloneSloInputLite,
-  RecoverSloInputLite,
-  SloAdoptionServiceLite,
-  SloReconcilerLite,
-} from './handlers';
+import { handleListOrphans, handleRecoverSlo } from './handlers';
+import type { RecoverSloInputLite, SloAdoptionServiceLite, SloReconcilerLite } from './handlers';
 
 const SLO_BASE = `${OBSERVABILITY_BASE}/v1/slos`;
 
@@ -279,97 +273,6 @@ export function registerSloAdoptionRoutes(options: RegisterSloAdoptionRoutesOpti
         statusCode: result.status,
         body: {
           message: String((result.body as { error?: string }).error ?? 'Recover failed'),
-          attributes: result.body as Record<string, unknown>,
-        },
-      });
-    }
-  );
-
-  // --------------------------------------------------------------------------
-  // POST /api/observability/v1/slos/_clone
-  // --------------------------------------------------------------------------
-  const cloneBody = schema.object({
-    sourceSloId: schema.string({ minLength: 1 }),
-    sourceDatasourceId: schema.string({ minLength: 1 }),
-    sourceWorkspaceId: schema.maybe(schema.string()),
-    targetDatasourceId: schema.string({ minLength: 1 }),
-    targetWorkspaceId: schema.maybe(schema.string()),
-    overrideName: schema.maybe(schema.string()),
-    overrideId: schema.maybe(schema.string()),
-  });
-
-  router.post(
-    {
-      path: `${SLO_BASE}/_clone`,
-      validate: { body: cloneBody },
-    },
-    async (ctx, req, res) => {
-      const precondition = buildPreconditionFailure(ruleDedupEnabled, ruleAdoptionEnabled);
-      if (precondition) {
-        return res.customError({
-          statusCode: 412,
-          body: {
-            message: precondition.message,
-            attributes: precondition,
-          },
-        });
-      }
-      const input: CloneSloInputLite = {
-        sourceSloId: req.body.sourceSloId,
-        sourceDatasourceId: req.body.sourceDatasourceId,
-        sourceWorkspaceId: req.body.sourceWorkspaceId,
-        targetDatasourceId: req.body.targetDatasourceId,
-        targetWorkspaceId: req.body.targetWorkspaceId,
-        overrideName: req.body.overrideName,
-        overrideId: req.body.overrideId,
-      };
-      let sourceDeploy: SloDeployContext;
-      let targetDeploy: SloDeployContext;
-      try {
-        sourceDeploy = await buildAdoptionDeployContext(
-          ctx as SloHandlerContext,
-          input.sourceDatasourceId,
-          input.sourceWorkspaceId,
-          rulerClient,
-          datasourceService,
-          discoveryService
-        );
-        targetDeploy = await buildAdoptionDeployContext(
-          ctx as SloHandlerContext,
-          input.targetDatasourceId,
-          input.targetWorkspaceId,
-          rulerClient,
-          datasourceService,
-          discoveryService
-        );
-      } catch (e) {
-        if (e instanceof SloValidationError) {
-          return res.customError({
-            statusCode: 400,
-            body: {
-              message: 'Validation failed',
-              attributes: { error: 'Validation failed', errors: e.errors },
-            },
-          });
-        }
-        throw e;
-      }
-      const result = await handleCloneSlo(
-        adoptionService,
-        input,
-        sourceDeploy,
-        targetDeploy,
-        logger
-      );
-      // Matches `handleCreateSLO` wiring in `index.ts`: OSD's default route
-      // response factory collapses 201 to `res.ok` (200). Callers that need
-      // the 201 semantic can read it from the handler contract directly; on
-      // the wire both map to "created, body attached".
-      if (result.status === 201) return res.ok({ body: result.body });
-      return res.customError({
-        statusCode: result.status,
-        body: {
-          message: String((result.body as { error?: string }).error ?? 'Clone failed'),
           attributes: result.body as Record<string, unknown>,
         },
       });

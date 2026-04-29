@@ -30,11 +30,7 @@
  * registry and the ruler's replace-in-place semantics.
  */
 
-import type {
-  AlertingOSClient,
-  Datasource,
-  Logger,
-} from '../../../common/types/alerting/types';
+import type { AlertingOSClient, Datasource, Logger } from '../../../common/types/alerting/types';
 import type { ISloStore, SloDocument, SloSpec } from '../../../common/slo/slo_types';
 import {
   dedupAlertGroupName,
@@ -46,9 +42,7 @@ import {
 } from '../../../common/slo/slo_promql_generator';
 import {
   annotateAlertGroup,
-  annotateRecordingGroup,
   buildAlertProvenance,
-  buildRecordingProvenance,
   buildSentinelAlert,
   PROVENANCE_SCHEMA_VERSION,
 } from '../../../common/slo/slo_rule_provenance';
@@ -96,8 +90,7 @@ export interface SloRedeployTask {
  */
 export function createSloRedeployTask(deps: SloRedeployTaskDeps): SloRedeployTask {
   const now = deps.now ?? (() => new Date());
-  const workspaceIdFor =
-    deps.workspaceIdForDatasource ?? ((datasourceId: string) => datasourceId);
+  const workspaceIdFor = deps.workspaceIdForDatasource ?? ((datasourceId: string) => datasourceId);
   const pluginVersion = deps.pluginVersion ?? '0.0.0';
 
   async function redeployOnce(): Promise<SloRedeployResult> {
@@ -146,9 +139,7 @@ export function createSloRedeployTask(deps: SloRedeployTaskDeps): SloRedeployTas
       );
     }
     if (!datasource.directQueryName) {
-      throw new Error(
-        `Datasource "${datasource.name}" is not a DirectQuery Prometheus connection`
-      );
+      throw new Error(`Datasource "${datasource.name}" is not a DirectQuery Prometheus connection`);
     }
     const client = deps.buildClient(datasource);
 
@@ -181,18 +172,7 @@ export function createSloRedeployTask(deps: SloRedeployTaskDeps): SloRedeployTas
           objectiveLatencyThreshold: representative.latencyThreshold,
         });
         if (recGroup) {
-          const provenance = buildRecordingProvenance({
-            pluginVersion,
-            fingerprint: fp,
-            fingerprintVersion: FINGERPRINT_VERSION,
-            sliSnapshot: representative.sli,
-          });
-          await deps.ruler.upsertRuleGroup(
-            client,
-            datasource,
-            namespace,
-            annotateRecordingGroup(recGroup, provenance)
-          );
+          await deps.ruler.upsertRuleGroup(client, datasource, namespace, recGroup);
         }
       }
     }

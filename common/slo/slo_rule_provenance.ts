@@ -4,26 +4,28 @@
  */
 
 /**
- * Provenance annotations emitted alongside every SLO-generated rule group
- * (Phase 3 W3.3). The annotations let the Phase 4 orphan-adoption path
- * reconstruct the owning SLO from ruler-side state alone:
+ * Provenance annotation emitted alongside every SLO-generated alert group
+ * (Phase 3 W3.3). The alert-group annotation is the sole provenance surface:
  *
  *   - `osd_slo_provenance` on the first rule of the alert group — carries the
  *     full SloSpec, the workspace/datasource/sloId tuple, and a `specSha256`
  *     that lets the adoption code verify the rule group hasn't been tampered
  *     with before restoring the SO.
- *   - `osd_slo_recording_provenance` on the first rule of each recording
- *     group — carries the fingerprint (and its schema version) plus a
- *     snapshot of the normalized SLI shape. Shared across SLOs that produce
- *     the same fingerprint, so the annotation stays stable as long as the
- *     SLI shape does.
  *   - A synthetic "sentinel" alert is emitted when the alert group would
  *     otherwise be empty (shadow mode, or all burn-rate tiers have
  *     `createAlarm: false`). It carries the `osd_slo_provenance` annotation
  *     but never fires (`expr: vector(0) > 1`), so the provenance surface
  *     exists regardless of the user's alerting choices.
  *
- * Prometheus annotations are string-valued. The objects defined here are
+ * Recording groups are NOT annotated. Cortex/Prometheus forbid `annotations`
+ * on recording rules (only alerting rules may carry them), so any attempt to
+ * upsert a recording group with an annotation fails ruler-side with
+ * `RULER_VALIDATION_FAILED`. The alert-group provenance carries enough
+ * information (full spec + fingerprints are re-derivable from the spec) for
+ * the Phase 4 orphan-adoption path to operate; recording-group-level
+ * provenance would be redundant.
+ *
+ * Prometheus annotations are string-valued. The object defined here is
  * JSON-stringified and assigned verbatim to the annotation value — readers
  * run `JSON.parse` to recover the structured payload.
  *
@@ -45,7 +47,6 @@ import type { GeneratedRule, GeneratedRuleGroup, SloSpec } from './slo_types';
 export const PROVENANCE_SCHEMA_VERSION = 1;
 
 export const ALERT_PROVENANCE_ANNOTATION_KEY = 'osd_slo_provenance';
-export const RECORDING_PROVENANCE_ANNOTATION_KEY = 'osd_slo_recording_provenance';
 export const SENTINEL_ALERT_NAME_PREFIX = 'SLO_ProvenanceSentinel_';
 
 /** Maximum length for the sentinel alert rule name — keeps us under ruler-side name caps. */
@@ -67,19 +68,6 @@ export interface AlertProvenance {
   specSha256: string;
   /** Embedded for adoption — Phase 4 reconstructs the SO from this. */
   spec: SloSpec;
-}
-
-export interface RecordingProvenance {
-  schemaVersion: number;
-  pluginVersion: string;
-  fingerprint: string;
-  fingerprintVersion: string;
-  /**
-   * A serializable snapshot of the SLI shape that produced the fingerprint.
-   * Used for human diagnostics and for Phase 4 drift-check messaging; NOT
-   * used to recompute the fingerprint (that would defeat the purpose).
-   */
-  sliSnapshot: unknown;
 }
 
 // ============================================================================
@@ -122,25 +110,6 @@ export function buildAlertProvenance(input: BuildAlertProvenanceInput): AlertPro
   };
 }
 
-export interface BuildRecordingProvenanceInput {
-  pluginVersion: string;
-  fingerprint: string;
-  fingerprintVersion: string;
-  sliSnapshot: unknown;
-}
-
-export function buildRecordingProvenance(
-  input: BuildRecordingProvenanceInput
-): RecordingProvenance {
-  return {
-    schemaVersion: PROVENANCE_SCHEMA_VERSION,
-    pluginVersion: input.pluginVersion,
-    fingerprint: input.fingerprint,
-    fingerprintVersion: input.fingerprintVersion,
-    sliSnapshot: input.sliSnapshot,
-  };
-}
-
 /**
  * Attach `osd_slo_provenance` to the first rule of an alert group. Pure —
  * returns a new group whose first rule carries the annotation. The rest of
@@ -165,29 +134,6 @@ export function annotateAlertGroup(
     annotations: {
       ...(first.annotations ?? {}),
       [ALERT_PROVENANCE_ANNOTATION_KEY]: JSON.stringify(provenance),
-    },
-  };
-  return {
-    ...group,
-    rules: [annotated, ...rest],
-  };
-}
-
-export function annotateRecordingGroup(
-  group: GeneratedRuleGroup,
-  provenance: RecordingProvenance
-): GeneratedRuleGroup {
-  if (group.rules.length === 0) {
-    throw new Error(
-      `annotateRecordingGroup: cannot annotate an empty recording group "${group.groupName}"`
-    );
-  }
-  const [first, ...rest] = group.rules;
-  const annotated: GeneratedRule = {
-    ...first,
-    annotations: {
-      ...(first.annotations ?? {}),
-      [RECORDING_PROVENANCE_ANNOTATION_KEY]: JSON.stringify(provenance),
     },
   };
   return {
@@ -249,22 +195,6 @@ export function parseAlertProvenance(annotationValue: string): AlertProvenance |
     return null;
   }
   return parsed as AlertProvenance;
-}
-
-export function parseRecordingProvenance(annotationValue: string): RecordingProvenance | null {
-  const parsed = safeJsonParse(annotationValue);
-  if (!parsed || typeof parsed !== 'object') return null;
-  const obj = parsed as Partial<RecordingProvenance>;
-  if (obj.schemaVersion !== PROVENANCE_SCHEMA_VERSION) return null;
-  if (
-    typeof obj.pluginVersion !== 'string' ||
-    typeof obj.fingerprint !== 'string' ||
-    typeof obj.fingerprintVersion !== 'string' ||
-    obj.sliSnapshot === undefined
-  ) {
-    return null;
-  }
-  return parsed as RecordingProvenance;
 }
 
 // ============================================================================

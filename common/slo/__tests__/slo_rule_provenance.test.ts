@@ -6,16 +6,12 @@
 import {
   ALERT_PROVENANCE_ANNOTATION_KEY,
   PROVENANCE_SCHEMA_VERSION,
-  RECORDING_PROVENANCE_ANNOTATION_KEY,
   SENTINEL_ALERT_NAME_PREFIX,
   annotateAlertGroup,
-  annotateRecordingGroup,
   buildAlertProvenance,
-  buildRecordingProvenance,
   buildSentinelAlert,
   computeSpecSha256,
   parseAlertProvenance,
-  parseRecordingProvenance,
 } from '../slo_rule_provenance';
 import { DEFAULT_MWMBR_TIERS } from '../slo_promql_generator';
 import type { GeneratedRule, GeneratedRuleGroup, SloSpec } from '../slo_types';
@@ -135,30 +131,6 @@ describe('slo_rule_provenance', () => {
     });
   });
 
-  describe('buildRecordingProvenance / parseRecordingProvenance', () => {
-    const prov = buildRecordingProvenance({
-      pluginVersion: '3.7.0',
-      fingerprint: 'deadbeefcafebabe',
-      fingerprintVersion: 'v1',
-      sliSnapshot: { backend: 'prometheus', type: 'availability' },
-    });
-
-    it('round-trips through JSON', () => {
-      expect(parseRecordingProvenance(JSON.stringify(prov))).toEqual(prov);
-    });
-
-    it('rejects wrong schemaVersion', () => {
-      const tampered = { ...prov, schemaVersion: 2 };
-      expect(parseRecordingProvenance(JSON.stringify(tampered))).toBeNull();
-    });
-
-    it('rejects malformed payload (missing sliSnapshot)', () => {
-      const bad = { ...prov } as Partial<typeof prov>;
-      delete bad.sliSnapshot;
-      expect(parseRecordingProvenance(JSON.stringify(bad))).toBeNull();
-    });
-  });
-
   describe('annotateAlertGroup', () => {
     const prov = buildAlertProvenance({
       pluginVersion: '3.7.0',
@@ -199,33 +171,6 @@ describe('slo_rule_provenance', () => {
     it('throws on an empty alert group', () => {
       const group = groupStub('slo:alerts:api', []);
       expect(() => annotateAlertGroup(group, prov)).toThrow(/empty alert group/);
-    });
-  });
-
-  describe('annotateRecordingGroup', () => {
-    const prov = buildRecordingProvenance({
-      pluginVersion: '3.7.0',
-      fingerprint: 'deadbeefcafebabe',
-      fingerprintVersion: 'v1',
-      sliSnapshot: {},
-    });
-
-    it('places the annotation on the first rule only', () => {
-      const group = groupStub('slo:rec:deadbeefcafebabe', [
-        ruleStub('slo:sli_error:ratio_rate_5m:sli_deadbeefcafebabe', 'recording'),
-        ruleStub('slo:sli_error:ratio_rate_1h:sli_deadbeefcafebabe', 'recording'),
-      ]);
-      const out = annotateRecordingGroup(group, prov);
-      expect(out.rules[0].annotations?.[RECORDING_PROVENANCE_ANNOTATION_KEY]).toBe(
-        JSON.stringify(prov)
-      );
-      expect(out.rules[1].annotations).toBeUndefined();
-    });
-
-    it('throws on an empty recording group', () => {
-      expect(() => annotateRecordingGroup(groupStub('empty', []), prov)).toThrow(
-        /empty recording group/
-      );
     });
   });
 

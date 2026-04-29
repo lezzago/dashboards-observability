@@ -8,14 +8,10 @@
 /**
  * Phase 4 W4.10 — SLO adoption integration test.
  *
- * End-to-end coverage of the service-layer adoption surface. Exercises:
+ * End-to-end coverage of the service-layer recovery surface. Exercises:
  *   A. Lost-SO recovery round-trip: backdoor-delete the saved objects, call
  *      `recover()` for each, assert SOs materialize, `getStatuses` resumes,
  *      and the ruler was NOT re-upserted (idempotent adoption).
- *   B. Cross-workspace clone: source is untouched, target is populated, fresh
- *      id, `adoptionSource.source === 'clone'`.
- *   C. Same-workspace clone with dedup hit in target: refcount rises, shared
- *      recording group is NOT re-upserted.
  *   D. Tamper test: drop the expected recording group → `ORPHAN_SPEC_DRIFT`.
  *   E. Schema-forward: mutate provenance `schemaVersion` to 2 → schema error
  *      surfaces (either `ORPHAN_UNSUPPORTED_SCHEMA` or `SloNotFoundError`
@@ -45,14 +41,12 @@ import {
   dedupAlertGroupName,
   dedupRecordingGroupName,
 } from '../slo_promql_generator';
-import { computeSliFingerprint, FINGERPRINT_VERSION } from '../slo_sli_fingerprint';
+import { computeSliFingerprint } from '../slo_sli_fingerprint';
 import {
   ALERT_PROVENANCE_ANNOTATION_KEY,
   PROVENANCE_SCHEMA_VERSION,
   annotateAlertGroup,
-  annotateRecordingGroup,
   buildAlertProvenance,
-  buildRecordingProvenance,
 } from '../slo_rule_provenance';
 import { FakeRulerClient } from './fake_ruler_client';
 import {
@@ -421,159 +415,6 @@ describe('Phase 4 adoption integration (W4.10)', () => {
   });
 
   // --------------------------------------------------------------------------
-  // Scenario B — Cross-workspace clone
-  // --------------------------------------------------------------------------
-  it('Scenario B: cross-workspace clone populates target, leaves source untouched, stamps adoptionSource', async () => {
-    const {
-      svc,
-      ruler,
-      refStore,
-      store,
-      deployW1D1,
-      deployW2D2,
-      datasourceD1,
-      datasourceD2,
-    } = buildHarness();
-
-    const source = await svc.create(
-      { spec: specWithMetric('orig-availability', 'http_requests_total', datasourceD1.id) },
-      'alice',
-      deployW1D1
-    );
-    const sourceNamespace = `slo-generated-W1`;
-    const targetNamespace = `slo-generated-W2`;
-    const sourceFp = computeSliFingerprint(
-      datasourceD1.id,
-      source.spec.sli,
-      source.spec.objectives[0]
-    )!;
-    // Target fingerprint differs because the datasourceId is part of it.
-    const targetFp = computeSliFingerprint(
-      datasourceD2.id,
-      source.spec.sli,
-      source.spec.objectives[0]
-    )!;
-    expect(targetFp).not.toBe(sourceFp);
-
-    // Snapshot source ruler state — we'll compare after clone completes.
-    const sourceAlertGroupBefore = ruler.getGroup(
-      sourceNamespace,
-      dedupAlertGroupName(source.spec.name, 'W1', source.id)
-    );
-    expect(sourceAlertGroupBefore).toBeDefined();
-    const upsertsBeforeClone = ruler.upsertCalls;
-    const deletesBeforeClone = ruler.deleteCalls;
-
-    const result = await svc.clone(
-      {
-        sourceSloId: source.id,
-        sourceDatasourceId: datasourceD1.id,
-        sourceWorkspaceId: 'W1',
-        targetDatasourceId: datasourceD2.id,
-        targetWorkspaceId: 'W2',
-        overrideName: 'cloned-slo',
-      },
-      deployW1D1,
-      deployW2D2
-    );
-
-    // Response shape.
-    expect(result.slo.spec.name).toBe('cloned-slo');
-    expect(result.slo.spec.datasourceId).toBe(datasourceD2.id);
-    expect(result.slo.id).not.toBe(source.id);
-    const clonedProv = result.slo.status.provisioning;
-    expect(clonedProv.backend).toBe('prometheus');
-    const clonedAdoption =
-      clonedProv.backend === 'prometheus' ? clonedProv.adoptionSource : undefined;
-    expect(clonedAdoption?.source).toBe('clone');
-    expect(clonedAdoption?.sourceSloId).toBe(source.id);
-
-    // Source SO unchanged (deep equality on the status.version gate).
-    const sourcePostClone = await store.get(source.id);
-    expect(sourcePostClone).not.toBeNull();
-    expect(sourcePostClone!.status.version).toBe(source.status.version);
-    expect(sourcePostClone!.spec.name).toBe(source.spec.name);
-
-    // Source ruler: the clone path never deletes anything; the only ruler
-    // writes we expect are the ones that landed in the TARGET namespace.
-    expect(ruler.deleteCalls).toBe(deletesBeforeClone);
-    const upsertsToSourceNs = ruler.upserts
-      .slice(upsertsBeforeClone)
-      .filter((u) => u.namespace === sourceNamespace);
-    expect(upsertsToSourceNs).toHaveLength(0);
-
-    // Target ruler: fresh alert + recording group materialized at D2's namespace.
-    const clonedAlertGroupName = dedupAlertGroupName('cloned-slo', 'W2', result.slo.id);
-    expect(ruler.hasGroup(targetNamespace, clonedAlertGroupName)).toBe(true);
-    expect(ruler.hasGroup(targetNamespace, dedupRecordingGroupName(targetFp))).toBe(true);
-
-    // Target ref store: refcount=1 for the cloned fingerprint.
-    expect(refStore.refcount('W2', datasourceD2.id, targetFp)).toBe(1);
-  });
-
-  // --------------------------------------------------------------------------
-  // Scenario C — Same-workspace clone with dedup hit in target
-  // --------------------------------------------------------------------------
-  it('Scenario C: same-datasource cross-workspace clone dedupes against an existing peer fingerprint in target', async () => {
-    const { svc, ruler, refStore, deployW1D1, deployW2D1, datasourceD1 } = buildHarness();
-
-    // A: source SLO in W1/D1.
-    const sloA = await svc.create(
-      { spec: specWithMetric('slo-a', 'shared_metric', datasourceD1.id) },
-      'alice',
-      deployW1D1
-    );
-
-    // B: peer SLO in W2/D1 with the SAME SLI shape (datasourceId is D1 for both,
-    // so the fingerprint matches). This primes the target's refcount to 1 for
-    // the shared fingerprint before we clone.
-    await svc.create(
-      { spec: specWithMetric('slo-b-target', 'shared_metric', datasourceD1.id) },
-      'alice',
-      deployW2D1
-    );
-
-    const sharedFp = computeSliFingerprint(
-      datasourceD1.id,
-      sloA.spec.sli,
-      sloA.spec.objectives[0]
-    )!;
-    expect(refStore.refcount('W2', datasourceD1.id, sharedFp)).toBe(1);
-
-    const targetNamespace = `slo-generated-W2`;
-    const recordingGroupName = dedupRecordingGroupName(sharedFp);
-    const recUpsertsBeforeClone = ruler.upsertsOfName(recordingGroupName);
-    const upsertsBeforeClone = ruler.upserts.length;
-
-    // Clone A into W2 (same D1). Name has to be unique, so override it.
-    const cloned = await svc.clone(
-      {
-        sourceSloId: sloA.id,
-        sourceDatasourceId: datasourceD1.id,
-        sourceWorkspaceId: 'W1',
-        targetDatasourceId: datasourceD1.id,
-        targetWorkspaceId: 'W2',
-        overrideName: 'slo-a-cloned',
-      },
-      deployW1D1,
-      deployW2D1
-    );
-
-    // Target refcount rises to 2 (B + cloned A).
-    expect(refStore.refcount('W2', datasourceD1.id, sharedFp)).toBe(2);
-    // Recording group in the target namespace was NOT re-upserted — dedup
-    // skipped it because the refcount was already nonzero.
-    expect(ruler.upsertsOfName(recordingGroupName)).toBe(recUpsertsBeforeClone);
-    // A fresh alert group WAS upserted for the cloned SLO.
-    const clonedAlertGroupName = dedupAlertGroupName('slo-a-cloned', 'W2', cloned.slo.id);
-    const newUpserts = ruler.upserts.slice(upsertsBeforeClone);
-    const alertUpsertsInTarget = newUpserts.filter(
-      (u) => u.namespace === targetNamespace && u.group.groupName === clonedAlertGroupName
-    );
-    expect(alertUpsertsInTarget).toHaveLength(1);
-  });
-
-  // --------------------------------------------------------------------------
   // Scenario D — Tamper test (ORPHAN_SPEC_DRIFT)
   // --------------------------------------------------------------------------
   it('Scenario D: dropping the expected recording group surfaces ORPHAN_SPEC_DRIFT on recover', async () => {
@@ -690,16 +531,9 @@ describe('Phase 4 adoption integration (W4.10)', () => {
         objectiveLatencyThreshold: spec.objectives[0].latencyThreshold,
       });
       if (recording) {
-        const annotatedRecording = annotateRecordingGroup(
-          recording,
-          buildRecordingProvenance({
-            pluginVersion: '9.9.9',
-            fingerprint: fp,
-            fingerprintVersion: FINGERPRINT_VERSION,
-            sliSnapshot: spec.sli,
-          })
-        );
-        ruler.seedGroup(namespace, annotatedRecording);
+        // Recording groups are NOT annotated — Cortex forbids annotations on
+        // recording rules. Detector recognizes them by slo:rec:<fp> name.
+        ruler.seedGroup(namespace, recording);
       }
     }
 
