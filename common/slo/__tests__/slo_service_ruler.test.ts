@@ -6,7 +6,12 @@
 /**
  * SloService ruler-integration tests (W1.5).
  *
- * Pins the dual-write contract from the memo:
+ * Pins the dual-write contract from the memo (legacy/flag-off path — Phase 3
+ * W3.6 introduces a parallel dedup-aware path that emits two groups per
+ * create; covered by `slo_service_dedup.test.ts`). These tests call
+ * `svc.setDedupEnabled(false)` so they stay pointed at the single-group
+ * contract regardless of the default-on flag.
+ *
  *   - create/update: ruler-first, then SO
  *   - delete: ruler-first, then SO
  *   - ruler failure on create → SO never written, error propagates
@@ -150,6 +155,8 @@ describe('SloService.create with deploy (W1.5 dual-write)', () => {
     const logger = makeLogger();
     const { callLog, ruler, store, deploy } = makeDeps();
     const svc = new SloService(logger, store);
+    svc.setDedupEnabled(false);
+    svc.setDedupEnabled(false);
 
     await svc.create({ spec: validSpec() }, 'alice', deploy);
 
@@ -165,6 +172,7 @@ describe('SloService.create with deploy (W1.5 dual-write)', () => {
   it('uses slo-generated-<workspaceId> namespace and records it on the document', async () => {
     const { store, deploy } = makeDeps();
     const svc = new SloService(makeLogger(), store);
+    svc.setDedupEnabled(false);
     const doc = await svc.create({ spec: validSpec() }, 'alice', deploy);
 
     // The P0 provisioning shape is prometheus-only, so toMatchObject is safe
@@ -183,6 +191,7 @@ describe('SloService.create with deploy (W1.5 dual-write)', () => {
       new SloRulerError('RULER_VALIDATION_FAILED', 400, 'invalid PromQL')
     );
     const svc = new SloService(makeLogger(), store);
+    svc.setDedupEnabled(false);
 
     await expect(svc.create({ spec: validSpec() }, 'alice', deploy)).rejects.toMatchObject({
       name: 'SloRulerError',
@@ -201,6 +210,7 @@ describe('SloService.create with deploy (W1.5 dual-write)', () => {
       throw new Error('SO write failed: index rate limited');
     });
     const svc = new SloService(makeLogger(), store);
+    svc.setDedupEnabled(false);
 
     await expect(svc.create({ spec: validSpec() }, 'alice', deploy)).rejects.toThrow(
       /SO write failed/
@@ -224,6 +234,7 @@ describe('SloService.create with deploy (W1.5 dual-write)', () => {
       new SloRulerError('RULER_UNREACHABLE', 0, 'ECONNRESET')
     );
     const svc = new SloService(logger, store);
+    svc.setDedupEnabled(false);
 
     await expect(svc.create({ spec: validSpec() }, 'alice', deploy)).rejects.toBe(soErr);
     // warning logged for the rollback failure
@@ -235,6 +246,7 @@ describe('SloService.create without deploy (backward compat)', () => {
   it('skips ruler calls entirely', async () => {
     const { ruler, store } = makeDeps();
     const svc = new SloService(makeLogger(), store);
+    svc.setDedupEnabled(false);
     await svc.create({ spec: validSpec() }, 'alice'); // no deploy arg
 
     expect(ruler.upsertRuleGroup).not.toHaveBeenCalled();
@@ -247,6 +259,7 @@ describe('SloService.update with deploy', () => {
   it('calls ruler.upsertRuleGroup before store.save on update', async () => {
     const { callLog, ruler, store, deploy } = makeDeps();
     const svc = new SloService(makeLogger(), store);
+    svc.setDedupEnabled(false);
     const doc = await svc.create({ spec: validSpec() }, 'alice'); // create without deploy to avoid coupling
     ruler.upsertRuleGroup.mockClear();
     store.save.mockClear();
@@ -278,6 +291,7 @@ describe('SloService.delete with deploy', () => {
     // needsRulerTeardown is false because ruleGroupName isn't populated).
     const { callLog, ruler, store, deploy } = makeDeps();
     const svc = new SloService(makeLogger(), store);
+    svc.setDedupEnabled(false);
     const doc = await svc.create({ spec: validSpec() }, 'alice', deploy);
     callLog.length = 0;
     ruler.upsertRuleGroup.mockClear();
@@ -294,6 +308,7 @@ describe('SloService.delete with deploy', () => {
   it('propagates ruler failure and leaves the SO intact so the user can retry', async () => {
     const { ruler, store, deploy } = makeDeps();
     const svc = new SloService(makeLogger(), store);
+    svc.setDedupEnabled(false);
     const doc = await svc.create({ spec: validSpec() }, 'alice', deploy);
     ruler.deleteRuleGroup.mockRejectedValueOnce(
       new SloRulerError('RULER_UNREACHABLE', 503, 'gateway timeout')
@@ -312,6 +327,7 @@ describe('SloService.delete with deploy', () => {
     // because that would orphan the rule group.
     const { store, deploy } = makeDeps();
     const svc = new SloService(makeLogger(), store);
+    svc.setDedupEnabled(false);
     const doc = await svc.create({ spec: validSpec() }, 'alice', deploy);
 
     await expect(svc.delete(doc.id /* no deploy */)).rejects.toBeInstanceOf(
@@ -328,6 +344,7 @@ describe('SloService.previewRules', () => {
     // assert the mock was never called.
     const { ruler, store } = makeDeps();
     const svc = new SloService(makeLogger(), store);
+    svc.setDedupEnabled(false);
     const group = svc.previewRules({ spec: validSpec() });
 
     expect(group.rules.length).toBeGreaterThan(0);

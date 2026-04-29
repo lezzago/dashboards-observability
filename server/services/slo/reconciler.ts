@@ -44,12 +44,14 @@
 import type { AlertingOSClient, Datasource, Logger } from '../../../common/types/alerting/types';
 import type { ISloStore, SloDocument } from '../../../common/slo/slo_types';
 import { deriveExpectedGroups, sloRulerNamespaceFor } from '../../../common/slo/slo_service';
+import { dedupRecordingGroupName } from '../../../common/slo/slo_promql_generator';
 import { SloRulerError } from '../../../common/slo/slo_errors';
 import type { InMemoryDatasourceService } from '../alerting/datasource_service';
 import type { RulerClient } from './ruler_client';
 import type { RuleHealthChecker } from './rule_health_checker';
 import { detectOrphanDiff } from './orphan_detector';
 import type { ReconcilerMetrics } from './reconciler_metrics';
+import type { SloRuleRefStore } from './slo_rule_ref_store';
 
 // Re-export for ergonomic consumers of the reconciler — they can pull the
 // metrics surface from one place without knowing it's physically defined by
@@ -79,6 +81,21 @@ export interface ReconcileErrorEntry {
   message: string;
 }
 
+export interface ReconcileDanglingRefEntry {
+  workspaceId: string;
+  datasourceId: string;
+  fingerprint: string;
+  refcount: number;
+}
+
+export interface ReconcileGraceDeletionEntry {
+  workspaceId: string;
+  datasourceId: string;
+  fingerprint: string;
+  namespace: string;
+  groupName: string;
+}
+
 export interface ReconcileResult {
   startedAt: string;
   finishedAt: string;
@@ -89,6 +106,10 @@ export interface ReconcileResult {
   adoptableOrphans: ReconcileOrphanEntry[];
   unknownOrphans: ReconcileOrphanEntry[];
   errors: ReconcileErrorEntry[];
+  /** Phase 3 W3.11 — ref-registry entries with refcount > 0 that no SO claims. */
+  danglingRefs: ReconcileDanglingRefEntry[];
+  /** Phase 3 W3.11 — zero-ref recording groups deleted this sweep. */
+  graceDeletions: ReconcileGraceDeletionEntry[];
 }
 
 export interface SloReconciler {
@@ -119,12 +140,23 @@ export interface SloReconcilerDeps {
    * workspace scoping.
    */
   workspaceIdForDatasource?: (datasourceId: string) => string;
+  /**
+   * Phase 3 W3.11 — optional ref-registry. When wired, the reconciler emits
+   * dangling-ref metrics and runs the zero-ref grace-period sweep.
+   */
+  refStore?: SloRuleRefStore;
+  /**
+   * Phase 3 W3.11 — grace period before a zero-ref recording group is
+   * deleted. Defaults to 24 hours (`observability.slo.recordingGraceMs`).
+   */
+  recordingGraceMs?: number;
   /** Injected for deterministic tests. */
   now?: () => Date;
   intervalMs?: number;
 }
 
 const DEFAULT_INTERVAL_MS = 5 * 60_000;
+const DEFAULT_RECORDING_GRACE_MS = 24 * 60 * 60_000;
 
 /**
  * Factory. Keeps `setInterval` / in-flight state encapsulated so consumers only
@@ -133,6 +165,7 @@ const DEFAULT_INTERVAL_MS = 5 * 60_000;
 export function createSloReconciler(deps: SloReconcilerDeps): SloReconciler {
   const intervalMs = deps.intervalMs ?? DEFAULT_INTERVAL_MS;
   const now = deps.now ?? (() => new Date());
+  const recordingGraceMs = deps.recordingGraceMs ?? DEFAULT_RECORDING_GRACE_MS;
   const workspaceIdFor = deps.workspaceIdForDatasource ?? ((datasourceId: string) => datasourceId);
 
   let timer: ReturnType<typeof setInterval> | undefined;
@@ -178,6 +211,8 @@ export function createSloReconciler(deps: SloReconcilerDeps): SloReconciler {
     const unknownOrphans: ReconcileOrphanEntry[] = [];
     const errors: ReconcileErrorEntry[] = [];
     const sweptDatasources: string[] = [];
+    const danglingRefs: ReconcileDanglingRefEntry[] = [];
+    const graceDeletions: ReconcileGraceDeletionEntry[] = [];
 
     for (const [datasourceId, docs] of byDatasource.entries()) {
       const workspaceId = workspaceIdFor(datasourceId);
@@ -265,6 +300,68 @@ export function createSloReconciler(deps: SloReconcilerDeps): SloReconciler {
       for (const entry of diff.unknownOrphans) {
         unknownOrphans.push(entry);
       }
+
+      // Phase 3 W3.11 — ref-registry sweep. Runs only when a refStore is
+      // wired. Compares the registry's live fingerprints-in-use against what
+      // the SO set claims; fingerprints no SO references are "dangling".
+      // Zero-ref entries whose grace period has elapsed are deleted (both
+      // the ref SO and the recording group on the ruler).
+      if (deps.refStore) {
+        const claimedFingerprints = new Set<string>();
+        for (const doc of docs) {
+          const prov = doc.status.provisioning;
+          if (prov.backend !== 'prometheus') continue;
+          if (!prov.recordingFingerprints) continue;
+          for (const fp of Object.values(prov.recordingFingerprints)) {
+            claimedFingerprints.add(fp);
+          }
+        }
+        let registryEntries;
+        try {
+          registryEntries = await deps.refStore.listByDatasource(workspaceId, datasourceId);
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          errors.push({ datasourceId, namespace, message });
+          registryEntries = undefined;
+        }
+        if (registryEntries) {
+          const cutoffMs = now().getTime() - recordingGraceMs;
+          for (const entry of registryEntries) {
+            const attrs = entry.attributes;
+            if (attrs.refcount > 0 && !claimedFingerprints.has(attrs.fingerprint)) {
+              danglingRefs.push({
+                workspaceId,
+                datasourceId,
+                fingerprint: attrs.fingerprint,
+                refcount: attrs.refcount,
+              });
+            }
+            if (attrs.refcount === 0 && attrs.zeroSinceAt) {
+              const zeroSinceMs = Date.parse(attrs.zeroSinceAt);
+              if (Number.isFinite(zeroSinceMs) && zeroSinceMs <= cutoffMs) {
+                const groupName = attrs.groupName || dedupRecordingGroupName(attrs.fingerprint);
+                // Delete the recording group first, then the ref SO. 404 on
+                // the ruler is swallowed by the client; any other failure
+                // leaves the ref SO in place so the next sweep retries.
+                try {
+                  await deps.ruler.deleteRuleGroup(client, datasource, namespace, groupName);
+                  await deps.refStore.remove(workspaceId, datasourceId, attrs.fingerprint);
+                  graceDeletions.push({
+                    workspaceId,
+                    datasourceId,
+                    fingerprint: attrs.fingerprint,
+                    namespace,
+                    groupName,
+                  });
+                } catch (err) {
+                  const message = err instanceof Error ? err.message : String(err);
+                  errors.push({ datasourceId, namespace, message });
+                }
+              }
+            }
+          }
+        }
+      }
     }
 
     const finishedDate = now();
@@ -275,9 +372,11 @@ export function createSloReconciler(deps: SloReconcilerDeps): SloReconciler {
     deps.metrics.incMissingRuleGroups(missingBySlo.length);
     deps.metrics.incOrphans(orphans.length);
     deps.metrics.incErrors(errors.length);
+    deps.metrics.incDanglingRefs(danglingRefs.length);
+    deps.metrics.incGraceDeletions(graceDeletions.length);
 
     deps.logger.info(
-      `SloReconciler: swept ${sweptDatasources.length} datasources, missing=${missingBySlo.length} orphans=${orphans.length} errors=${errors.length} in ${durationMs}ms`
+      `SloReconciler: swept ${sweptDatasources.length} datasources, missing=${missingBySlo.length} orphans=${orphans.length} danglingRefs=${danglingRefs.length} graceDeletions=${graceDeletions.length} errors=${errors.length} in ${durationMs}ms`
     );
 
     return {
@@ -290,6 +389,8 @@ export function createSloReconciler(deps: SloReconcilerDeps): SloReconciler {
       adoptableOrphans,
       unknownOrphans,
       errors,
+      danglingRefs,
+      graceDeletions,
     };
   }
 

@@ -54,6 +54,7 @@ import type {
   SloLiveStatus,
 } from '../../../common/slo/slo_types';
 import {
+  dedupRecordingRuleName,
   findClosestRecordingWindow,
   parseDurationToMs,
 } from '../../../common/slo/slo_promql_generator';
@@ -113,6 +114,13 @@ export interface SloStatusAggregationContext {
    * derivation. See W1.6 in SLO_RULE_DEDUP_PLAN.md.
    */
   healthChecker?: SloRuleHealthChecker;
+  /**
+   * Phase 3 W3.9 — when true, the aggregator queries fingerprint-named
+   * recording rules (e.g. `slo:sli_error:ratio_rate_3d:sli_<fp>`) and maps
+   * samples back to objectives via each SO's `recordingFingerprints`. When
+   * undefined/false, the legacy `{slo_id="X"}` selector is used.
+   */
+  ruleDedupEnabled?: boolean;
 }
 
 export interface SloStatusAggregator {
@@ -338,15 +346,32 @@ export class DirectQueryStatusAggregator implements SloStatusAggregator {
     const window =
       spec.window.type === 'rolling' ? spec.window.duration : '3d'; /* calendar: use cap */
     const longWindow = findClosestRecordingWindow(window);
-    const query = buildLongWindowQuery(doc.id, longWindow);
 
-    const samples = await this.queryInstant(ctx.client, ds, query);
+    // Phase 3 W3.9: branch on dedup flag. Dedup-keyed recording rules carry
+    // no `slo_objective` label (they're shared across SLOs), so we key
+    // samples by `__name__` and map back to objectives via the SO's
+    // `recordingFingerprints` map.
+    const recordingFingerprints =
+      doc.status.provisioning.backend === 'prometheus'
+        ? doc.status.provisioning.recordingFingerprints
+        : undefined;
+    const dedup = !!ctx.ruleDedupEnabled && !!recordingFingerprints;
 
-    // Map samples → per-objective by matching on `slo_objective` label.
-    const byObjective = new Map<string, InstantSample>();
-    for (const s of samples) {
-      const name = s.labels.slo_objective;
-      if (name) byObjective.set(name, s);
+    let byObjective = new Map<string, InstantSample>();
+    if (dedup) {
+      byObjective = await this.queryDedupObjectiveSamples(
+        ctx.client,
+        ds,
+        recordingFingerprints!,
+        longWindow
+      );
+    } else {
+      const query = buildLongWindowQuery(doc.id, longWindow);
+      const samples = await this.queryInstant(ctx.client, ds, query);
+      for (const s of samples) {
+        const name = s.labels.slo_objective;
+        if (name) byObjective.set(name, s);
+      }
     }
 
     const staleAfterMs = 2 * parseDurationToMs(longWindow);
@@ -388,6 +413,43 @@ export class DirectQueryStatusAggregator implements SloStatusAggregator {
       computedAt: new Date().toISOString(),
       lastEvaluatedAt: lastEvalMs ? new Date(lastEvalMs).toISOString() : undefined,
     };
+  }
+
+  /**
+   * Phase 3 W3.9 — query each unique fingerprint's recording rule by exact
+   * `__name__` and map samples back to objectives via the provided
+   * `recordingFingerprints`. One `__name__=~` query per call covers every
+   * fingerprint this SLO references, so a multi-objective SLO with N unique
+   * SLIs pays one Cortex round-trip regardless of N.
+   *
+   * Samples are keyed by `__name__` label; the map returned is
+   * `objectiveName → sample` so the caller's existing per-objective loop
+   * continues to work unchanged.
+   */
+  private async queryDedupObjectiveSamples(
+    client: AlertingOSClient,
+    ds: Datasource,
+    recordingFingerprints: Record<string, string>,
+    longWindow: string
+  ): Promise<Map<string, InstantSample>> {
+    const uniqueFps = [...new Set(Object.values(recordingFingerprints))];
+    if (uniqueFps.length === 0) return new Map();
+    const expectedNames = uniqueFps.map((fp) => dedupRecordingRuleName(fp, longWindow));
+    const query = buildDedupObjectiveQuery(expectedNames);
+    const samples = await this.queryInstant(client, ds, query);
+    // Index by __name__ (or fallback label). Prometheus returns __name__
+    // inside the sample's `metric` map by default.
+    const byName = new Map<string, InstantSample>();
+    for (const s of samples) {
+      const metricName = s.labels.__name__;
+      if (metricName) byName.set(metricName, s);
+    }
+    const out = new Map<string, InstantSample>();
+    for (const [objectiveName, fp] of Object.entries(recordingFingerprints)) {
+      const sample = byName.get(dedupRecordingRuleName(fp, longWindow));
+      if (sample) out.set(objectiveName, sample);
+    }
+    return out;
   }
 
   // --------------------------------------------------------------------------
@@ -470,6 +532,17 @@ export function buildLongWindowQuery(sloId: string, longWindow: string): string 
 }
 
 /**
+ * Phase 3 W3.9 — build a single PromQL query matching every fingerprint-named
+ * recording rule the SLO references. Anchored regex on `__name__` so we only
+ * match our own rules. Names are hex-only (`sli_<16-hex>`) so no escaping is
+ * required.
+ */
+export function buildDedupObjectiveQuery(metricNames: string[]): string {
+  const pattern = metricNames.join('|');
+  return `{__name__=~"^(${pattern})$"}`;
+}
+
+/**
  * Per-objective state ladder.
  *  - `breached` when the sampled error ratio exceeds the full budget
  *    (attainment < target, equivalently errorBudgetRemaining < 0).
@@ -527,6 +600,11 @@ export function deriveTopLevelState(
     no_data: 1,
     warning: 2,
     breached: 3,
+    // rules_missing is never set per-objective (it's a top-level overlay
+    // injected by applyRuleHealthMerge), but include it so the severity map
+    // is total over SloHealthState. Between breached and no_data so it
+    // doesn't silently downgrade a simultaneously breached SLO.
+    rules_missing: 3,
   };
   let worst: SloHealthState = 'ok';
   for (const o of objectives) {
@@ -703,18 +781,28 @@ function errMsg(err: unknown): string {
 
 /**
  * Derive the list of rule-group names the ruler is expected to serve for
- * this SLO. Phase 1: one group per SLO for prometheus-backed docs — the
- * generator emits `provisioning.ruleGroupName` and writes exactly that group
- * under the SLO's workspace namespace. Future phases (per-objective rule
- * groups, burn-rate groups) can extend this to return multiple names.
+ * this SLO.
+ *
+ * Phase 1: one monolithic group per SLO (`ruleGroupName`).
+ * Phase 3 dedup: one shared recording group per unique fingerprint
+ * (`slo:rec:<fp>`) plus one per-SLO alert group (`alertGroupName`).
  *
  * Returns an empty array when there's nothing to probe (non-prometheus
- * backend or an empty group name) — callers treat that as "skip the health
- * check for this SLO".
+ * backend, or neither shape populated).
  */
 export function expectedRuleGroupsFor(doc: SloDocument): string[] {
   const p = doc.status.provisioning;
   if (p.backend !== 'prometheus') return [];
-  if (!p.ruleGroupName) return [];
-  return [p.ruleGroupName];
+  const names: string[] = [];
+  if (p.recordingFingerprints) {
+    for (const fp of new Set(Object.values(p.recordingFingerprints))) {
+      names.push(`slo:rec:${fp}`);
+    }
+  }
+  if (p.alertGroupName) {
+    names.push(p.alertGroupName);
+  } else if (p.ruleGroupName) {
+    names.push(p.ruleGroupName);
+  }
+  return names;
 }

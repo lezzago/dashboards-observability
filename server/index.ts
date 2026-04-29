@@ -38,6 +38,10 @@ const observabilityConfig = {
       ruleDedup: schema.object({
         enabled: schema.boolean({ defaultValue: true }),
       }),
+      // Phase 3 (W3.11): grace period before the reconciler deletes a
+      // zero-ref recording group. Default 24h; floor at 60s so tests can
+      // pick a tight window without risking accidental prod misconfig.
+      recordingGraceMs: schema.number({ defaultValue: 24 * 60 * 60_000, min: 60_000 }),
     }),
   }),
 };

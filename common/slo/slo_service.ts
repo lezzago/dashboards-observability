@@ -40,6 +40,10 @@ import {
   generateSloRuleGroup,
   extractGeneratedRuleNames,
   SLO_RULER_NAMESPACE,
+  generateRecordingGroupForFingerprint,
+  generateAlertGroupFor,
+  dedupRecordingGroupName,
+  dedupAlertGroupName,
 } from './slo_promql_generator';
 import { validateSloSpec, validateSloId } from './slo_validators';
 import { InMemorySloStore } from './slo_store';
@@ -50,6 +54,17 @@ import {
   SloValidationError,
   SloVersionConflictError,
 } from './slo_errors';
+import {
+  computeSliFingerprint,
+  FINGERPRINT_VERSION,
+} from './slo_sli_fingerprint';
+import {
+  annotateAlertGroup,
+  annotateRecordingGroup,
+  buildAlertProvenance,
+  buildRecordingProvenance,
+  buildSentinelAlert,
+} from './slo_rule_provenance';
 
 /**
  * Status cache TTL. Rationale (design §12.12 was open):
@@ -121,6 +136,41 @@ export interface SloDeployContext {
 }
 
 // ============================================================================
+// Phase 3 dedup: refcount registry surface (W3.2 / W3.8)
+// ============================================================================
+
+/**
+ * Minimal shape the W3.8 dedup path consumes. The real implementation lives in
+ * `server/services/slo/slo_rule_ref_store.ts` — declared here structurally so
+ * `slo_service.ts` (common/) does not reach into the server tree.
+ *
+ * `incrementRef` returns `wasZero: true` iff the refcount transitioned from 0
+ * (or was newly created). The service uses that to decide whether the shared
+ * recording group must be upserted this call — repeated upserts are byte-equal
+ * no-ops, but skipping them is still the right call (design §3 dedup intent).
+ */
+export interface SloRuleRefStoreLite {
+  get(
+    workspaceId: string,
+    datasourceId: string,
+    fingerprint: string
+  ): Promise<{ attributes: { refcount: number } } | null>;
+  incrementRef(input: {
+    workspaceId: string;
+    datasourceId: string;
+    fingerprint: string;
+    fingerprintVersion: string;
+    groupName: string;
+    namespace: string;
+  }): Promise<{ wasZero: boolean }>;
+  decrementRef(input: {
+    workspaceId: string;
+    datasourceId: string;
+    fingerprint: string;
+  }): Promise<{ droppedToZero: boolean; underflow: boolean }>;
+}
+
+// ============================================================================
 // Live-status aggregator context (W3.1)
 // ============================================================================
 
@@ -145,6 +195,14 @@ export interface SloStatusAggregationContext {
    * Undefined → legacy behavior (pre-Phase-3).
    */
   ruleDedupEnabled?: boolean;
+  /**
+   * Optional pass-through for the aggregator's W1.6 priority-merge step.
+   * Typed as `unknown` at this layer because the real checker interface
+   * lives in the server tree; the server aggregator narrows it to
+   * `SloRuleHealthChecker`. When undefined the aggregator leaves the
+   * sample-derived state alone.
+   */
+  healthChecker?: unknown;
 }
 
 /**
@@ -261,6 +319,21 @@ export class SloService {
    */
   private dedupEnabled = true;
 
+  /**
+   * Phase 3 (W3.8) — refcount registry. Optional. When absent and
+   * `dedupEnabled` is true the service still runs the dedup codepath but
+   * skips the refcount bookkeeping — useful for tests that want to exercise
+   * the generator split without wiring a saved-objects client. Plugin wires
+   * the real `SloRuleRefStore` in `start()`.
+   */
+  private refStore?: SloRuleRefStoreLite;
+  /**
+   * Plugin version stamped into provenance annotations (W3.3). Defaults to
+   * '0.0.0' — production wires the real `kibana.version` from the plugin
+   * initializer context.
+   */
+  private pluginVersion = '0.0.0';
+
   constructor(private readonly logger: Logger, store?: ISloStore) {
     this.store = store ?? new InMemorySloStore();
   }
@@ -273,6 +346,21 @@ export class SloService {
 
   isDedupEnabled(): boolean {
     return this.dedupEnabled;
+  }
+
+  /** Phase 3 (W3.8): wire the refcount registry. */
+  setRuleRefStore(refStore: SloRuleRefStoreLite | undefined): void {
+    this.refStore = refStore;
+    this.logger.info(
+      refStore
+        ? 'SloService: rule-ref store configured'
+        : 'SloService: rule-ref store cleared'
+    );
+  }
+
+  /** Phase 3 (W3.3 provenance): set plugin version stamped on annotations. */
+  setPluginVersion(version: string): void {
+    this.pluginVersion = version;
   }
 
   setStore(store: ISloStore): void {
@@ -316,6 +404,12 @@ export class SloService {
     // Name uniqueness within the datasource (workspace scoping is handled by
     // the saved-objects layer; the name check is best-effort here).
     await this.assertNameUnique(spec.datasourceId, spec.name, null);
+
+    // Phase 3 (W3.8): dedup path branches here. Legacy single-group path
+    // stays byte-identical to what it used to do.
+    if (this.dedupEnabled && deploy) {
+      return this.createDedup(id, spec, createdBy, deploy);
+    }
 
     const now = new Date().toISOString();
     const namespace = deploy ? sloRulerNamespaceFor(deploy.workspaceId) : SLO_RULER_NAMESPACE;
@@ -370,6 +464,185 @@ export class SloService {
     return doc;
   }
 
+  // ---------- create (dedup path, W3.8) ----------
+
+  /**
+   * Phase 3 dedup-aware create. Differences from the legacy path:
+   *
+   *   1. Per-objective fingerprint via `computeSliFingerprint`. Objectives
+   *      whose fingerprint is `null` (composite SLIs, OpenSearch backend)
+   *      fall through the dedup path but do not contribute a recording group.
+   *   2. For each distinct fingerprint: `incrementRef` the registry. If the
+   *      returned `wasZero` is true, upsert the shared recording group on the
+   *      ruler (recording rules are byte-equal across SLOs that share a
+   *      fingerprint — repeated upserts are safe no-ops but skipping them is
+   *      cheaper).
+   *   3. Upsert the per-SLO alert group with a W3.3 provenance annotation on
+   *      its first rule. Shadow mode / all-createAlarm-false cases get a
+   *      synthetic sentinel alert so the provenance annotation has a home.
+   *   4. Rollback on SO save failure: decrement every ref we incremented; if
+   *      any ref dropped back to zero, best-effort delete its recording
+   *      group. Alert group is deleted too. Same "reconciler sweeps" tail as
+   *      the legacy path if rollback itself fails.
+   */
+  private async createDedup(
+    id: string,
+    spec: SloSpec,
+    createdBy: string,
+    deploy: SloDeployContext
+  ): Promise<SloDocument> {
+    const now = new Date().toISOString();
+    const namespace = sloRulerNamespaceFor(deploy.workspaceId);
+    const recordingFingerprints = this.computeObjectiveFingerprints(spec);
+    const uniqueFps = uniqueValues(recordingFingerprints);
+
+    // Pre-compute the per-SLO alert group name so rollback can find it even
+    // if the caller never persists the SO.
+    const alertGroupName = dedupAlertGroupName(spec.name, deploy.workspaceId, id);
+
+    // Step 1: refcount bookkeeping + recording-group upserts. Track what we
+    // touched so rollback can undo it.
+    const incrementedFps: string[] = [];
+    const createdRecordingGroups: string[] = [];
+    const rollback = async (): Promise<void> => {
+      for (const fp of incrementedFps) {
+        if (this.refStore) {
+          try {
+            const r = await this.refStore.decrementRef({
+              workspaceId: deploy.workspaceId,
+              datasourceId: deploy.datasource.id,
+              fingerprint: fp,
+            });
+            if (r.droppedToZero && createdRecordingGroups.includes(fp)) {
+              await this.safeRollback(deploy, namespace, dedupRecordingGroupName(fp));
+            }
+          } catch (err) {
+            this.logger.warn(
+              `SloService: rollback decrementRef failed for fingerprint=${fp}: ${
+                err instanceof Error ? err.message : String(err)
+              }`
+            );
+          }
+        } else if (createdRecordingGroups.includes(fp)) {
+          await this.safeRollback(deploy, namespace, dedupRecordingGroupName(fp));
+        }
+      }
+      await this.safeRollback(deploy, namespace, alertGroupName);
+    };
+
+    for (const fp of uniqueFps) {
+      const representative = pickRepresentativeForFingerprint(spec, recordingFingerprints, fp);
+      if (!representative) continue;
+      const groupName = dedupRecordingGroupName(fp);
+      let wasZero = true;
+      if (this.refStore) {
+        try {
+          const r = await this.refStore.incrementRef({
+            workspaceId: deploy.workspaceId,
+            datasourceId: deploy.datasource.id,
+            fingerprint: fp,
+            fingerprintVersion: FINGERPRINT_VERSION,
+            groupName,
+            namespace,
+          });
+          wasZero = r.wasZero;
+          incrementedFps.push(fp);
+        } catch (err) {
+          await rollback();
+          throw err;
+        }
+      }
+      if (wasZero) {
+        const recGroup = generateRecordingGroupForFingerprint({
+          fingerprint: fp,
+          sli: representative.sli,
+          objectiveLatencyThreshold: representative.latencyThreshold,
+        });
+        if (recGroup) {
+          const provenance = buildRecordingProvenance({
+            pluginVersion: this.pluginVersion,
+            fingerprint: fp,
+            fingerprintVersion: FINGERPRINT_VERSION,
+            sliSnapshot: representative.sli,
+          });
+          const annotated = annotateRecordingGroup(recGroup, provenance);
+          try {
+            await deploy.ruler.upsertRuleGroup(
+              deploy.client,
+              deploy.datasource,
+              namespace,
+              annotated
+            );
+            createdRecordingGroups.push(fp);
+          } catch (err) {
+            await rollback();
+            throw err;
+          }
+        }
+      }
+    }
+
+    // Step 2: build + upsert the per-SLO alert group with provenance.
+    const doc: SloDocument = {
+      id,
+      spec,
+      status: {
+        version: 1,
+        createdAt: now,
+        createdBy,
+        updatedAt: now,
+        updatedBy: createdBy,
+        provisioning: {
+          backend: 'prometheus',
+          ruleGroupName: alertGroupName,
+          rulerNamespace: namespace,
+          generatedRuleNames: [],
+          recordingFingerprints,
+          alertGroupName,
+          needsRedeploy: false,
+        },
+      },
+    };
+
+    const alertGroup = buildAlertGroupWithProvenance(
+      doc,
+      recordingFingerprints,
+      deploy.workspaceId,
+      deploy.datasource.id,
+      this.pluginVersion,
+      now
+    );
+    if (doc.status.provisioning.backend === 'prometheus') {
+      doc.status.provisioning.generatedRuleNames = extractGeneratedRuleNames(alertGroup);
+    }
+    try {
+      await deploy.ruler.upsertRuleGroup(deploy.client, deploy.datasource, namespace, alertGroup);
+    } catch (err) {
+      await rollback();
+      throw err;
+    }
+
+    try {
+      await this.store.save(doc);
+    } catch (saveErr) {
+      await rollback();
+      throw saveErr;
+    }
+    this.logger.info(
+      `Created SLO (dedup): ${doc.id} (${doc.spec.name}) — ${uniqueFps.length} fingerprint(s), ${alertGroup.rules.length} alert rules`
+    );
+    return doc;
+  }
+
+  private computeObjectiveFingerprints(spec: SloSpec): Record<string, string> {
+    const out: Record<string, string> = {};
+    for (const objective of spec.objectives) {
+      const fp = computeSliFingerprint(spec.datasourceId, spec.sli, objective);
+      if (fp !== null) out[objective.name] = fp;
+    }
+    return out;
+  }
+
   async get(id: string): Promise<SloDocument | null> {
     return this.store.get(id);
   }
@@ -396,6 +669,10 @@ export class SloService {
 
     if (merged.name !== existing.spec.name) {
       await this.assertNameUnique(merged.datasourceId, merged.name, id);
+    }
+
+    if (this.dedupEnabled && deploy) {
+      return this.updateDedup(existing, merged, updatedBy, deploy);
     }
 
     // If the caller provides a deploy context, derive the namespace from the
@@ -446,6 +723,202 @@ export class SloService {
     return updated;
   }
 
+  // ---------- update (dedup path, W3.8) ----------
+
+  /**
+   * Phase 3 dedup-aware update.
+   *
+   * Diff-based: compute fingerprints for the merged spec, increment refs on
+   * any fingerprint that wasn't already claimed by this SLO, upsert recording
+   * groups for refs that just became nonzero, upsert the per-SLO alert group,
+   * save the SO, then decrement refs on fingerprints the SLO used to claim
+   * but no longer does. On SO-save failure: undo refs we incremented and
+   * delete any recording groups we created this call.
+   *
+   * The alert group is always upserted (spec semantics can change without a
+   * fingerprint change — e.g. severity, budget-warning thresholds — so the
+   * group must reflect the latest spec). The alert-group name is stable
+   * across updates because it's derived from (workspaceId, sloId, 'group')
+   * — meaning the upsert is a replace-in-place on the ruler.
+   */
+  private async updateDedup(
+    existing: SloDocument,
+    merged: SloSpec,
+    updatedBy: string,
+    deploy: SloDeployContext
+  ): Promise<SloDocument> {
+    const now = new Date().toISOString();
+    const namespace = sloRulerNamespaceFor(deploy.workspaceId);
+    const newFingerprints = this.computeObjectiveFingerprints(merged);
+    const oldFingerprints =
+      existing.status.provisioning.backend === 'prometheus'
+        ? existing.status.provisioning.recordingFingerprints ?? {}
+        : {};
+    const newUnique = new Set(uniqueValues(newFingerprints));
+    const oldUnique = new Set(uniqueValues(oldFingerprints));
+    const toAdd = [...newUnique].filter((fp) => !oldUnique.has(fp));
+    const toDrop = [...oldUnique].filter((fp) => !newUnique.has(fp));
+
+    const alertGroupName = dedupAlertGroupName(merged.name, deploy.workspaceId, existing.id);
+
+    // Bookkeeping for rollback.
+    const incrementedFps: string[] = [];
+    const createdRecordingGroups: string[] = [];
+
+    const rollback = async (): Promise<void> => {
+      for (const fp of incrementedFps) {
+        if (this.refStore) {
+          try {
+            const r = await this.refStore.decrementRef({
+              workspaceId: deploy.workspaceId,
+              datasourceId: deploy.datasource.id,
+              fingerprint: fp,
+            });
+            if (r.droppedToZero && createdRecordingGroups.includes(fp)) {
+              await this.safeRollback(deploy, namespace, dedupRecordingGroupName(fp));
+            }
+          } catch (err) {
+            this.logger.warn(
+              `SloService: update rollback decrementRef failed for fingerprint=${fp}: ${
+                err instanceof Error ? err.message : String(err)
+              }`
+            );
+          }
+        } else if (createdRecordingGroups.includes(fp)) {
+          await this.safeRollback(deploy, namespace, dedupRecordingGroupName(fp));
+        }
+      }
+    };
+
+    // Add path: increment refs + upsert recording groups for new fps.
+    for (const fp of toAdd) {
+      const representative = pickRepresentativeForFingerprint(merged, newFingerprints, fp);
+      if (!representative) continue;
+      const groupName = dedupRecordingGroupName(fp);
+      let wasZero = true;
+      if (this.refStore) {
+        try {
+          const r = await this.refStore.incrementRef({
+            workspaceId: deploy.workspaceId,
+            datasourceId: deploy.datasource.id,
+            fingerprint: fp,
+            fingerprintVersion: FINGERPRINT_VERSION,
+            groupName,
+            namespace,
+          });
+          wasZero = r.wasZero;
+          incrementedFps.push(fp);
+        } catch (err) {
+          await rollback();
+          throw err;
+        }
+      }
+      if (wasZero) {
+        const recGroup = generateRecordingGroupForFingerprint({
+          fingerprint: fp,
+          sli: representative.sli,
+          objectiveLatencyThreshold: representative.latencyThreshold,
+        });
+        if (recGroup) {
+          const provenance = buildRecordingProvenance({
+            pluginVersion: this.pluginVersion,
+            fingerprint: fp,
+            fingerprintVersion: FINGERPRINT_VERSION,
+            sliSnapshot: representative.sli,
+          });
+          const annotated = annotateRecordingGroup(recGroup, provenance);
+          try {
+            await deploy.ruler.upsertRuleGroup(
+              deploy.client,
+              deploy.datasource,
+              namespace,
+              annotated
+            );
+            createdRecordingGroups.push(fp);
+          } catch (err) {
+            await rollback();
+            throw err;
+          }
+        }
+      }
+    }
+
+    const updated: SloDocument = {
+      id: existing.id,
+      spec: merged,
+      status: {
+        ...existing.status,
+        version: existing.status.version + 1,
+        updatedAt: now,
+        updatedBy,
+        provisioning:
+          existing.status.provisioning.backend === 'prometheus'
+            ? {
+                ...existing.status.provisioning,
+                ruleGroupName: alertGroupName,
+                rulerNamespace: namespace,
+                recordingFingerprints: newFingerprints,
+                alertGroupName,
+                needsRedeploy: false,
+              }
+            : existing.status.provisioning,
+      },
+    };
+
+    // Upsert alert group with fresh provenance.
+    const alertGroup = buildAlertGroupWithProvenance(
+      updated,
+      newFingerprints,
+      deploy.workspaceId,
+      deploy.datasource.id,
+      this.pluginVersion,
+      existing.status.createdAt,
+      now
+    );
+    if (updated.status.provisioning.backend === 'prometheus') {
+      updated.status.provisioning.generatedRuleNames = extractGeneratedRuleNames(alertGroup);
+    }
+    try {
+      await deploy.ruler.upsertRuleGroup(deploy.client, deploy.datasource, namespace, alertGroup);
+    } catch (err) {
+      await rollback();
+      throw err;
+    }
+
+    try {
+      await this.store.save(updated);
+    } catch (saveErr) {
+      await rollback();
+      throw saveErr;
+    }
+
+    // Drop path: decrement refs for fps this SLO no longer references.
+    // Recording-group deletion is deferred — the reconciler's grace-period
+    // sweep (W3.11) handles zero-ref cleanups. Synchronous delete here would
+    // race concurrent creates that bump the ref back up.
+    if (this.refStore) {
+      for (const fp of toDrop) {
+        try {
+          await this.refStore.decrementRef({
+            workspaceId: deploy.workspaceId,
+            datasourceId: deploy.datasource.id,
+            fingerprint: fp,
+          });
+        } catch (err) {
+          this.logger.warn(
+            `SloService: decrementRef failed for fingerprint=${fp}: ${
+              err instanceof Error ? err.message : String(err)
+            }`
+          );
+        }
+      }
+    }
+
+    this.statusCache.delete(updated.id);
+    this.logger.info(`Updated SLO (dedup): ${updated.id} → v${updated.status.version}`);
+    return updated;
+  }
+
   /**
    * Tear down an SLO.
    *
@@ -464,9 +937,24 @@ export class SloService {
     const existing = await this.store.get(id);
     if (!existing) return { deleted: false, generatedRuleNames: [] };
 
+    const provisioning = existing.status.provisioning;
+    const isDedupSo =
+      provisioning.backend === 'prometheus' &&
+      (provisioning.recordingFingerprints !== undefined ||
+        (typeof provisioning.alertGroupName === 'string' && provisioning.alertGroupName.length > 0));
+
+    // Phase 3 dedup path: tear down the per-SLO alert group, decrement refs,
+    // but never synchronously delete a shared recording group — the
+    // reconciler's grace-period sweep (W3.11) owns recording-group cleanup.
+    if (this.dedupEnabled && isDedupSo) {
+      if (!deploy) {
+        throw new SloRulerTeardownRequiredError(id, existing.spec.datasourceId);
+      }
+      return this.deleteDedup(existing, deploy);
+    }
+
     const needsRulerTeardown =
-      existing.status.provisioning.backend === 'prometheus' &&
-      !!existing.status.provisioning.ruleGroupName;
+      provisioning.backend === 'prometheus' && !!provisioning.ruleGroupName;
 
     // Ruler-first, SO-second. If the ruler delete fails (network, auth, Cortex
     // 5xx), the SO stays so the user can retry — better than silently leaking
@@ -482,7 +970,6 @@ export class SloService {
       // `needsRulerTeardown` gated on the prometheus branch + a non-empty
       // ruleGroupName; re-narrow explicitly because the branch predicate
       // doesn't propagate through an intermediate boolean.
-      const provisioning = existing.status.provisioning;
       if (provisioning.backend === 'prometheus' && provisioning.ruleGroupName) {
         const namespace = provisioning.rulerNamespace || SLO_RULER_NAMESPACE;
         await deploy.ruler.deleteRuleGroup(
@@ -498,12 +985,78 @@ export class SloService {
     this.statusCache.delete(id);
 
     const names =
-      existing.status.provisioning.backend === 'prometheus'
-        ? existing.status.provisioning.generatedRuleNames
-        : [];
+      provisioning.backend === 'prometheus' ? provisioning.generatedRuleNames : [];
 
     this.logger.info(`Deleted SLO: ${id}`);
     return { deleted: true, generatedRuleNames: names };
+  }
+
+  // ---------- delete (dedup path, W3.8) ----------
+
+  /**
+   * Phase 3 dedup delete.
+   *
+   * Order of operations, chosen so a ruler or store failure leaves the
+   * cluster in a recoverable state:
+   *
+   *   1. Delete the per-SLO alert group from the ruler first. If this fails
+   *      (5xx / auth), abort — the SO is left in place so the user can
+   *      retry. 404s are swallowed by the ruler client itself.
+   *   2. Delete the SO.
+   *   3. Decrement every fingerprint ref the SLO claimed. Failures here are
+   *      logged but do NOT throw — the SO is already gone; surfacing a ref-
+   *      store error to the caller would be a worse UX than waiting for the
+   *      reconciler's dangling-ref sweep to reconcile eventually (W3.11).
+   *
+   * Recording groups are never deleted synchronously, even at refcount=0.
+   * The reconciler's grace-period sweep owns that path so a concurrent
+   * create for the same fingerprint doesn't race us.
+   */
+  private async deleteDedup(
+    existing: SloDocument,
+    deploy: SloDeployContext
+  ): Promise<{ deleted: boolean; generatedRuleNames: string[] }> {
+    if (existing.status.provisioning.backend !== 'prometheus') {
+      return { deleted: false, generatedRuleNames: [] };
+    }
+    const provisioning = existing.status.provisioning;
+    const namespace = provisioning.rulerNamespace || sloRulerNamespaceFor(deploy.workspaceId);
+    const alertGroupName =
+      provisioning.alertGroupName ||
+      dedupAlertGroupName(existing.spec.name, deploy.workspaceId, existing.id);
+
+    await deploy.ruler.deleteRuleGroup(
+      deploy.client,
+      deploy.datasource,
+      namespace,
+      alertGroupName
+    );
+
+    await this.store.delete(existing.id);
+    this.statusCache.delete(existing.id);
+
+    const fingerprints = provisioning.recordingFingerprints ?? {};
+    const uniqueFps = uniqueValues(fingerprints);
+    if (this.refStore) {
+      for (const fp of uniqueFps) {
+        try {
+          await this.refStore.decrementRef({
+            workspaceId: deploy.workspaceId,
+            datasourceId: deploy.datasource.id,
+            fingerprint: fp,
+          });
+        } catch (err) {
+          this.logger.warn(
+            `SloService: delete decrementRef failed for fingerprint=${fp}: ${
+              err instanceof Error ? err.message : String(err)
+            }. Reconciler sweep will reconcile.`
+          );
+        }
+      }
+    }
+
+    this.logger.info(`Deleted SLO (dedup): ${existing.id}`);
+    return { deleted: true, generatedRuleNames: provisioning.generatedRuleNames };
   }
 
   // ---------- repair (W1.5) ----------
@@ -958,16 +1511,90 @@ function normalizeSpec<T extends Partial<SloSpec>>(spec: T): T {
  *
  * Phase 1 stores a single `ruleGroupName`; we wrap it in a one-element array
  * so the rule-health probe (designed for arbitrary-length expected sets) can
- * consume it directly. Phase 3's recording/alert split will return the union
- * of `recordingFingerprints` + `alertGroupName` here without changing the
- * caller.
+ * consume it directly. Phase 3 dedup splits into one shared recording group
+ * per fingerprint plus a per-SLO alert group — both shapes are returned from
+ * the union of `recordingFingerprints` + `alertGroupName` with a fallback to
+ * `ruleGroupName` when the dedup fields are absent (pre-migration docs and
+ * flag-off path).
  *
  * Non-prometheus backends (reserved) return [] — nothing to probe.
  */
 export function deriveExpectedGroups(doc: SloDocument): string[] {
   if (doc.status.provisioning.backend !== 'prometheus') return [];
-  const name = doc.status.provisioning.ruleGroupName;
-  return name ? [name] : [];
+  const p = doc.status.provisioning;
+  const names: string[] = [];
+  if (p.recordingFingerprints) {
+    for (const fp of new Set(Object.values(p.recordingFingerprints))) {
+      names.push(dedupRecordingGroupName(fp));
+    }
+  }
+  if (p.alertGroupName) {
+    names.push(p.alertGroupName);
+  } else if (p.ruleGroupName) {
+    // Legacy (flag-off) path — single monolithic group.
+    names.push(p.ruleGroupName);
+  }
+  return names;
+}
+
+/**
+ * Phase 3 helper — unique set of values from a Record. Order stable across
+ * calls because `new Set(Object.values(...))` preserves insertion order.
+ */
+function uniqueValues(map: Record<string, string>): string[] {
+  return [...new Set(Object.values(map))];
+}
+
+/**
+ * Phase 3 helper — pick any objective that maps to the given fingerprint, so
+ * we have a representative `SingleSli` + optional `latencyThreshold` to hand
+ * to `generateRecordingGroupForFingerprint`. Returns null when the SLI is
+ * composite / OpenSearch-backed (no fingerprint → no representative).
+ */
+function pickRepresentativeForFingerprint(
+  spec: SloSpec,
+  recordingFingerprints: Record<string, string>,
+  fingerprint: string
+): { sli: import('./slo_types').SingleSli; latencyThreshold?: number } | null {
+  if (spec.sli.type !== 'single') return null;
+  for (const objective of spec.objectives) {
+    if (recordingFingerprints[objective.name] === fingerprint) {
+      return { sli: spec.sli, latencyThreshold: objective.latencyThreshold };
+    }
+  }
+  return null;
+}
+
+/**
+ * Build the per-SLO alert group with provenance annotations, inserting the
+ * W3.3 sentinel alert when the group would otherwise be empty (shadow mode or
+ * all burn-rate tiers disabled). Pure, apart from the clock — callers pass
+ * `createdAt` and `updatedAt` explicitly so tests can pin provenance values.
+ */
+function buildAlertGroupWithProvenance(
+  doc: SloDocument,
+  recordingFingerprints: Record<string, string>,
+  workspaceId: string,
+  datasourceId: string,
+  pluginVersion: string,
+  createdAt: string,
+  updatedAt: string = createdAt
+): GeneratedRuleGroup {
+  const group = generateAlertGroupFor(doc, recordingFingerprints, { workspaceId });
+  const provenance = buildAlertProvenance({
+    pluginVersion,
+    sloId: doc.id,
+    workspaceId,
+    datasourceId,
+    createdAt,
+    updatedAt,
+    spec: doc.spec,
+  });
+  if (group.rules.length === 0) {
+    const sentinel = buildSentinelAlert(doc.id, provenance);
+    return annotateAlertGroup({ ...group, rules: [sentinel] }, provenance);
+  }
+  return annotateAlertGroup(group, provenance);
 }
 
 /**

@@ -197,6 +197,7 @@ describe('SloService.repair (W1.5)', () => {
   it('returns { repaired: false } and issues no upsert when the probe reports ok', async () => {
     const { ruler, store, deploy } = makeDeps();
     const svc = new SloService(noopLogger(), store);
+    svc.setDedupEnabled(false);
     const doc = await svc.create({ spec: validSpec() }, 'alice', deploy);
     ruler.upsertRuleGroup.mockClear();
 
@@ -221,6 +222,7 @@ describe('SloService.repair (W1.5)', () => {
   it('upserts once and returns { repaired: true, health.state=ok } on rules_missing', async () => {
     const { ruler, store, deploy } = makeDeps();
     const svc = new SloService(noopLogger(), store);
+    svc.setDedupEnabled(false);
     const doc = await svc.create({ spec: validSpec() }, 'alice', deploy);
     ruler.upsertRuleGroup.mockClear();
 
@@ -249,6 +251,7 @@ describe('SloService.repair (W1.5)', () => {
   it('upserts once on rules_partial and returns the post-repair report', async () => {
     const { ruler, store, deploy } = makeDeps();
     const svc = new SloService(noopLogger(), store);
+    svc.setDedupEnabled(false);
     const doc = await svc.create({ spec: validSpec() }, 'alice', deploy);
     ruler.upsertRuleGroup.mockClear();
 
@@ -269,6 +272,7 @@ describe('SloService.repair (W1.5)', () => {
   it('throws SloRulerError (route maps to 502) on ruler_unreachable — no upsert', async () => {
     const { ruler, store, deploy } = makeDeps();
     const svc = new SloService(noopLogger(), store);
+    svc.setDedupEnabled(false);
     const doc = await svc.create({ spec: validSpec() }, 'alice', deploy);
     ruler.upsertRuleGroup.mockClear();
 
@@ -289,6 +293,7 @@ describe('SloService.repair (W1.5)', () => {
   it('propagates the probe-reported code on ruler_unreachable (e.g. RULER_AUTH_FAILED)', async () => {
     const { store, deploy, ruler } = makeDeps();
     const svc = new SloService(noopLogger(), store);
+    svc.setDedupEnabled(false);
     const doc = await svc.create({ spec: validSpec() }, 'alice', deploy);
     ruler.upsertRuleGroup.mockClear();
 
@@ -313,6 +318,7 @@ describe('SloService.repair (W1.5)', () => {
   it('throws SloNotFoundError when the SLO id is unknown', async () => {
     const { store, deploy } = makeDeps();
     const svc = new SloService(noopLogger(), store);
+    svc.setDedupEnabled(false);
     const health = makeHealthProbe([okReport([])]);
 
     await expect(svc.repair('not-a-real-id', { health, deploy })).rejects.toBeInstanceOf(
@@ -323,6 +329,7 @@ describe('SloService.repair (W1.5)', () => {
   it('idempotence: two back-to-back repairs on a healthy SLO issue zero upserts', async () => {
     const { ruler, store, deploy } = makeDeps();
     const svc = new SloService(noopLogger(), store);
+    svc.setDedupEnabled(false);
     const doc = await svc.create({ spec: validSpec() }, 'alice', deploy);
     ruler.upsertRuleGroup.mockClear();
 
@@ -349,6 +356,7 @@ describe('SloService.repair (W1.5)', () => {
   it('first repair flips a missing group to healthy; second repair is a no-op', async () => {
     const { ruler, store, deploy } = makeDeps();
     const svc = new SloService(noopLogger(), store);
+    svc.setDedupEnabled(false);
     const doc = await svc.create({ spec: validSpec() }, 'alice', deploy);
     ruler.upsertRuleGroup.mockClear();
 

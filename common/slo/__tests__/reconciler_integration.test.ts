@@ -246,6 +246,9 @@ async function makeHarness(
   const store = new InMemorySloStore();
   const ruler = new FakeRulerClient();
   const svc = new SloService(logger, store);
+  // Pin Phase-1/2 (single-group) contract — the reconciler's Phase-3
+  // extensions (dangling refs, grace deletions) are covered in W3.11 tests.
+  svc.setDedupEnabled(false);
   // TTL 0 so the post-sweep probe recomputes — any nonzero TTL would let a
   // freshly-cached `ok` report mask the underlying ruler state change in
   // scenario 2.

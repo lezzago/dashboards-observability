@@ -39,7 +39,8 @@ import { DirectQueryRulerClient } from './services/slo/ruler_client';
 import { createRuleHealthChecker, RuleHealthChecker } from './services/slo/rule_health_checker';
 import { createSloReconciler, SloReconciler } from './services/slo/reconciler';
 import { createReconcilerMetrics } from './services/slo/reconciler_metrics';
-import { sloRuleRefType } from './saved_objects/slo_rule_ref';
+import { SloRuleRefStore } from './services/slo/slo_rule_ref_store';
+import { SLO_RULE_REF_SO_TYPE, sloRuleRefType } from './saved_objects/slo_rule_ref';
 import { SLO_V2_MIGRATION_VERSION, sloV2Migration } from './saved_objects/migrations/slo_v2';
 import type { InMemoryDatasourceService } from './services/alerting/datasource_service';
 import { AssistantPluginSetup, ObservabilityPluginSetup, ObservabilityPluginStart } from './types';
@@ -77,6 +78,13 @@ interface ReconcilerWiring {
   clientRef: {
     current: import('../common/types/alerting/types').AlertingOSClient | undefined;
   };
+  /**
+   * Phase 3 (W3.11) — ref-registry store populated in `start()` once the
+   * internal repository is available. Before that the reconciler has no
+   * registry to talk to; the refStore-dependent sweep is skipped (undefined
+   * passes through to the reconciler as "no extensions").
+   */
+  refStoreRef: { current: SloRuleRefStore | undefined };
 }
 
 export class ObservabilityPlugin
@@ -111,6 +119,7 @@ export class ObservabilityPlugin
         slo?: {
           reconcilerIntervalMs: number;
           ruleDedup?: { enabled: boolean };
+          recordingGraceMs?: number;
         };
       }>()
       .pipe(first())
@@ -120,6 +129,9 @@ export class ObservabilityPlugin
     // offline/dev paths that skip config resolution still get the new
     // codepath.
     const ruleDedupEnabled = observabilityConfig.slo?.ruleDedup?.enabled ?? true;
+    // Phase 3 (W3.11): default 24h grace before a zero-ref recording group
+    // gets deleted. Same default as the schema.
+    const recordingGraceMs = observabilityConfig.slo?.recordingGraceMs ?? 24 * 60 * 60_000;
 
     const dataSourceEnabled = !!dataSource;
     const openSearchObservabilityClient: ILegacyClusterClient = core.opensearch.legacy.createClient(
@@ -410,6 +422,44 @@ export class ObservabilityPlugin
     const reconcilerClientRef: {
       current: import('../common/types/alerting/types').AlertingOSClient | undefined;
     } = { current: undefined };
+    const reconcilerRefStoreRef: { current: SloRuleRefStore | undefined } = {
+      current: undefined,
+    };
+    // Ref-registry lookup proxy — the refcount/grace sweep paths hit this
+    // only after `start()` has wired the real store. Before that, `.current`
+    // is undefined and the reconciler's guarded sweep short-circuits via
+    // `if (deps.refStore)`. We thread a dynamic proxy rather than swap the
+    // store in later because the reconciler captures deps at creation.
+    const refStoreProxy: SloRuleRefStore = {
+      get: (ws: string, ds: string, fp: string) => {
+        if (!reconcilerRefStoreRef.current) return Promise.resolve(null);
+        return reconcilerRefStoreRef.current.get(ws, ds, fp);
+      },
+      listByDatasource: (ws: string, ds: string) => {
+        if (!reconcilerRefStoreRef.current) return Promise.resolve([]);
+        return reconcilerRefStoreRef.current.listByDatasource(ws, ds);
+      },
+      listStaleZero: (input) => {
+        if (!reconcilerRefStoreRef.current) return Promise.resolve([]);
+        return reconcilerRefStoreRef.current.listStaleZero(input);
+      },
+      remove: (ws: string, ds: string, fp: string) => {
+        if (!reconcilerRefStoreRef.current) return Promise.resolve(false);
+        return reconcilerRefStoreRef.current.remove(ws, ds, fp);
+      },
+      incrementRef: (input) => {
+        if (!reconcilerRefStoreRef.current) {
+          return Promise.reject(new Error('SLO rule-ref store not yet wired'));
+        }
+        return reconcilerRefStoreRef.current.incrementRef(input);
+      },
+      decrementRef: (input) => {
+        if (!reconcilerRefStoreRef.current) {
+          return Promise.reject(new Error('SLO rule-ref store not yet wired'));
+        }
+        return reconcilerRefStoreRef.current.decrementRef(input);
+      },
+    };
     const storeProxy: ISloStore = {
       list: (datasourceIds?: string[]) => reconcilerStoreRef.current.list(datasourceIds),
       get: (id: string) => reconcilerStoreRef.current.get(id),
@@ -458,6 +508,13 @@ export class ObservabilityPlugin
         }
         return client;
       },
+      // Phase 3 (W3.11): ref-registry sweep. Reconciler treats an undefined
+      // `refStore` as "no extensions" — the proxy throws once start() has
+      // wired the real store, so we only pass it in when we're going to
+      // resolve it. Until start() fires, the guarded sweep below the orphan
+      // loop simply doesn't run.
+      refStore: refStoreProxy,
+      recordingGraceMs,
       intervalMs: reconcilerIntervalMs,
     });
     this.reconciler = reconciler;
@@ -482,6 +539,7 @@ export class ObservabilityPlugin
       healthChecker: ruleHealthChecker,
       storeRef: reconcilerStoreRef,
       clientRef: reconcilerClientRef,
+      refStoreRef: reconcilerRefStoreRef,
     };
 
     core.savedObjects.registerType(getVisualizationSavedObject(dataSourceEnabled));
@@ -536,7 +594,10 @@ export class ObservabilityPlugin
     // Gracefully falls back to the in-memory store if the repository can't be created.
     if (this.sloService) {
       try {
-        const repository = core.savedObjects.createInternalRepository(['slo-definition']);
+        const repository = core.savedObjects.createInternalRepository([
+          'slo-definition',
+          SLO_RULE_REF_SO_TYPE,
+        ]);
         const soStore = new SavedObjectSloStore(repository);
         this.sloService.setStore(soStore);
         // Swap the reconciler's store reference to the same backend — they
@@ -544,6 +605,19 @@ export class ObservabilityPlugin
         // in-memory store while user-created SLOs live in saved objects.
         if (this.reconcilerWiring) {
           this.reconcilerWiring.storeRef.current = soStore;
+          // Phase 3 W3.11: wire the ref-registry store now that the internal
+          // repository is available. The reconciler + service both talk to
+          // this singleton.
+          const refStore = new SloRuleRefStore(
+            (repository as unknown) as import('../../../src/core/server').SavedObjectsClientContract
+          );
+          this.reconcilerWiring.refStoreRef.current = refStore;
+          this.sloService.setRuleRefStore(refStore);
+          // Phase 3 W3.10 redeploy task is available via
+          // `createSloRedeployTask`; wiring it into boot alongside the
+          // alerting datasource service is tracked for a follow-up since the
+          // datasource service is constructed inside `setupRoutes` (see
+          // reconciler wiring above for the pattern it would adopt).
         }
         this.logger.info('Observability: SLO storage upgraded to SavedObjects');
       } catch (err: unknown) {

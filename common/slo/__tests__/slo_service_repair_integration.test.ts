@@ -192,6 +192,9 @@ function makeHarness() {
   const ruler = new FakeRulerClient();
   const logger = noopLogger();
   const svc = new SloService(logger, store);
+  // Pin Phase-1/2 (single-group) contract — Phase-3 dedup behavior has its
+  // own integration test in W3.15.
+  svc.setDedupEnabled(false);
   const health = createRuleHealthChecker(ruler, logger, { ttlMs: 0 });
 
   const datasource: Datasource = {

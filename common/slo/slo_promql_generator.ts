@@ -699,6 +699,17 @@ export function dedupRecordingGroupName(fingerprint: string): string {
 }
 
 /**
+ * Per-SLO alert group name, computed the same way `generateAlertGroupFor` does.
+ * Exported so callers (service delete/rollback paths) can reference the group
+ * without first building the full group object.
+ */
+export function dedupAlertGroupName(specName: string, workspaceId: string, sloId: string): string {
+  const slug = slugifySloObjective(specName, 'group');
+  const suffix = ruleSuffix(workspaceId, sloId, 'group');
+  return `slo:alerts:${slug}_${suffix}`;
+}
+
+/**
  * Build the shared recording group for a single fingerprint. Returns `null`
  * when the SLI is composite / OpenSearch-backed — those cases have no
  * Prometheus recording rules. The returned group's rules carry ONLY
@@ -716,9 +727,10 @@ export function generateRecordingGroupForFingerprint(input: {
   /** Required only when the SLI is a `latency_threshold` type. */
   objectiveLatencyThreshold?: number;
 }): GeneratedRuleGroup | null {
-  if (input.sli.definition.backend !== 'prometheus') return null;
+  const def = input.sli.definition;
+  if (def.backend !== 'prometheus') return null;
   const { fingerprint, sli } = input;
-  const prom = sli.definition;
+  const prom = def;
 
   // Build a minimal Objective stand-in so `errorRatioExpr` can read
   // `latencyThreshold` the same way it does for legacy rules. Name/target

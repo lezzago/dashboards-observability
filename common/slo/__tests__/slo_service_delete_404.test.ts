@@ -115,6 +115,7 @@ describe('SloService.delete — ruler 404 tolerance (W1.9)', () => {
   it('happy path: rule group present → deleteRuleGroup called once, SO removed', async () => {
     const { ruler, store, deploy, saved } = makeDeps();
     const svc = new SloService(noopLogger(), store);
+    svc.setDedupEnabled(false);
     const doc = await svc.create({ spec: validSpec() }, 'alice', deploy);
 
     const result = await svc.delete(doc.id, deploy);
@@ -132,6 +133,7 @@ describe('SloService.delete — ruler 404 tolerance (W1.9)', () => {
     // { deleted: true, generatedRuleNames } envelope.
     const { ruler, store, deploy, saved } = makeDeps();
     const svc = new SloService(noopLogger(), store);
+    svc.setDedupEnabled(false);
     const doc = await svc.create({ spec: validSpec() }, 'alice', deploy);
 
     // Ruler client resolves without throwing (404 was swallowed upstream).
@@ -155,6 +157,7 @@ describe('SloService.delete — ruler 404 tolerance (W1.9)', () => {
   it('ruler unreachable (non-404) → SloRulerError propagates and SO stays intact', async () => {
     const { ruler, store, deploy, saved } = makeDeps();
     const svc = new SloService(noopLogger(), store);
+    svc.setDedupEnabled(false);
     const doc = await svc.create({ spec: validSpec() }, 'alice', deploy);
 
     ruler.deleteRuleGroup.mockRejectedValueOnce(

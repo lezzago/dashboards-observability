@@ -29,12 +29,19 @@
 
 import type { Logger } from '../../../common/types/alerting/types';
 
-/** Immutable snapshot of the four Phase 2 counters. */
+/** Immutable snapshot of the counters surfaced by the reconciler. */
 export interface ReconcilerMetricsSnapshot {
   sweeps: number;
   orphans: number;
   missingRuleGroups: number;
   errors: number;
+  /** Phase 3 W3.11 — ref SOs whose refcount > 0 but no live SLO claims them. */
+  danglingRefs: number;
+  /**
+   * Phase 3 W3.11 — recording groups + ref SOs deleted because the refcount
+   * hit zero longer than `observability.slo.recordingGraceMs` ago.
+   */
+  graceDeletions: number;
 }
 
 /**
@@ -47,6 +54,10 @@ export interface ReconcilerMetrics {
   incOrphans(n?: number): void;
   incMissingRuleGroups(n?: number): void;
   incErrors(n?: number): void;
+  /** Phase 3 W3.11 — ref-registry SOs with refcount>0 but no SLO claims. */
+  incDanglingRefs(n?: number): void;
+  /** Phase 3 W3.11 — zero-ref recording groups swept past the grace period. */
+  incGraceDeletions(n?: number): void;
   /**
    * Return a frozen copy of the current counters. Mutating the returned
    * object does not affect internal state; subsequent `snapshot()` calls
@@ -63,7 +74,13 @@ export interface ReconcilerMetrics {
 }
 
 /** The set of counter names this module owns. Used for structured debug logs. */
-type CounterName = 'sweeps' | 'orphans' | 'missingRuleGroups' | 'errors';
+type CounterName =
+  | 'sweeps'
+  | 'orphans'
+  | 'missingRuleGroups'
+  | 'errors'
+  | 'danglingRefs'
+  | 'graceDeletions';
 
 /**
  * Factory. Keeps the counter state in a closure so callers can't reach past
@@ -75,6 +92,8 @@ export function createReconcilerMetrics(logger: Logger): ReconcilerMetrics {
     orphans: 0,
     missingRuleGroups: 0,
     errors: 0,
+    danglingRefs: 0,
+    graceDeletions: 0,
   };
 
   /**
@@ -109,6 +128,12 @@ export function createReconcilerMetrics(logger: Logger): ReconcilerMetrics {
     incErrors(n: number = 1): void {
       bump('errors', n);
     },
+    incDanglingRefs(n: number = 1): void {
+      bump('danglingRefs', n);
+    },
+    incGraceDeletions(n: number = 1): void {
+      bump('graceDeletions', n);
+    },
     snapshot(): ReconcilerMetricsSnapshot {
       // `Object.freeze` on a fresh object literal prevents the caller from
       // mutating the returned snapshot while leaving `counters` untouched.
@@ -117,6 +142,8 @@ export function createReconcilerMetrics(logger: Logger): ReconcilerMetrics {
         orphans: counters.orphans,
         missingRuleGroups: counters.missingRuleGroups,
         errors: counters.errors,
+        danglingRefs: counters.danglingRefs,
+        graceDeletions: counters.graceDeletions,
       });
     },
     reset(): void {
@@ -124,6 +151,8 @@ export function createReconcilerMetrics(logger: Logger): ReconcilerMetrics {
       counters.orphans = 0;
       counters.missingRuleGroups = 0;
       counters.errors = 0;
+      counters.danglingRefs = 0;
+      counters.graceDeletions = 0;
     },
   };
 }

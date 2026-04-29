@@ -35,6 +35,8 @@ describe('ReconcilerMetrics — zero state', () => {
       orphans: 0,
       missingRuleGroups: 0,
       errors: 0,
+      danglingRefs: 0,
+      graceDeletions: 0,
     });
   });
 });
@@ -85,6 +87,8 @@ describe('ReconcilerMetrics — increments', () => {
       orphans: 2,
       missingRuleGroups: 3,
       errors: 4,
+      danglingRefs: 0,
+      graceDeletions: 0,
     });
   });
 
@@ -148,6 +152,8 @@ describe('ReconcilerMetrics — reset', () => {
       orphans: 0,
       missingRuleGroups: 0,
       errors: 0,
+      danglingRefs: 0,
+      graceDeletions: 0,
     });
   });
 
@@ -167,6 +173,8 @@ describe('ReconcilerMetrics — reset', () => {
       orphans: 0,
       missingRuleGroups: 0,
       errors: 0,
+      danglingRefs: 0,
+      graceDeletions: 0,
     });
   });
 });
@@ -204,6 +212,8 @@ describe('ReconcilerMetrics — negative-n clamping', () => {
       orphans: 2,
       missingRuleGroups: 0,
       errors: 0,
+      danglingRefs: 0,
+      graceDeletions: 0,
     });
   });
 });
