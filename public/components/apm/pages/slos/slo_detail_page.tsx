@@ -525,14 +525,28 @@ export const SloDetailPage: React.FC<SloDetailPageProps> = ({
       ? 'rules_missing'
       : null;
 
-  // Recording-rule names from the persisted provisioning record. Prefer the
-  // conventional `slo:sli_error:ratio_rate_` prefix the generator emits; fall
-  // back to the full list if the prefix filter comes up empty so older SLOs
-  // still surface their generated names.
+  // Recording-rule names from the persisted provisioning record.
+  // Phase 3 dedup: SLOs carry `recordingFingerprints` (objective name →
+  // fingerprint). Expand each unique fingerprint into the 7 per-window rule
+  // names so the listing still shows "what to pin external dashboards to".
+  // Legacy (pre-migration / flag-off) SLOs keep using `generatedRuleNames`.
+  const dedupFingerprints = prov?.recordingFingerprints ?? null;
+  const DEDUP_WINDOWS = ['5m', '30m', '1h', '2h', '6h', '1d', '3d'];
+  const dedupRecordingNames: string[] = dedupFingerprints
+    ? [...new Set(Object.values(dedupFingerprints))].flatMap((fp) =>
+        DEDUP_WINDOWS.map((w) => `slo:sli_error:ratio_rate_${w}:sli_${fp}`)
+      )
+    : [];
   const allRuleNames = prov?.generatedRuleNames ?? [];
-  const recordingRuleNames =
+  const legacyRecordingNames =
     allRuleNames.filter((n) => n.startsWith('slo:sli_error:ratio_rate_')).length > 0
       ? allRuleNames.filter((n) => n.startsWith('slo:sli_error:ratio_rate_'))
+      : [];
+  const recordingRuleNames =
+    dedupRecordingNames.length > 0
+      ? dedupRecordingNames
+      : legacyRecordingNames.length > 0
+      ? legacyRecordingNames
       : allRuleNames;
 
   const summaryListItems: Array<{ title: React.ReactNode; description: React.ReactNode }> = [
@@ -742,7 +756,18 @@ export const SloDetailPage: React.FC<SloDetailPageProps> = ({
                       { title: 'Version', description: String(doc.status.version) },
                       ...(prov
                         ? [
-                            { title: 'Rule group', description: prov.ruleGroupName },
+                            {
+                              title: 'Alert group',
+                              description: prov.alertGroupName || prov.ruleGroupName || '—',
+                            },
+                            ...(dedupFingerprints
+                              ? [
+                                  {
+                                    title: 'Recording groups',
+                                    description: `${new Set(Object.values(dedupFingerprints)).size} shared`,
+                                  },
+                                ]
+                              : []),
                             { title: 'Ruler namespace', description: prov.rulerNamespace },
                           ]
                         : []),
@@ -827,8 +852,25 @@ export const SloDetailPage: React.FC<SloDetailPageProps> = ({
             cancelButtonText="Cancel"
             confirmButtonText="Delete"
             buttonColor="danger"
+            data-test-subj="slosDetailDeleteModal"
           >
-            <p>This tears down all generated Prometheus rules. The action cannot be undone.</p>
+            {dedupFingerprints ? (
+              <>
+                <p>
+                  The per-SLO alert group (
+                  <code>{prov?.alertGroupName ?? prov?.ruleGroupName}</code>) is removed
+                  immediately. Shared recording rules are reference-counted: if no other
+                  SLO references the same SLI shape the recording group is queued for
+                  deletion, with a 24h grace period in case you re-create the SLO.
+                </p>
+                <p>External dashboards or visualizations pinned to these recording-rule
+                  names will keep working as long as at least one SLO still references
+                  them. This action cannot be undone.</p>
+              </>
+            ) : (
+              <p>This tears down all generated Prometheus rules. The action cannot be
+                undone.</p>
+            )}
           </EuiConfirmModal>
         )}
       </EuiPageBody>
