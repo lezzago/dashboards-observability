@@ -595,3 +595,98 @@ describe('SloReconciler — interval lifecycle', () => {
     expect(mocks.store.list).toHaveBeenCalledTimes(2);
   });
 });
+
+/**
+ * W2.6 coverage audit — maps each plan bullet to the test that covers it.
+ *
+ * The audit exists as a live test (not just a comment block) so that when a
+ * future refactor removes one of the referenced cases, this placeholder is
+ * still adjacent to the mapping and grep-able. Each bullet is covered
+ * *directly* (the referenced test names its bullet explicitly); indirect
+ * coverage is called out where present.
+ *
+ * Bullet → covering test (same file):
+ *   1. Happy path (clean diff, counters) →
+ *      'SloReconciler — reconcileOnce › happy path: 2 SLOs in one
+ *      datasource, both groups present → empty missing/orphan arrays'.
+ *      Asserts incSweeps(1), incMissingRuleGroups(0), incOrphans(0),
+ *      incErrors(0), and that invalidate is never called.
+ *
+ *   2. Missing detection (shape: sloId, datasourceId, namespace,
+ *      missingGroups) → 'SloReconciler — reconcileOnce › missing
+ *      detection: ruler returns [] → entry in missingBySlo, metric
+ *      emitted, invalidate called (W2.3)'. Asserts the exact 4-field
+ *      shape and the W2.3 invalidate hook.
+ *
+ *   3. Orphan detection into adoptableOrphans=[] / unknownOrphans →
+ *      'SloReconciler — reconcileOnce › orphan detection: ruler has a
+ *      group no SLO claims → entry in orphans'. Asserts both arrays
+ *      explicitly.
+ *
+ *   4. Multi-workspace (== multi-datasource in Phase 1) isolation →
+ *      TWO tests combined: (a) 'multi-datasource: each datasource gets
+ *      its own listRuleGroups call with the right namespace' proves
+ *      per-datasource namespace routing; (b) the cross-contamination
+ *      test below ('cross-datasource isolation: …') proves a missing
+ *      SLO in ds-A does NOT surface as an orphan in ds-B.
+ *
+ *   5. 5xx handling (one ds fails, others still swept, incErrors) →
+ *      "SloReconciler — reconcileOnce › ruler 5xx for one datasource
+ *      doesn't kill the sweep for others". Asserts the SloRulerError
+ *      path, result.errors shape, and incErrors(1).
+ *
+ *   6. Empty state (zero SLOs, no ruler call, sweep counted) →
+ *      'SloReconciler — reconcileOnce › empty state: no SLOs →
+ *      zero-length arrays, still calls incSweeps'.
+ */
+describe('W2.6 coverage audit', () => {
+  it('cross-datasource isolation: missing in ds-A does not leak as an orphan in ds-B', async () => {
+    // Direct coverage for the isolation invariant in bullet 4. The multi-
+    // datasource test above proves each sweep calls listRuleGroups with its
+    // own namespace; this test proves the diff buckets themselves are
+    // keyed per-datasource — ds-A's missing group name is not in ds-B's
+    // actualGroupNames, but the reconciler must not treat it as an orphan
+    // of ds-B because the two namespaces are separate.
+    const mocks = buildMocks();
+    const docA = mockDoc({ id: 'slo-a', datasourceId: 'ds-a', ruleGroupName: 'slo:a_suffix' });
+    const docB = mockDoc({ id: 'slo-b', datasourceId: 'ds-b', ruleGroupName: 'slo:b_suffix' });
+    mocks.store.list.mockResolvedValue([docA, docB]);
+    mocks.datasourceService.get.mockImplementation(async (id: string) => mockDatasource({ id }));
+    mocks.ruler.listRuleGroups.mockImplementation(async (_c, ds, ns) => {
+      // ds-A's rule is gone (the one that would be "missing").
+      if (ds.id === 'ds-a' && ns === 'slo-generated-ds-a') return [];
+      // ds-B has its rule AND one extra group that is only an orphan in ds-B.
+      if (ds.id === 'ds-b' && ns === 'slo-generated-ds-b') {
+        return [mockGroup('slo:b_suffix'), mockGroup('slo:ds-b-only-orphan')];
+      }
+      throw new Error(`unexpected list call ds=${ds.id} ns=${ns}`);
+    });
+
+    const reconciler = makeReconciler(mocks);
+    const result = await reconciler.reconcileOnce();
+
+    // ds-A's missing entry stays pinned to ds-A / slo-generated-ds-a.
+    expect(result.missingBySlo).toEqual([
+      {
+        sloId: 'slo-a',
+        datasourceId: 'ds-a',
+        namespace: 'slo-generated-ds-a',
+        missingGroups: ['slo:a_suffix'],
+      },
+    ]);
+    // ds-B's orphan stays pinned to ds-B / slo-generated-ds-b — the
+    // 'slo:a_suffix' group that's "missing" from ds-A must not show up as
+    // an orphan anywhere.
+    expect(result.orphans).toEqual([
+      {
+        datasourceId: 'ds-b',
+        namespace: 'slo-generated-ds-b',
+        groupName: 'slo:ds-b-only-orphan',
+      },
+    ]);
+    // Invalidate targets ds-A's (workspaceId, datasourceId, sloId) tuple —
+    // ds-B's slo-b was healthy and must not be invalidated.
+    expect(mocks.healthChecker.invalidate).toHaveBeenCalledTimes(1);
+    expect(mocks.healthChecker.invalidate).toHaveBeenCalledWith('ds-a', 'ds-a', 'slo-a');
+  });
+});
