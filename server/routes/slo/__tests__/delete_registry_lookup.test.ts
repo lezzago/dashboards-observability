@@ -203,14 +203,14 @@ describe('SLO DELETE datasource registry lookup (#S13 regression)', () => {
     router = makeRouter();
     rulerClient = new MockRulerClientImpl(mockLogger as never);
     jest.spyOn(rulerClient, 'deleteRuleGroup');
-    registerSloRoutes(
-      router as never,
+    registerSloRoutes({
+      router: router as never,
       sloService,
-      mockLogger as never,
+      logger: mockLogger as never,
       rulerClient,
       datasourceService,
-      discoveryService
-    );
+      discoveryService,
+    });
   });
 
   it('resolves a present datasource on the first SLO DELETE after process start', async () => {

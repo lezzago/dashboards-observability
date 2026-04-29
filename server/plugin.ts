@@ -130,6 +130,7 @@ export class ObservabilityPlugin
         slo?: {
           reconcilerIntervalMs: number;
           ruleDedup?: { enabled: boolean };
+          ruleAdoption?: { enabled: boolean };
           recordingGraceMs?: number;
         };
       }>()
@@ -140,6 +141,11 @@ export class ObservabilityPlugin
     // offline/dev paths that skip config resolution still get the new
     // codepath.
     const ruleDedupEnabled = observabilityConfig.slo?.ruleDedup?.enabled ?? true;
+    // Phase 4 (W4.6): rule-adoption flag. Default-off; mirrors the schema
+    // default (W4.1). Gates the adoption HTTP endpoints (`_orphans`,
+    // `_recover`, `_clone`). Tombstones are still written unconditionally
+    // on delete — only the read path (and thus the Recover UI) is gated.
+    const ruleAdoptionEnabled = observabilityConfig.slo?.ruleAdoption?.enabled ?? false;
     // Phase 3 (W3.11): default 24h grace before a zero-ref recording group
     // gets deleted. Same default as the schema.
     const recordingGraceMs = observabilityConfig.slo?.recordingGraceMs ?? 24 * 60 * 60_000;
@@ -547,6 +553,7 @@ export class ObservabilityPlugin
       rulerClient,
       reconciler,
       ruleDedupEnabled,
+      ruleAdoptionEnabled,
     });
     datasourceServiceRef.current = alertingDatasourceService;
 

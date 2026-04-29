@@ -66,6 +66,7 @@ export function setupRoutes({
   rulerClient,
   reconciler,
   ruleDedupEnabled,
+  ruleAdoptionEnabled,
 }: {
   router: IRouter;
   client: ILegacyClusterClient;
@@ -95,6 +96,12 @@ export function setupRoutes({
    * the aggregator (W3.9) picks fingerprint-keyed selectors when true.
    */
   ruleDedupEnabled?: boolean;
+  /**
+   * Phase 4 (W4.6) — `observability.slo.ruleAdoption.enabled`. Forwarded
+   * into `registerSloRoutes` so the adoption endpoints (`_orphans`,
+   * `_recover`, `_clone`) can apply the 412 feature-flag gate.
+   */
+  ruleAdoptionEnabled?: boolean;
 }): SetupRoutesResult {
   PanelsRouter(router);
   VisualizationsRouter(router);
@@ -172,22 +179,22 @@ export function setupRoutes({
     // `server/plugin.ts` so the reconciler can share the same TTL cache.
     // `reconciler` threads through to the admin `_reconcile` route registered
     // inside `registerSloRoutes`.
-    // Note (Phase 3 W3.6): `registerSloRoutes` now takes 9 positional args.
-    // This is the last time we extend positional args; a follow-up
-    // workstream converts to an options bag before another route needs to
-    // be added.
-    registerSloRoutes(
+    // Phase 4 W4.6 converted `registerSloRoutes` to an options bag so new
+    // routes (adoption endpoints) don't extend a positional signature that
+    // had already grown to 10 args.
+    registerSloRoutes({
       router,
       sloService,
       logger,
       rulerClient,
-      alertingDatasourceService,
-      datasourceDiscoveryService,
-      promBackend,
+      datasourceService: alertingDatasourceService,
+      discoveryService: datasourceDiscoveryService,
+      prometheusBackend: promBackend,
       ruleHealthChecker,
       reconciler,
-      ruleDedupEnabled
-    );
+      ruleDedupEnabled,
+      ruleAdoptionEnabled,
+    });
   }
 
   return { alertingDatasourceService };

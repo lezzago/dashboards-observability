@@ -48,6 +48,7 @@ import {
 import { validateSloSpec, validateSloId } from './slo_validators';
 import { InMemorySloStore } from './slo_store';
 import {
+  SloAdoptionError,
   SloNotFoundError,
   SloRulerError,
   SloRulerTeardownRequiredError,
@@ -56,12 +57,27 @@ import {
 } from './slo_errors';
 import { computeSliFingerprint, FINGERPRINT_VERSION } from './slo_sli_fingerprint';
 import {
+  AlertProvenance,
   annotateAlertGroup,
   annotateRecordingGroup,
   buildAlertProvenance,
   buildRecordingProvenance,
   buildSentinelAlert,
+  parseAlertProvenance,
+  PROVENANCE_SCHEMA_VERSION,
 } from './slo_rule_provenance';
+import {
+  computeSpecSha256,
+  deriveExpectedFingerprintsFromSpec,
+  findAdoptableAlertGroup,
+} from './slo_adoption_verify';
+import type {
+  CloneInput,
+  CloneResult,
+  RecoverInput,
+  RecoverRefcountChange,
+  RecoverResult,
+} from './slo_adoption_types';
 
 /**
  * Status cache TTL. Rationale (design §12.12 was open):
@@ -78,12 +94,14 @@ import {
 const STATUS_CACHE_TTL_MS = 60_000;
 
 export {
+  SloAdoptionError,
   SloNotFoundError,
   SloRulerError,
   SloRulerTeardownRequiredError,
   SloValidationError,
   SloVersionConflictError,
 };
+export type { CloneInput, CloneResult, RecoverInput, RecoverRefcountChange, RecoverResult };
 
 // ============================================================================
 // Ruler deployment context
@@ -107,6 +125,18 @@ export interface SloRulerClient {
     namespace: string,
     groupName: string
   ): Promise<void>;
+  /**
+   * Phase 4 (W4.4 / W4.5) — required by the adoption paths (recover/clone)
+   * so the service can locate an orphan alert group from its provenance
+   * annotation. Optional here to stay additive for pre-Phase-4 test doubles
+   * (e.g. the dedup test suite's FakeRuler) — `recover()` / `clone()` throw
+   * a clear runtime error when the wired ruler lacks it.
+   */
+  listRuleGroups?(
+    client: AlertingOSClient,
+    datasource: Datasource,
+    namespace: string
+  ): Promise<GeneratedRuleGroup[]>;
 }
 
 /**
@@ -1239,6 +1269,465 @@ export class SloService {
     );
   }
 
+  // ---------- recover (Phase 4 W4.4 — orphan adoption) ----------
+
+  /**
+   * Adopt a ruler-resident orphan back into the saved-objects store. The SLO
+   * must already have been created by this plugin (we recognize it by its
+   * `osd_slo_provenance` annotation); the ruler is the source of truth for
+   * the spec because the SO it would have pointed to is missing.
+   *
+   * Ordering rationale:
+   *   1. Integrity checks (sha256, workspace/datasource match, fingerprint
+   *      coverage) run BEFORE we touch the refcount store or the ruler —
+   *      anything that drifts here means the orphan is un-adoptable and we
+   *      don't want to leave half-claimed state behind.
+   *   2. Tombstone check is last among the reject paths so callers that
+   *      acknowledged a tombstone still get the benefit of the integrity
+   *      validation (a tombstoned SLO with drifted rules still can't be
+   *      adopted — they have to Clone instead).
+   *   3. Ref-increments are done sequentially with best-effort rollback so
+   *      a partial failure doesn't strand refcount leaks. Full rollback on
+   *      SO-save failure too.
+   *   4. Alert-group upsert is idempotent (and the group is already there),
+   *      so we skip it — saves a ruler round-trip and keeps the annotation
+   *      stable for forensic diffing.
+   */
+  async recover(input: RecoverInput, deploy: SloDeployContext): Promise<RecoverResult> {
+    // D1: dedup must be on — the refcount bookkeeping steps below assume it.
+    if (!this.dedupEnabled) {
+      throw new SloValidationError({
+        adoption: 'Adoption requires observability.slo.ruleDedup.enabled',
+      });
+    }
+
+    // Step 2: reject if an SO for this sloId is already live. Caller should
+    // have picked a different id (the orphan-detector UI should be showing
+    // only ids with no live SO, but races are real).
+    const existing = await this.store.get(input.sloId);
+    if (existing) {
+      throw new SloAdoptionError(
+        'ORPHAN_CLAIM_CONFLICT',
+        `SLO ${input.sloId} already has a live saved object`,
+        { sloId: input.sloId }
+      );
+    }
+
+    // Step 3: scan the ruler for an alert group whose provenance matches
+    // this sloId. We probe the caller-supplied workspace namespace because
+    // provenance mismatches are surfaced as WORKSPACE_MISMATCH below; if the
+    // orphan lives in a different namespace the reconciler wouldn't have
+    // flagged it for this workspace anyway.
+    if (typeof deploy.ruler.listRuleGroups !== 'function') {
+      throw new SloAdoptionError(
+        'ORPHAN_SPEC_DRIFT',
+        'Ruler client does not support listRuleGroups; cannot verify orphan',
+        { sloId: input.sloId }
+      );
+    }
+    const namespace = sloRulerNamespaceFor(input.workspaceId);
+    const groups = await deploy.ruler.listRuleGroups(deploy.client, deploy.datasource, namespace);
+    const match = findAdoptableAlertGroup(groups, input.sloId);
+    if (!match) {
+      // No alert group carrying matching provenance. This is also the D2
+      // "legacy monolithic rule group" fallthrough — such groups have no
+      // `osd_slo_provenance` annotation and so never match.
+      throw new SloNotFoundError(input.sloId);
+    }
+
+    // Step 4: parse + schemaVersion check. A null parse on an annotation we
+    // found means the schema version was unreadable or the JSON was
+    // malformed; surface as unsupported-schema rather than the more generic
+    // spec-drift so the UI can render the right copy.
+    // (`findAdoptableAlertGroup` already returned `null` on parse failure,
+    // so a hit here guarantees parseAlertProvenance succeeded.)
+    const provenance = provenanceFrom(match.provenanceValue);
+    if (!provenance) {
+      throw new SloAdoptionError(
+        'ORPHAN_UNSUPPORTED_SCHEMA',
+        `Provenance annotation for SLO ${input.sloId} could not be parsed or uses an unsupported schema version`,
+        { sloId: input.sloId }
+      );
+    }
+    if (provenance.schemaVersion !== PROVENANCE_SCHEMA_VERSION) {
+      throw new SloAdoptionError(
+        'ORPHAN_UNSUPPORTED_SCHEMA',
+        `Provenance schemaVersion ${provenance.schemaVersion} is not supported (expected ${PROVENANCE_SCHEMA_VERSION})`,
+        { sloId: input.sloId }
+      );
+    }
+
+    // Steps 5-6: datasource + workspace match.
+    if (provenance.datasourceId !== input.datasourceId) {
+      throw new SloAdoptionError(
+        'ORPHAN_WORKSPACE_MISMATCH',
+        `Orphan belongs to datasource ${provenance.datasourceId}, not ${input.datasourceId}; use Clone to cross-datasource adopt`,
+        {
+          sloId: input.sloId,
+          expectedDatasourceId: provenance.datasourceId,
+          receivedDatasourceId: input.datasourceId,
+        }
+      );
+    }
+    if (provenance.workspaceId !== input.workspaceId) {
+      throw new SloAdoptionError(
+        'ORPHAN_WORKSPACE_MISMATCH',
+        `Orphan belongs to workspace ${provenance.workspaceId}, not ${input.workspaceId}; use Clone to cross-workspace adopt`,
+        {
+          sloId: input.sloId,
+          expectedWorkspaceId: provenance.workspaceId,
+          receivedWorkspaceId: input.workspaceId,
+        }
+      );
+    }
+
+    // Step 7: integrity sha256.
+    const recomputed = computeSpecSha256(provenance.spec);
+    if (recomputed !== provenance.specSha256) {
+      throw new SloAdoptionError(
+        'ORPHAN_SPEC_DRIFT',
+        'Spec SHA-256 mismatch — rules may have been edited out-of-band',
+        { sloId: input.sloId }
+      );
+    }
+
+    // Step 8: spec must still validate against the current schema.
+    const { errors } = validateSloSpec(provenance.spec);
+    if (Object.keys(errors).length > 0) {
+      throw new SloAdoptionError(
+        'ORPHAN_SPEC_DRIFT',
+        `Embedded spec failed current validation: ${JSON.stringify(errors)}`,
+        { sloId: input.sloId }
+      );
+    }
+
+    // Step 9: fingerprint coverage. Every expected recording group must be
+    // present on the ruler; otherwise the SO we'd save would claim refs for
+    // groups that don't exist, and the reconciler would thrash.
+    const actualGroupNames = groups.map((g) => g.groupName);
+    const expectedFps = deriveExpectedFingerprintsFromSpec(provenance.spec);
+    const missing = expectedFps
+      .map((fp) => ({ fp, group: `slo:rec:${fp}` }))
+      .filter((x) => !actualGroupNames.includes(x.group));
+    if (missing.length > 0) {
+      throw new SloAdoptionError(
+        'ORPHAN_SPEC_DRIFT',
+        `Expected recording group ${missing[0].group} missing on ruler`,
+        { sloId: input.sloId, missingRecordingGroups: missing.map((m) => m.group).join(',') }
+      );
+    }
+
+    // Step 10: tombstone gate.
+    let tombstone: { attributes: SloTombstoneAttributesLite } | null = null;
+    if (this.tombstoneStore) {
+      tombstone = await this.tombstoneStore.get(input.sloId);
+    }
+    if (tombstone && input.acknowledgeTombstone !== true) {
+      throw new SloAdoptionError(
+        'ORPHAN_TOMBSTONED',
+        `SLO was deliberately deleted on ${tombstone.attributes.createdAt}; re-confirm to adopt`,
+        { sloId: input.sloId, tombstoneCreatedAt: tombstone.attributes.createdAt }
+      );
+    }
+
+    // Step 11: refcount increments. Rollback on partial failure so we don't
+    // leak phantom refs.
+    const recordingFingerprints: Record<string, string> = {};
+    for (const objective of provenance.spec.objectives) {
+      const fp = computeSliFingerprint(
+        provenance.spec.datasourceId,
+        provenance.spec.sli,
+        objective
+      );
+      if (fp !== null) recordingFingerprints[objective.name] = fp;
+    }
+    const uniqueFps = [...new Set(Object.values(recordingFingerprints))];
+
+    const refcountChanges: RecoverRefcountChange[] = [];
+    const incrementedFps: string[] = [];
+
+    const rollbackRefs = async (): Promise<void> => {
+      for (const fp of incrementedFps) {
+        if (!this.refStore) continue;
+        try {
+          await this.refStore.decrementRef({
+            workspaceId: input.workspaceId,
+            datasourceId: input.datasourceId,
+            fingerprint: fp,
+          });
+        } catch (err) {
+          this.logger.warn(
+            `SloService.recover: rollback decrementRef failed for fingerprint=${fp}: ${
+              err instanceof Error ? err.message : String(err)
+            }`
+          );
+        }
+      }
+    };
+
+    for (const fp of uniqueFps) {
+      if (!this.refStore) {
+        // No ref store wired (unit tests / early boot). Record a no-op
+        // change so callers can tell "not tracked" from "bumped".
+        refcountChanges.push({ fingerprint: fp, previousRefcount: 0, newRefcount: 0 });
+        continue;
+      }
+      let before = 0;
+      try {
+        const existingRef = await this.refStore.get(input.workspaceId, input.datasourceId, fp);
+        before = existingRef?.attributes.refcount ?? 0;
+      } catch (err) {
+        // Treat read failures as zero; the increment below will surface the
+        // real error if the ref store is in a bad state.
+        this.logger.warn(
+          `SloService.recover: ref read failed for fingerprint=${fp}: ${
+            err instanceof Error ? err.message : String(err)
+          }`
+        );
+      }
+      try {
+        await this.refStore.incrementRef({
+          workspaceId: input.workspaceId,
+          datasourceId: input.datasourceId,
+          fingerprint: fp,
+          fingerprintVersion: FINGERPRINT_VERSION,
+          groupName: `slo:rec:${fp}`,
+          namespace,
+        });
+        incrementedFps.push(fp);
+        refcountChanges.push({
+          fingerprint: fp,
+          previousRefcount: before,
+          newRefcount: before + 1,
+        });
+      } catch (err) {
+        await rollbackRefs();
+        throw new SloAdoptionError(
+          'ORPHAN_CLAIM_CONFLICT',
+          `Failed to claim fingerprint ${fp}: ${err instanceof Error ? err.message : String(err)}`,
+          { sloId: input.sloId, fingerprint: fp }
+        );
+      }
+    }
+
+    // Step 12: skip alert-group upsert. The group is already there with the
+    // same content (we just verified sha256), and re-upserting would only
+    // refresh the updatedAt annotation — the adoption audit trail lives in
+    // the SO's `adoptionSource`, not in the ruler annotation. If the group
+    // were missing (defense-in-depth), we'd want to fail closed because a
+    // missing alert group means the user's paging won't fire until we redeploy.
+    // For now the fingerprint-coverage check above is the authoritative
+    // "rules are live" gate, so this branch is a no-op.
+
+    // Step 13: materialize the SO.
+    const now = new Date().toISOString();
+    const alertGroupName = match.group.groupName;
+    const doc: SloDocument = {
+      id: input.sloId,
+      spec: provenance.spec,
+      status: {
+        version: 1,
+        // Preserve createdAt from provenance so the UI still shows the
+        // original provisioning date; updatedAt gets the recovery timestamp.
+        createdAt: provenance.createdAt,
+        createdBy: 'system',
+        updatedAt: now,
+        updatedBy: 'system',
+        provisioning: {
+          backend: 'prometheus',
+          rulerNamespace: namespace,
+          generatedRuleNames: match.group.rules.map((r) => r.name),
+          recordingFingerprints,
+          alertGroupName,
+          needsRedeploy: false,
+          adoptionSource: {
+            source: 'recover',
+            recoveredAt: now,
+          },
+        },
+      },
+    };
+
+    // Step 14: save — rollback refs if the save fails.
+    try {
+      await this.store.save(doc);
+    } catch (saveErr) {
+      await rollbackRefs();
+      throw saveErr;
+    }
+
+    // Step 15: tombstone cleanup (only when acknowledged).
+    let tombstoneCleared = false;
+    if (tombstone && this.tombstoneStore) {
+      try {
+        await this.tombstoneStore.remove(input.sloId);
+        tombstoneCleared = true;
+      } catch (err) {
+        // Tombstone-clear failure isn't worth rolling back the recovery —
+        // the SO is live, the rules are live. Log + move on; the worst case
+        // is the UI shows a stale tombstone banner until the user refreshes.
+        this.logger.warn(
+          `SloService.recover: tombstone clear failed for ${input.sloId}: ${
+            err instanceof Error ? err.message : String(err)
+          }`
+        );
+      }
+    }
+
+    this.logger.info(
+      `SloService: recovered SLO ${input.sloId} from ruler with ${uniqueFps.length} fingerprint(s), tombstoneCleared=${tombstoneCleared}`
+    );
+
+    return { slo: doc, tombstoneCleared, refcountChanges };
+  }
+
+  // ---------- clone (Phase 4 W4.5) ----------
+
+  /**
+   * Produce a new SLO in the target workspace from the source SLO's
+   * ruler-side provenance. Source is read-only — this method never
+   * upserts or deletes anything in the source namespace.
+   *
+   * Integrity checks (sha256 / schema / spec validity) mirror `recover` so
+   * the two paths stay consistent — a caller hitting drift on recover
+   * knows clone would drift the same way.
+   *
+   * `clone` defers dedup / ref / alert-group upsert to `create()` in the
+   * target workspace — the caller doesn't see any of the bookkeeping
+   * complexity.
+   */
+  async clone(
+    input: CloneInput,
+    sourceDeploy: SloDeployContext,
+    targetDeploy: SloDeployContext
+  ): Promise<CloneResult> {
+    if (!this.dedupEnabled) {
+      throw new SloValidationError({
+        adoption: 'Adoption requires observability.slo.ruleDedup.enabled',
+      });
+    }
+
+    if (typeof sourceDeploy.ruler.listRuleGroups !== 'function') {
+      throw new SloAdoptionError(
+        'ORPHAN_SPEC_DRIFT',
+        'Source ruler client does not support listRuleGroups; cannot verify clone source',
+        { sloId: input.sourceSloId }
+      );
+    }
+    const sourceNamespace = sloRulerNamespaceFor(input.sourceWorkspaceId);
+    const groups = await sourceDeploy.ruler.listRuleGroups(
+      sourceDeploy.client,
+      sourceDeploy.datasource,
+      sourceNamespace
+    );
+    const match = findAdoptableAlertGroup(groups, input.sourceSloId);
+    if (!match) {
+      throw new SloNotFoundError(input.sourceSloId);
+    }
+
+    const provenance = provenanceFrom(match.provenanceValue);
+    if (!provenance) {
+      throw new SloAdoptionError(
+        'ORPHAN_UNSUPPORTED_SCHEMA',
+        `Provenance annotation for SLO ${input.sourceSloId} could not be parsed or uses an unsupported schema version`,
+        { sloId: input.sourceSloId }
+      );
+    }
+    if (provenance.schemaVersion !== PROVENANCE_SCHEMA_VERSION) {
+      throw new SloAdoptionError(
+        'ORPHAN_UNSUPPORTED_SCHEMA',
+        `Provenance schemaVersion ${provenance.schemaVersion} is not supported (expected ${PROVENANCE_SCHEMA_VERSION})`,
+        { sloId: input.sourceSloId }
+      );
+    }
+    if (provenance.datasourceId !== input.sourceDatasourceId) {
+      throw new SloAdoptionError(
+        'ORPHAN_WORKSPACE_MISMATCH',
+        `Source provenance datasource ${provenance.datasourceId} does not match requested source datasource ${input.sourceDatasourceId}`,
+        { sloId: input.sourceSloId }
+      );
+    }
+    if (provenance.workspaceId !== input.sourceWorkspaceId) {
+      throw new SloAdoptionError(
+        'ORPHAN_WORKSPACE_MISMATCH',
+        `Source provenance workspace ${provenance.workspaceId} does not match requested source workspace ${input.sourceWorkspaceId}`,
+        { sloId: input.sourceSloId }
+      );
+    }
+
+    const recomputed = computeSpecSha256(provenance.spec);
+    if (recomputed !== provenance.specSha256) {
+      throw new SloAdoptionError(
+        'ORPHAN_SPEC_DRIFT',
+        'Spec SHA-256 mismatch — source rules may have been edited out-of-band',
+        { sloId: input.sourceSloId }
+      );
+    }
+
+    const { errors } = validateSloSpec(provenance.spec);
+    if (Object.keys(errors).length > 0) {
+      throw new SloAdoptionError(
+        'ORPHAN_SPEC_DRIFT',
+        `Source spec failed current validation: ${JSON.stringify(errors)}`,
+        { sloId: input.sourceSloId }
+      );
+    }
+
+    // Target spec: deep clone so we never mutate the provenance object, then
+    // substitute datasourceId + name.
+    const targetSpec: SloSpec = JSON.parse(JSON.stringify(provenance.spec));
+    targetSpec.datasourceId = input.targetDatasourceId;
+    if (input.overrideName !== undefined && input.overrideName !== null) {
+      targetSpec.name = input.overrideName;
+    }
+
+    // Delegate to create() — this handles refcount, recording-group upsert,
+    // alert-group upsert, and SO save in the target workspace. Source is
+    // untouched.
+    let created: SloDocument;
+    try {
+      created = await this.create(
+        { id: input.overrideId, spec: targetSpec },
+        'system',
+        targetDeploy
+      );
+    } catch (err) {
+      // Name collision in the target workspace surfaces as SloValidationError
+      // from `assertNameUnique`. Re-wrap so the route layer can map it.
+      if (
+        err instanceof SloValidationError &&
+        Object.prototype.hasOwnProperty.call(err.errors, 'spec.name')
+      ) {
+        throw new SloAdoptionError(
+          'CLONE_NAME_COLLISION',
+          `Target workspace already has an SLO named "${targetSpec.name}"; set overrideName`,
+          { sloId: input.sourceSloId, name: targetSpec.name }
+        );
+      }
+      throw err;
+    }
+
+    // Stamp adoption provenance on the new doc so the listing UI can label
+    // it "cloned from <source>". `create()` doesn't know this context, so
+    // we patch the SO once after-the-fact. Safe — save() is idempotent and
+    // this only mutates the status.provisioning sub-object.
+    if (created.status.provisioning.backend === 'prometheus') {
+      created.status.provisioning.adoptionSource = {
+        source: 'clone',
+        recoveredAt: new Date().toISOString(),
+        sourceSloId: input.sourceSloId,
+        sourceDatasourceId: input.sourceDatasourceId,
+      };
+      await this.store.save(created);
+    }
+
+    this.logger.info(
+      `SloService: cloned SLO ${input.sourceSloId} (${input.sourceWorkspaceId}) → ${created.id} (${input.targetWorkspaceId})`
+    );
+
+    return { slo: created, sourceSpecSha256: provenance.specSha256 };
+  }
+
   /**
    * Phase 4 W4.1 — best-effort tombstone write called from both delete paths.
    *
@@ -1711,6 +2200,16 @@ function buildAlertGroupWithProvenance(
     return annotateAlertGroup({ ...group, rules: [sentinel] }, provenance);
   }
   return annotateAlertGroup(group, provenance);
+}
+
+/**
+ * Phase 4 (W4.4 / W4.5) — thin wrapper around `parseAlertProvenance` so the
+ * recover/clone methods can stay declarative. Returns `null` on malformed
+ * JSON, on shape mismatch, or on schema-version mismatch — the callers
+ * differentiate those further via their own error codes.
+ */
+function provenanceFrom(annotationValue: string): AlertProvenance | null {
+  return parseAlertProvenance(annotationValue);
 }
 
 /**

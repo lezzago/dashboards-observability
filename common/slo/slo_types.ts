@@ -282,6 +282,18 @@ export interface PrometheusProvisioning {
    * monolithic group, and clears the flag.
    */
   needsRedeploy?: boolean;
+  /**
+   * Phase 4 (W4.4 / W4.5) — stamped when the SO was materialized from an
+   * orphan adoption flow rather than a fresh create. Absent for normal
+   * creates; surfaced to the UI so users can tell a recovered SLO from a
+   * hand-authored one. Does not affect rule generation.
+   */
+  adoptionSource?: {
+    source: 'recover' | 'clone';
+    recoveredAt: string;
+    sourceSloId?: string;
+    sourceDatasourceId?: string;
+  };
 }
 
 /** Reserved for P2. */

@@ -39,6 +39,7 @@ import {
 } from './handlers';
 import { registerProbeSliRoute } from './probe_sli';
 import { registerSloReconcileRoute } from './reconcile_route';
+import { registerSloAdoptionRoutes } from './adoption_route';
 
 /**
  * OSD context type with the optional `dataSource` plugin extension. Same
@@ -419,18 +420,43 @@ function buildStatusContext(
   };
 }
 
-export function registerSloRoutes(
-  router: IRouter,
-  sloService: SloService,
-  logger: Logger,
-  rulerClient?: RulerClient,
-  datasourceService?: InMemoryDatasourceService,
-  discoveryService?: DatasourceDiscoveryService,
-  prometheusBackend?: DirectQueryPrometheusBackend,
-  ruleHealthChecker?: RuleHealthChecker,
-  reconciler?: SloReconciler,
-  ruleDedupEnabled?: boolean
-) {
+/**
+ * Options bag for `registerSloRoutes`. Replaces the pre-Phase-4 positional
+ * signature (W3.6 left this as tech debt; Phase 4 W4.6 added a third new
+ * route group — the adoption endpoints — which made the positional form
+ * unmaintainable). Every field except `router`, `sloService`, and `logger`
+ * is optional so offline-dev and test wiring can omit downstream deps.
+ */
+export interface RegisterSloRoutesOptions {
+  router: IRouter;
+  sloService: SloService;
+  logger: Logger;
+  rulerClient?: RulerClient;
+  datasourceService?: InMemoryDatasourceService;
+  discoveryService?: DatasourceDiscoveryService;
+  prometheusBackend?: DirectQueryPrometheusBackend;
+  ruleHealthChecker?: RuleHealthChecker;
+  reconciler?: SloReconciler;
+  /** Phase 3 (W3.6) — gates fingerprint-keyed selectors on the aggregator. */
+  ruleDedupEnabled?: boolean;
+  /** Phase 4 (W4.6) — gates `_orphans`, `_recover`, `_clone` adoption endpoints. Default false. */
+  ruleAdoptionEnabled?: boolean;
+}
+
+export function registerSloRoutes(options: RegisterSloRoutesOptions) {
+  const {
+    router,
+    sloService,
+    logger,
+    rulerClient,
+    datasourceService,
+    discoveryService,
+    prometheusBackend,
+    ruleHealthChecker,
+    reconciler,
+    ruleDedupEnabled = false,
+    ruleAdoptionEnabled = false,
+  } = options;
   if (prometheusBackend) {
     registerProbeSliRoute(router, logger, prometheusBackend, datasourceService, discoveryService);
   }
@@ -870,4 +896,26 @@ export function registerSloRoutes(
   // hit the path.
   // --------------------------------------------------------------------------
   registerSloReconcileRoute(router, reconciler, logger);
+
+  // --------------------------------------------------------------------------
+  // W4.6 — adoption endpoints (`_orphans`, `_recover`, `_clone`).
+  //
+  // Registered unconditionally; each handler applies the 412 Precondition-
+  // Failed feature-flag gate (`ruleDedup` AND `ruleAdoption`) before any
+  // downstream call. When the dependency set is incomplete (e.g. no
+  // reconciler wired), the handlers surface a 501 of their own rather than
+  // having the route stop registering — so the path is always present for
+  // smoke probes and UI error surfaces don't have to branch on 404-vs-412.
+  // --------------------------------------------------------------------------
+  registerSloAdoptionRoutes({
+    router,
+    sloService,
+    logger,
+    rulerClient,
+    datasourceService,
+    discoveryService,
+    reconciler,
+    ruleDedupEnabled,
+    ruleAdoptionEnabled,
+  });
 }
