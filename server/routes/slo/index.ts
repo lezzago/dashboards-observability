@@ -446,6 +446,15 @@ export interface RegisterSloRoutesOptions {
   legacyOrphanPurgeEnabled?: boolean;
   /** Session C — shared metrics bank for legacy-purge counters. */
   reconcilerMetrics?: ReconcilerMetrics;
+  /**
+   * Session E (F4) — lazy getter for the legacy-purge audit store.
+   * Returns `undefined` before `start()` wires the SO-backed store. The
+   * purger gets `.writeMany(...)` on every request; the audit-list
+   * endpoint gets `.list(...)`.
+   */
+  legacyPurgeAuditStoreGetter?: () =>
+    | import('../../services/slo/slo_legacy_purge_audit_store').SloLegacyPurgeAuditStore
+    | undefined;
 }
 
 export function registerSloRoutes(options: RegisterSloRoutesOptions) {
@@ -463,6 +472,7 @@ export function registerSloRoutes(options: RegisterSloRoutesOptions) {
     ruleAdoptionEnabled = false,
     legacyOrphanPurgeEnabled = false,
     reconcilerMetrics,
+    legacyPurgeAuditStoreGetter,
   } = options;
   if (prometheusBackend) {
     registerProbeSliRoute(router, logger, prometheusBackend, datasourceService, discoveryService);
@@ -926,5 +936,6 @@ export function registerSloRoutes(options: RegisterSloRoutesOptions) {
     ruleAdoptionEnabled,
     legacyOrphanPurgeEnabled,
     reconcilerMetrics,
+    legacyPurgeAuditStoreGetter,
   });
 }

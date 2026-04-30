@@ -70,6 +70,7 @@ export function setupRoutes({
   ruleAdoptionEnabled,
   legacyOrphanPurgeEnabled,
   reconcilerMetrics,
+  legacyPurgeAuditStoreGetter,
 }: {
   router: IRouter;
   client: ILegacyClusterClient;
@@ -117,6 +118,15 @@ export function setupRoutes({
    * activity alongside orphan counts.
    */
   reconcilerMetrics?: ReconcilerMetrics;
+  /**
+   * Session E (F4) — lazy getter for the legacy-purge audit store.
+   * Returns `undefined` before `start()` wires the SO-backed store; the
+   * adoption route checks the getter on every request so the audit
+   * endpoint surfaces the right state as soon as the store is live.
+   */
+  legacyPurgeAuditStoreGetter?: () =>
+    | import('../services/slo/slo_legacy_purge_audit_store').SloLegacyPurgeAuditStore
+    | undefined;
 }): SetupRoutesResult {
   PanelsRouter(router);
   VisualizationsRouter(router);
@@ -211,6 +221,7 @@ export function setupRoutes({
       ruleAdoptionEnabled,
       legacyOrphanPurgeEnabled,
       reconcilerMetrics,
+      legacyPurgeAuditStoreGetter,
     });
   }
 

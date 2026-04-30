@@ -12,8 +12,9 @@
 
 import React from 'react';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { LegacyTab } from '../legacy_tab';
+import { formatRelativeAge, LegacyTab } from '../legacy_tab';
 import type {
+  LegacyPurgeAuditListResponse,
   LegacyPurgeResponse,
   OrphanUnknown,
   PurgeLegacyRequestBody,
@@ -39,6 +40,9 @@ function makeApiClient(
     purgeLegacyOrphans: jest
       .fn<Promise<LegacyPurgeResponse>, [PurgeLegacyRequestBody]>()
       .mockResolvedValue({ requested: 0, purged: 0, skipped_validation: [], failed: [] }),
+    listLegacyPurgeAudit: jest
+      .fn<Promise<LegacyPurgeAuditListResponse>, [unknown]>()
+      .mockResolvedValue({ records: [], truncated: false }),
     ...overrides,
   } as unknown) as jest.Mocked<SloApiClient>;
 }
@@ -69,6 +73,60 @@ function renderTab(
   );
   return notifications;
 }
+
+describe('formatRelativeAge (Session E / F3)', () => {
+  const NOW = new Date('2026-04-29T12:00:00.000Z');
+
+  it('returns "Unknown" when firstSeenAt is missing', () => {
+    expect(formatRelativeAge(undefined, NOW)).toBe('Unknown');
+  });
+
+  it('returns "Unknown" when firstSeenAt is not a parseable date', () => {
+    expect(formatRelativeAge('not-a-date', NOW)).toBe('Unknown');
+  });
+
+  it('returns "Just now" for deltas under 1 minute', () => {
+    expect(formatRelativeAge('2026-04-29T11:59:30.000Z', NOW)).toBe('Just now');
+  });
+
+  it('returns "N minutes ago" between 1 minute and 1 hour', () => {
+    expect(formatRelativeAge('2026-04-29T11:55:00.000Z', NOW)).toBe('5 minutes ago');
+    // Singular form on exactly 1 minute.
+    expect(formatRelativeAge('2026-04-29T11:59:00.000Z', NOW)).toBe('1 minute ago');
+  });
+
+  it('returns "N hours ago" between 1 hour and 1 day', () => {
+    expect(formatRelativeAge('2026-04-29T09:00:00.000Z', NOW)).toBe('3 hours ago');
+    expect(formatRelativeAge('2026-04-29T11:00:00.000Z', NOW)).toBe('1 hour ago');
+  });
+
+  it('returns "N days ago" beyond 1 day', () => {
+    expect(formatRelativeAge('2026-04-26T12:00:00.000Z', NOW)).toBe('3 days ago');
+    expect(formatRelativeAge('2026-04-28T12:00:00.000Z', NOW)).toBe('1 day ago');
+  });
+});
+
+describe('LegacyTab — Age column (Session E / F3)', () => {
+  it('renders "Unknown" when firstSeenAt is missing on the row', () => {
+    const apiClient = makeApiClient();
+    renderTab(apiClient, [makeLegacyRow({ groupName: 'slo:foo_abcdef12' })]);
+    expect(screen.getByTestId('sloAdoption-legacyTab-age-slo:foo_abcdef12')).toHaveTextContent(
+      'Unknown'
+    );
+  });
+
+  it('renders a relative-time string when firstSeenAt is present', () => {
+    const apiClient = makeApiClient();
+    // Ten days before any realistic test run time — pins to "N days ago" regardless.
+    const tenDaysAgo = new Date(Date.now() - 10 * 24 * 60 * 60_000).toISOString();
+    renderTab(apiClient, [
+      makeLegacyRow({ groupName: 'slo:foo_abcdef12', firstSeenAt: tenDaysAgo }),
+    ]);
+    expect(screen.getByTestId('sloAdoption-legacyTab-age-slo:foo_abcdef12')).toHaveTextContent(
+      '10 days ago'
+    );
+  });
+});
 
 describe('LegacyTab — empty + callout', () => {
   it('renders the empty prompt when no legacy orphans are present', () => {
@@ -255,6 +313,102 @@ describe('LegacyTab — selection → purge flow', () => {
       expect(screen.getByTestId('sloAdoption-legacyTab-purgeError')).toHaveTextContent(
         /narrow the selection to one datasource/i
       )
+    );
+  });
+});
+
+describe('LegacyTab — audit row-expand (Session E / F4)', () => {
+  async function expandRow(groupName: string): Promise<void> {
+    const btn = screen.getByTestId(`sloAdoption-legacyTab-expand-${groupName}`);
+    await act(async () => {
+      fireEvent.click(btn);
+    });
+  }
+
+  it('renders the empty-state when listLegacyPurgeAudit returns zero records', async () => {
+    const apiClient = makeApiClient();
+    renderTab(apiClient, [makeLegacyRow({ groupName: 'slo:foo_abcdef12' })]);
+    await expandRow('slo:foo_abcdef12');
+    await waitFor(() =>
+      expect(apiClient.listLegacyPurgeAudit).toHaveBeenCalledWith({
+        datasourceId: 'ds-1',
+        groupName: 'slo:foo_abcdef12',
+      })
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId('sloAdoption-legacyTab-auditTimeline-empty')).toBeInTheDocument()
+    );
+  });
+
+  it('renders the timeline with one record per outcome when records are returned', async () => {
+    const apiClient = makeApiClient({
+      listLegacyPurgeAudit: jest
+        .fn<Promise<LegacyPurgeAuditListResponse>, [unknown]>()
+        .mockResolvedValue({
+          records: [
+            {
+              workspaceId: 'ds-1',
+              datasourceId: 'ds-1',
+              namespace: 'slo-generated-ds-1',
+              groupName: 'slo:foo_abcdef12',
+              outcome: 'purged',
+              requestedAt: '2026-04-29T10:00:00.000Z',
+              requestedBy: 'admin',
+              schemaVersion: 1,
+            },
+            {
+              workspaceId: 'ds-1',
+              datasourceId: 'ds-1',
+              namespace: 'slo-generated-ds-1',
+              groupName: 'slo:foo_abcdef12',
+              outcome: 'skipped_validation',
+              reason: 'claimed_by_so',
+              claimantSloId: 'slo-123',
+              requestedAt: '2026-04-28T12:00:00.000Z',
+              schemaVersion: 1,
+            },
+          ],
+          truncated: false,
+        }),
+    });
+    renderTab(apiClient, [makeLegacyRow({ groupName: 'slo:foo_abcdef12' })]);
+    await expandRow('slo:foo_abcdef12');
+    await waitFor(() =>
+      expect(screen.getByTestId('sloAdoption-legacyTab-auditTimeline')).toBeInTheDocument()
+    );
+    expect(screen.getByTestId('sloAdoption-legacyTab-auditRecord-purged')).toBeInTheDocument();
+    expect(
+      screen.getByTestId('sloAdoption-legacyTab-auditRecord-skipped_validation')
+    ).toHaveTextContent('slo-123');
+  });
+
+  it('renders an error callout when listLegacyPurgeAudit rejects', async () => {
+    const apiClient = makeApiClient({
+      listLegacyPurgeAudit: jest
+        .fn<Promise<LegacyPurgeAuditListResponse>, [unknown]>()
+        .mockRejectedValue({ body: { message: 'audit store unavailable' } }),
+    });
+    renderTab(apiClient, [makeLegacyRow({ groupName: 'slo:foo_abcdef12' })]);
+    await expandRow('slo:foo_abcdef12');
+    await waitFor(() =>
+      expect(screen.getByTestId('sloAdoption-legacyTab-auditTimeline-error')).toHaveTextContent(
+        'audit store unavailable'
+      )
+    );
+  });
+
+  it('collapses the row on a second click — audit panel disappears', async () => {
+    const apiClient = makeApiClient();
+    renderTab(apiClient, [makeLegacyRow({ groupName: 'slo:foo_abcdef12' })]);
+    await expandRow('slo:foo_abcdef12');
+    await waitFor(() =>
+      expect(screen.getByTestId('sloAdoption-legacyTab-auditTimeline-empty')).toBeInTheDocument()
+    );
+    await expandRow('slo:foo_abcdef12');
+    await waitFor(() =>
+      expect(
+        screen.queryByTestId('sloAdoption-legacyTab-auditTimeline-empty')
+      ).not.toBeInTheDocument()
     );
   });
 });

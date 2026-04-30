@@ -449,6 +449,14 @@ export interface SloReconcilerLite {
       sourceWorkspaceId?: string;
       schemaVersion?: number;
       specIntegrity?: 'ok' | 'mismatch' | 'unsupported_schema';
+      /**
+       * Session E (F3) — populated on orphans carrying the legacy diagnostic
+       * when the reconciler's observation hook wrote a timestamp SO on this
+       * or a prior sweep. Undefined on adoption-relevant unknowns (the
+       * observation hook only tracks legacy layouts).
+       */
+      firstSeenAt?: string;
+      lastSeenAt?: string;
     }>;
   }>;
 }
@@ -515,6 +523,12 @@ export async function handleListOrphans(
       sourceWorkspaceId: o.sourceWorkspaceId,
       schemaVersion: o.schemaVersion,
       specIntegrity: o.specIntegrity,
+      // Session E (F3) — surface the observation timestamps on legacy
+      // orphans so the Age column renders real values. Non-legacy unknowns
+      // pass through as undefined (the reconciler's hook only writes
+      // observations for `pre-Phase-3 rule layout` entries).
+      firstSeenAt: o.firstSeenAt,
+      lastSeenAt: o.lastSeenAt,
     }));
 
     return { status: 200, body: { candidates, unknowns } };

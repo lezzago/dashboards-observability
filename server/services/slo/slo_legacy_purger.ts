@@ -51,6 +51,7 @@ import {
 } from '../../../common/slo/slo_promql_generator';
 import type { RulerClient } from './ruler_client';
 import type { ReconcilerMetrics } from './reconciler_metrics';
+import type { SloLegacyPurgeAuditAttributes } from '../../saved_objects/slo_legacy_purge_audit';
 
 /** Shape the pre-Phase-3 monolithic group name must match. */
 const LEGACY_GROUP_NAME_PATTERN = /^slo:[a-z0-9_]+_[0-9a-f]{8}$/;
@@ -128,6 +129,16 @@ export interface LegacyPurgeInput {
  */
 export type ListSlosByDatasource = (datasourceId: string) => Promise<SloDocument[]>;
 
+/**
+ * Session E (F4) — minimal write-side contract the purger uses to emit
+ * audit records. The concrete `SloLegacyPurgeAuditStore` structurally
+ * satisfies this interface; kept as a local type so the purger stays
+ * decoupled from the SO layer (offline tests don't need a real store).
+ */
+export interface SloLegacyPurgeAuditWriterLite {
+  writeMany(records: SloLegacyPurgeAuditAttributes[]): Promise<void>;
+}
+
 export interface LegacyPurgeDeps {
   listSlos: ListSlosByDatasource;
   ruler: RulerClient;
@@ -135,6 +146,21 @@ export interface LegacyPurgeDeps {
   datasource: Datasource;
   logger: Logger;
   metrics?: ReconcilerMetrics;
+  /**
+   * Session E (F4) — optional audit writer. When wired, every per-group
+   * outcome (purged / skipped_validation / failed) emits one record. Write
+   * failures are logged at warn and never block the purge response; the
+   * client's outcome is always authoritative.
+   */
+  auditStore?: SloLegacyPurgeAuditWriterLite;
+  /**
+   * Session E (F4) — username for audit records. May be undefined when the
+   * route layer can't extract one (e.g. internal calls); recorded as
+   * missing on the resulting SOs.
+   */
+  requestedBy?: string;
+  /** Injected clock for deterministic audit timestamps in tests. */
+  now?: () => Date;
 }
 
 /**
@@ -151,13 +177,36 @@ export async function purgeLegacyOrphans(
   deps: LegacyPurgeDeps
 ): Promise<LegacyPurgeResult> {
   const { datasourceId, workspaceId, candidates } = input;
-  const { listSlos, ruler, client, datasource, logger, metrics } = deps;
+  const { listSlos, ruler, client, datasource, logger, metrics, auditStore, requestedBy } = deps;
+  const now = deps.now ?? (() => new Date());
 
   metrics?.incLegacyPurgeRequested(candidates.length);
 
   const skipped: LegacyPurgeSkippedEntry[] = [];
   const failed: LegacyPurgeFailureEntry[] = [];
   const expectedNamespace = legacyNamespaceFor(datasourceId);
+
+  // Session E (F4) — shared requestedAt for every audit record emitted by
+  // this call. Recording one timestamp per call (instead of per-outcome)
+  // lets admins correlate "all N groups this admin touched in one purge"
+  // via a single query.
+  const requestedAt = now().toISOString();
+  const auditRecords: SloLegacyPurgeAuditAttributes[] = [];
+  function recordAudit(
+    attrs: Omit<
+      SloLegacyPurgeAuditAttributes,
+      'workspaceId' | 'datasourceId' | 'requestedAt' | 'requestedBy' | 'schemaVersion'
+    >
+  ) {
+    auditRecords.push({
+      workspaceId,
+      datasourceId,
+      requestedAt,
+      requestedBy,
+      schemaVersion: 1,
+      ...attrs,
+    });
+  }
 
   // Invariant 1a + 1b: name pattern + namespace shape. Filter the caller's
   // list before any I/O — no reason to enumerate SOs or hit the ruler for a
@@ -170,12 +219,24 @@ export async function purgeLegacyOrphans(
         namespace: c.namespace,
         reason: 'name_pattern_mismatch',
       });
+      recordAudit({
+        namespace: c.namespace,
+        groupName: c.groupName,
+        outcome: 'skipped_validation',
+        reason: 'name_pattern_mismatch',
+      });
       continue;
     }
     if (c.namespace !== expectedNamespace) {
       skipped.push({
         groupName: c.groupName,
         namespace: c.namespace,
+        reason: 'namespace_mismatch',
+      });
+      recordAudit({
+        namespace: c.namespace,
+        groupName: c.groupName,
+        outcome: 'skipped_validation',
         reason: 'namespace_mismatch',
       });
       continue;
@@ -185,6 +246,7 @@ export async function purgeLegacyOrphans(
 
   if (structurallyValid.length === 0) {
     metrics?.incLegacyPurgeSkippedValidation(skipped.length);
+    await flushAudit(auditStore, auditRecords, logger);
     return {
       requested: candidates.length,
       purged: 0,
@@ -219,8 +281,15 @@ export async function purgeLegacyOrphans(
         namespace: c.namespace,
         reason: 'claimed_by_so',
       });
+      recordAudit({
+        namespace: c.namespace,
+        groupName: c.groupName,
+        outcome: 'skipped_validation',
+        reason: 'claimed_by_so',
+      });
     }
     metrics?.incLegacyPurgeSkippedValidation(skipped.length);
+    await flushAudit(auditStore, auditRecords, logger);
     return {
       requested: candidates.length,
       purged: 0,
@@ -258,6 +327,13 @@ export async function purgeLegacyOrphans(
         reason: 'claimed_by_so',
         claimantSloId: claimant,
       });
+      recordAudit({
+        namespace: c.namespace,
+        groupName: c.groupName,
+        outcome: 'skipped_validation',
+        reason: 'claimed_by_so',
+        claimantSloId: claimant,
+      });
       continue;
     }
     unclaimed.push(c);
@@ -284,9 +360,18 @@ export async function purgeLegacyOrphans(
         namespace: c.namespace,
         error: failure,
       });
+      recordAudit({
+        namespace: c.namespace,
+        groupName: c.groupName,
+        outcome: 'failed',
+        errorCode: failure.code,
+        errorHttpStatus: failure.httpStatus,
+        reason: failure.message,
+      });
     }
     metrics?.incLegacyPurgeSkippedValidation(skipped.length);
     metrics?.incLegacyPurgeFailed(failed.length);
+    await flushAudit(auditStore, auditRecords, logger);
     return {
       requested: candidates.length,
       purged: 0,
@@ -303,6 +388,12 @@ export async function purgeLegacyOrphans(
         namespace: c.namespace,
         reason: 'not_present_on_ruler',
       });
+      recordAudit({
+        namespace: c.namespace,
+        groupName: c.groupName,
+        outcome: 'skipped_validation',
+        reason: 'not_present_on_ruler',
+      });
       continue;
     }
     deletable.push(c);
@@ -313,6 +404,11 @@ export async function purgeLegacyOrphans(
     try {
       await ruler.deleteRuleGroup(client, datasource, c.namespace, c.groupName);
       purged += 1;
+      recordAudit({
+        namespace: c.namespace,
+        groupName: c.groupName,
+        outcome: 'purged',
+      });
       logger.info(
         `SloLegacyPurger: purged legacy group ds=${datasourceId} ns=${c.namespace} group=${c.groupName} outcome=purged`
       );
@@ -322,6 +418,14 @@ export async function purgeLegacyOrphans(
         groupName: c.groupName,
         namespace: c.namespace,
         error: failure,
+      });
+      recordAudit({
+        namespace: c.namespace,
+        groupName: c.groupName,
+        outcome: 'failed',
+        errorCode: failure.code,
+        errorHttpStatus: failure.httpStatus,
+        reason: failure.message,
       });
       logger.warn(
         `SloLegacyPurger: delete failed ds=${datasourceId} ns=${c.namespace} group=${c.groupName} ` +
@@ -334,12 +438,36 @@ export async function purgeLegacyOrphans(
   metrics?.incLegacyPurgeSkippedValidation(skipped.length);
   metrics?.incLegacyPurgeFailed(failed.length);
 
+  await flushAudit(auditStore, auditRecords, logger);
+
   return {
     requested: candidates.length,
     purged,
     skipped_validation: skipped,
     failed,
   };
+}
+
+/**
+ * Session E (F4) — best-effort audit write. A failure here (SO store down,
+ * unexpected 5xx) must not block the purge response — the client already
+ * received its authoritative outcome via the return value. We log at warn
+ * so the operator still sees the drift.
+ */
+async function flushAudit(
+  auditStore: SloLegacyPurgeAuditWriterLite | undefined,
+  records: SloLegacyPurgeAuditAttributes[],
+  logger: Logger
+): Promise<void> {
+  if (!auditStore || records.length === 0) return;
+  try {
+    await auditStore.writeMany(records);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    logger.warn(
+      `SloLegacyPurger: audit write failed (${records.length} records dropped) — ${message}`
+    );
+  }
 }
 
 function toFailureError(err: unknown): LegacyPurgeFailureEntry['error'] {

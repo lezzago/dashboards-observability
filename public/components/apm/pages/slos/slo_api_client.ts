@@ -160,6 +160,16 @@ export interface OrphanUnknown {
   sourceWorkspaceId?: string;
   schemaVersion?: number;
   specIntegrity?: OrphanSpecIntegrity;
+  /**
+   * Session E (F3) — ISO time the reconciler first observed this group as a
+   * legacy orphan. Populated only for entries carrying the pre-Phase-3
+   * legacy diagnostic, and only when the server-side observation registry is
+   * wired. Undefined on pre-F3 deployments or when the first sweep hasn't
+   * run yet; the Legacy-orphans tab renders "Unknown" in the Age column.
+   */
+  firstSeenAt?: string;
+  /** Session E (F3) — ISO time of the most recent reconciler observation. */
+  lastSeenAt?: string;
 }
 
 export interface OrphanListResponse {
@@ -229,6 +239,39 @@ export interface LegacyPurgeResponse {
 export interface PurgeLegacyRequestBody {
   datasourceId: string;
   groups: LegacyPurgeCandidateRequest[];
+}
+
+// ============================================================================
+// Session E (F4) — legacy-purge audit types.
+// ============================================================================
+
+export type LegacyPurgeAuditOutcome = 'purged' | 'skipped_validation' | 'failed';
+
+export interface LegacyPurgeAuditRecord {
+  workspaceId: string;
+  datasourceId: string;
+  namespace: string;
+  groupName: string;
+  outcome: LegacyPurgeAuditOutcome;
+  reason?: string;
+  errorCode?: string;
+  errorHttpStatus?: number;
+  claimantSloId?: string;
+  requestedBy?: string;
+  requestedAt: string;
+  schemaVersion: 1;
+}
+
+export interface LegacyPurgeAuditListResponse {
+  records: LegacyPurgeAuditRecord[];
+  truncated: boolean;
+}
+
+export interface LegacyPurgeAuditQuery {
+  datasourceId?: string;
+  groupName?: string;
+  since?: string;
+  limit?: number;
 }
 
 /**
@@ -378,5 +421,23 @@ export class SloApiClient {
    */
   async purgeLegacyOrphans(input: PurgeLegacyRequestBody): Promise<LegacyPurgeResponse> {
     return this.http.post(`${SLO_BASE}/_purge_legacy`, { body: JSON.stringify(input) });
+  }
+
+  /**
+   * Session E (F4) — read the legacy-orphan purge audit trail. Gated on
+   * the same `legacyOrphanPurge.enabled` flag as the purge endpoint — a
+   * 404 from the server means the feature is off. Returns `{records,
+   * truncated}`; truncated=true signals the result set hit the server's
+   * hard cap (500) and the caller should narrow filters.
+   */
+  async listLegacyPurgeAudit(
+    query: LegacyPurgeAuditQuery = {}
+  ): Promise<LegacyPurgeAuditListResponse> {
+    const q: Record<string, string | number> = {};
+    if (query.datasourceId) q.datasourceId = query.datasourceId;
+    if (query.groupName) q.groupName = query.groupName;
+    if (query.since) q.since = query.since;
+    if (query.limit !== undefined) q.limit = query.limit;
+    return this.http.get(`${SLO_BASE}/_purge_legacy/audit`, { query: q });
   }
 }

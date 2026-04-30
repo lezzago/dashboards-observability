@@ -44,6 +44,16 @@ import { SloTombstoneStore } from './services/slo/slo_tombstone_store';
 import { createSloRedeployTask } from './services/slo/slo_redeploy_task';
 import { SLO_RULE_REF_SO_TYPE, sloRuleRefType } from './saved_objects/slo_rule_ref';
 import { SLO_TOMBSTONE_SO_TYPE, sloTombstoneType } from './saved_objects/slo_tombstone';
+import {
+  SLO_LEGACY_ORPHAN_OBSERVATION_SO_TYPE,
+  sloLegacyOrphanObservationType,
+} from './saved_objects/slo_legacy_orphan_observation';
+import { SloLegacyOrphanObservationStore } from './services/slo/slo_legacy_orphan_observation_store';
+import {
+  SLO_LEGACY_PURGE_AUDIT_SO_TYPE,
+  sloLegacyPurgeAuditType,
+} from './saved_objects/slo_legacy_purge_audit';
+import { SloLegacyPurgeAuditStore } from './services/slo/slo_legacy_purge_audit_store';
 import { SLO_V2_MIGRATION_VERSION, sloV2Migration } from './saved_objects/migrations/slo_v2';
 import type { InMemoryDatasourceService } from './services/alerting/datasource_service';
 import { AssistantPluginSetup, ObservabilityPluginSetup, ObservabilityPluginStart } from './types';
@@ -89,6 +99,19 @@ interface ReconcilerWiring {
    */
   refStoreRef: { current: SloRuleRefStore | undefined };
   /**
+   * Session E (F3) — legacy-orphan observation store populated in `start()`
+   * once the internal repository is available. Like `refStoreRef`, the
+   * reconciler's observation hook short-circuits cleanly when `.current` is
+   * still undefined (orphans surface without firstSeenAt timestamps).
+   */
+  legacyOrphanObservationStoreRef: { current: SloLegacyOrphanObservationStore | undefined };
+  /**
+   * Session E (F4) — legacy-purge audit store. Wired in `start()`;
+   * consumed by the reconciler's retention sweep and by the audit-list
+   * endpoint.
+   */
+  legacyPurgeAuditStoreRef: { current: SloLegacyPurgeAuditStore | undefined };
+  /**
    * Alerting datasource service built inside `setupRoutes`. Phase 3 W3.10's
    * post-migration redeploy task reads it to resolve a per-SLO datasource
    * before upserting into the ruler.
@@ -133,6 +156,7 @@ export class ObservabilityPlugin
           ruleAdoption?: { enabled: boolean };
           legacyOrphanPurge?: { enabled: boolean };
           recordingGraceMs?: number;
+          legacyOrphanAuditRetentionMs?: number;
         };
       }>()
       .pipe(first())
@@ -169,6 +193,11 @@ export class ObservabilityPlugin
     // Phase 3 (W3.11): default 24h grace before a zero-ref recording group
     // gets deleted. Same default as the schema.
     const recordingGraceMs = observabilityConfig.slo?.recordingGraceMs ?? 24 * 60 * 60_000;
+    // Session E (F4): audit retention window. Default mirrors the schema
+    // default (30d); the reconciler's retention sweep deletes records older
+    // than `now - retentionMs`.
+    const legacyOrphanAuditRetentionMs =
+      observabilityConfig.slo?.legacyOrphanAuditRetentionMs ?? 30 * 24 * 60 * 60_000;
 
     const dataSourceEnabled = !!dataSource;
     const openSearchObservabilityClient: ILegacyClusterClient = core.opensearch.legacy.createClient(
@@ -419,6 +448,17 @@ export class ObservabilityPlugin
     // groups from a known delete don't get re-surfaced as "adopt?" candidates.
     core.savedObjects.registerType(sloTombstoneType);
 
+    // Session E (F3): legacy-orphan observation registry. One SO per distinct
+    // legacy rule group (shape `slo:<slug>_<8-hex>` under namespace
+    // `slo-generated-<ds>`). Populated by the reconciler's sweep; consumed
+    // by the Legacy-orphans tab to render real Age values instead of the
+    // parsed-slug placeholder.
+    core.savedObjects.registerType(sloLegacyOrphanObservationType);
+
+    // Session E (F4): legacy-purge audit trail. One SO per per-group outcome
+    // emitted by `purgeLegacyOrphans`. Retention-swept by the reconciler.
+    core.savedObjects.registerType(sloLegacyPurgeAuditType);
+
     // SLO service — starts with InMemorySloStore; upgraded to SavedObjectSloStore in start().
     const sloLogger = {
       info: (msg: string) => this.logger.info(msg),
@@ -467,6 +507,12 @@ export class ObservabilityPlugin
     const reconcilerRefStoreRef: { current: SloRuleRefStore | undefined } = {
       current: undefined,
     };
+    const reconcilerLegacyObservationStoreRef: {
+      current: SloLegacyOrphanObservationStore | undefined;
+    } = { current: undefined };
+    const reconcilerLegacyAuditStoreRef: {
+      current: SloLegacyPurgeAuditStore | undefined;
+    } = { current: undefined };
     // Ref-registry lookup proxy — the refcount/grace sweep paths hit this
     // only after `start()` has wired the real store. Before that, `.current`
     // is undefined and the reconciler's guarded sweep short-circuits via
@@ -507,6 +553,37 @@ export class ObservabilityPlugin
       get: (id: string) => reconcilerStoreRef.current.get(id),
       save: (doc: SloDocument) => reconcilerStoreRef.current.save(doc),
       delete: (id: string) => reconcilerStoreRef.current.delete(id),
+    };
+
+    // Session E (F4) — audit-store proxy. Same pattern: benign default
+    // until start() wires the real store, so the reconciler's retention
+    // sweep is a no-op before then.
+    const legacyPurgeAuditRetentionProxy: import('./services/slo/reconciler').SloLegacyPurgeAuditRetentionLite = {
+      deleteBefore: (cutoff) => {
+        if (!reconcilerLegacyAuditStoreRef.current) return Promise.resolve(0);
+        return reconcilerLegacyAuditStoreRef.current.deleteBefore(cutoff);
+      },
+    };
+
+    // Session E (F3) — observation-store proxy. Same pattern as `refStoreProxy`:
+    // returns benign defaults until `start()` swaps `.current` to the
+    // SO-backed store, so the reconciler's sweep can run against an empty
+    // registry without special-casing bootstrap ordering.
+    const legacyOrphanObservationStoreProxy: import('./services/slo/reconciler').SloLegacyOrphanObservationStoreLite = {
+      observe: (input) => {
+        if (!reconcilerLegacyObservationStoreRef.current) {
+          return Promise.reject(new Error('SLO legacy-orphan observation store not yet wired'));
+        }
+        return reconcilerLegacyObservationStoreRef.current.observe(input);
+      },
+      listForDatasource: (ws: string, ds: string) => {
+        if (!reconcilerLegacyObservationStoreRef.current) return Promise.resolve([]);
+        return reconcilerLegacyObservationStoreRef.current.listForDatasource(ws, ds);
+      },
+      remove: (ws: string, ds: string, gn: string) => {
+        if (!reconcilerLegacyObservationStoreRef.current) return Promise.resolve(false);
+        return reconcilerLegacyObservationStoreRef.current.remove(ws, ds, gn);
+      },
     };
 
     // Placeholder datasource service forwarded to the reconciler until
@@ -557,6 +634,15 @@ export class ObservabilityPlugin
       // loop simply doesn't run.
       refStore: refStoreProxy,
       recordingGraceMs,
+      // Session E (F3): observation-store proxy. The reconciler treats an
+      // undefined observation store as "no extensions"; we always pass the
+      // proxy because once `start()` swaps in the SO-backed store the hook
+      // activates without having to rebuild the reconciler.
+      legacyOrphanObservationStore: legacyOrphanObservationStoreProxy,
+      // Session E (F4): audit retention sweep — proxy on the audit store.
+      // Same pattern; no-op until start() wires the concrete store.
+      legacyPurgeAuditStore: legacyPurgeAuditRetentionProxy,
+      legacyOrphanAuditRetentionMs,
       intervalMs: reconcilerIntervalMs,
     });
     this.reconciler = reconciler;
@@ -576,6 +662,10 @@ export class ObservabilityPlugin
       ruleAdoptionEnabled,
       legacyOrphanPurgeEnabled,
       reconcilerMetrics,
+      // Session E (F4) — lazy getter resolved against the wiring ref.
+      // Returns `undefined` until `start()` populates the ref with the
+      // SO-backed store; the audit endpoint returns 503 in that window.
+      legacyPurgeAuditStoreGetter: () => reconcilerLegacyAuditStoreRef.current,
     });
     datasourceServiceRef.current = alertingDatasourceService;
 
@@ -585,6 +675,8 @@ export class ObservabilityPlugin
       storeRef: reconcilerStoreRef,
       clientRef: reconcilerClientRef,
       refStoreRef: reconcilerRefStoreRef,
+      legacyOrphanObservationStoreRef: reconcilerLegacyObservationStoreRef,
+      legacyPurgeAuditStoreRef: reconcilerLegacyAuditStoreRef,
       datasourceService: alertingDatasourceService,
       ruleDedupEnabled,
     };
@@ -645,6 +737,8 @@ export class ObservabilityPlugin
           'slo-definition',
           SLO_RULE_REF_SO_TYPE,
           SLO_TOMBSTONE_SO_TYPE,
+          SLO_LEGACY_ORPHAN_OBSERVATION_SO_TYPE,
+          SLO_LEGACY_PURGE_AUDIT_SO_TYPE,
         ]);
         const soStore = new SavedObjectSloStore(repository);
         this.sloService.setStore(soStore);
@@ -669,6 +763,23 @@ export class ObservabilityPlugin
             (repository as unknown) as import('../../../src/core/server').SavedObjectsClientContract
           );
           this.sloService.setTombstoneStore(tombstoneStore);
+
+          // Session E (F3) — legacy-orphan observation store. Wired here so
+          // the reconciler's observation hook activates on the next sweep.
+          // Writes are best-effort; a failure here doesn't block the sweep
+          // (the reconciler logs at warn and continues).
+          const legacyOrphanObservationStore = new SloLegacyOrphanObservationStore(
+            (repository as unknown) as import('../../../src/core/server').SavedObjectsClientContract
+          );
+          this.reconcilerWiring.legacyOrphanObservationStoreRef.current = legacyOrphanObservationStore;
+
+          // Session E (F4) — audit store. The purger writes to this; the
+          // reconciler's retention sweep (above) deletes expired records.
+          // Same best-effort semantics.
+          const legacyPurgeAuditStore = new SloLegacyPurgeAuditStore(
+            (repository as unknown) as import('../../../src/core/server').SavedObjectsClientContract
+          );
+          this.reconcilerWiring.legacyPurgeAuditStoreRef.current = legacyPurgeAuditStore;
         }
         this.logger.info('Observability: SLO storage upgraded to SavedObjects');
       } catch (err: unknown) {

@@ -199,6 +199,85 @@ describe('SLO legacy-orphan purge — Session C', () => {
     seededA = null;
   });
 
+  it('Session E F4 — row expand shows audit timeline after a purge', () => {
+    // Stage 1: seed + confirm the row shows up.
+    seededA = seedLegacyGroup(datasourceId, 'cypress_audit_flow');
+
+    cy.visit(`/app/${APP_ID}#/slos/adoption`);
+    cy.get('[data-test-subj="sloAdoption-page-tab-legacy"]', { timeout: 30000 }).should(
+      'be.visible'
+    );
+    cy.get('[data-test-subj="sloAdoption-page-tab-legacy"]').click();
+
+    // Stage 2: before purging, the expanded row should show "No purge history".
+    cy.get(`[data-test-subj="sloAdoption-legacyTab-expand-${seededA.groupName}"]`, {
+      timeout: 15000,
+    }).click();
+    cy.get('[data-test-subj="sloAdoption-legacyTab-auditTimeline-empty"]').should('be.visible');
+
+    // Collapse it again so the purge selection interactions below aren't
+    // confused by the expanded row's DOM landing on the wrong <tr>.
+    cy.get(
+      `[data-test-subj="sloAdoption-legacyTab-expand-${seededA.groupName}"]`
+    ).click();
+
+    // Stage 3: purge the group.
+    cy.get(`[data-test-subj="sloAdoption-legacyTab-groupName-${seededA.groupName}"]`)
+      .closest('tr')
+      .find('input[type="checkbox"][aria-label="Select this row"]')
+      .click();
+    cy.get('[data-test-subj="sloAdoption-legacyTab-purgeSelected"]').click();
+    cy.contains('button', 'Purge groups').click();
+    cy.get(`[data-test-subj="sloAdoption-legacyTab-groupName-${seededA.groupName}"]`, {
+      timeout: 15000,
+    }).should('not.exist');
+
+    // Stage 4: re-seed the same group name so there's something to expand
+    // whose audit trail includes the just-purged outcome. Cortex re-accepts
+    // a new group with the same name because the purger deleted the prior
+    // one (so name collision isn't an issue).
+    const reseededName = seededA.groupName;
+    const reseededNs = seededA.namespace;
+    const yaml = [
+      `name: ${reseededName}`,
+      `interval: 60s`,
+      `rules:`,
+      `  - alert: CypressAuditReseed`,
+      `    expr: vector(0) > 1`,
+      `    for: 5m`,
+      `    labels:`,
+      `      slo_legacy_cypress: "true"`,
+      `    annotations:`,
+      `      summary: "re-seeded for audit flow assertion"`,
+    ].join('\n');
+    cy.request({
+      method: 'POST',
+      url: `${RULER_ROOT}/api/v1/rules/${encodeURIComponent(reseededNs)}`,
+      headers: { 'Content-Type': 'application/yaml' },
+      body: yaml,
+      failOnStatusCode: false,
+    });
+    // Refresh the Recover tab trigger so the page re-fetches /_orphans; the
+    // easy path is a page reload.
+    cy.reload();
+    cy.get('[data-test-subj="sloAdoption-page-tab-legacy"]', { timeout: 30000 }).click();
+
+    // Stage 5: expand the row — timeline should now carry the previous
+    // purge's 'purged' audit record.
+    cy.get(`[data-test-subj="sloAdoption-legacyTab-expand-${reseededName}"]`, {
+      timeout: 15000,
+    }).click();
+    cy.get('[data-test-subj="sloAdoption-legacyTab-auditTimeline"]', {
+      timeout: 15000,
+    }).should('be.visible');
+    cy.get('[data-test-subj="sloAdoption-legacyTab-auditRecord-purged"]').should('be.visible');
+
+    // Stage 6: purge again so `after` cleanup is a no-op. Tracks the final
+    // group by updating `seededA`.
+    seededA.groupName = reseededName;
+    seededA.namespace = reseededNs;
+  });
+
   it('rejects a bogus-shape candidate with a skipped_validation entry', () => {
     seededA = seedLegacyGroup(datasourceId, 'cypress_seed_bogus_check');
 

@@ -51,6 +51,7 @@ import type {
   SloReconcilerLite,
 } from './handlers';
 import { purgeLegacyOrphans } from '../../services/slo/slo_legacy_purger';
+import type { SloLegacyPurgeAuditStore } from '../../services/slo/slo_legacy_purge_audit_store';
 
 const SLO_BASE = `${OBSERVABILITY_BASE}/v1/slos`;
 
@@ -115,6 +116,13 @@ export interface RegisterSloAdoptionRoutesOptions {
    * / test wiring can omit it.
    */
   reconcilerMetrics?: ReconcilerMetrics;
+  /**
+   * Session E (F4) — lazy getter for the legacy-purge audit store.
+   * `undefined` until `start()` wires the SO-backed store; the purge
+   * handler reads it per-request and passes it to the purger when
+   * available. The audit-list endpoint returns 503 when still unavailable.
+   */
+  legacyPurgeAuditStoreGetter?: () => SloLegacyPurgeAuditStore | undefined;
 }
 
 /**
@@ -189,6 +197,7 @@ export function registerSloAdoptionRoutes(options: RegisterSloAdoptionRoutesOpti
     ruleAdoptionEnabled,
     legacyOrphanPurgeEnabled = false,
     reconcilerMetrics,
+    legacyPurgeAuditStoreGetter,
   } = options;
 
   // The structural service interface that the handlers consume. SloService
@@ -389,6 +398,15 @@ export function registerSloAdoptionRoutes(options: RegisterSloAdoptionRoutesOpti
         workspaceId: deploy.workspaceId,
         candidates: req.body.groups,
       };
+      // Session E (F4) — best-effort username extraction for audit
+      // records. OSD's request headers carry the admin's user id via
+      // x-proxy-user on direct-proxy setups; when absent, leave the
+      // field undefined on the audit record.
+      const requestedBy =
+        (typeof req.headers?.['x-proxy-user'] === 'string'
+          ? (req.headers['x-proxy-user'] as string)
+          : undefined) ?? undefined;
+      const auditStore = legacyPurgeAuditStoreGetter?.();
       const result = await handlePurgeLegacy(
         async (i) => {
           const purged = await purgeLegacyOrphans(
@@ -404,6 +422,8 @@ export function registerSloAdoptionRoutes(options: RegisterSloAdoptionRoutesOpti
               datasource: deploy.datasource,
               logger,
               metrics: reconcilerMetrics,
+              auditStore,
+              requestedBy,
             }
           );
           // Widen the typed arrays to Record<string, unknown>[] so the
@@ -422,6 +442,81 @@ export function registerSloAdoptionRoutes(options: RegisterSloAdoptionRoutesOpti
           attributes: result.body as Record<string, unknown>,
         },
       });
+    }
+  );
+
+  // --------------------------------------------------------------------------
+  // GET /api/observability/v1/slos/_purge_legacy/audit  (Session E F4)
+  //
+  // Read-only. Gated on the same `legacyOrphanPurge.enabled` flag as the
+  // purge endpoint itself — if purge is off, audit is unreachable. No
+  // separate flag; audit is part of the purge feature.
+  //
+  // Returns `{ records, truncated }`. Default `since` is 7 days ago; all
+  // query params are optional. `truncated: true` signals the result
+  // exceeded the configured limit (capped at MAX_LIMIT=500 server-side).
+  // --------------------------------------------------------------------------
+  router.get(
+    {
+      path: `${SLO_BASE}/_purge_legacy/audit`,
+      validate: {
+        query: schema.object({
+          datasourceId: schema.maybe(schema.string()),
+          groupName: schema.maybe(schema.string()),
+          since: schema.maybe(schema.string()),
+          limit: schema.maybe(schema.number({ min: 1 })),
+        }),
+      },
+    },
+    async (_ctx, req, res) => {
+      if (!legacyOrphanPurgeEnabled) {
+        return res.customError({
+          statusCode: 404,
+          body: {
+            message: 'Not Found',
+            attributes: { error: 'NOT_FOUND' },
+          },
+        });
+      }
+      const auditStore = legacyPurgeAuditStoreGetter?.();
+      if (!auditStore) {
+        return res.customError({
+          statusCode: 503,
+          body: {
+            message: 'Legacy-orphan audit store not yet wired',
+            attributes: { error: 'AUDIT_STORE_UNAVAILABLE' },
+          },
+        });
+      }
+      const defaultSinceMs = Date.now() - 7 * 24 * 60 * 60_000;
+      const since = req.query.since ?? new Date(defaultSinceMs).toISOString();
+      try {
+        const result = await auditStore.list({
+          datasourceId: req.query.datasourceId,
+          groupName: req.query.groupName,
+          since,
+          limit: req.query.limit,
+        });
+        // Flatten SO docs to a public-friendly shape. `attributes` carry
+        // the audit fields; the id is omitted from the public envelope
+        // because it's fully derivable from (requestedAt, ds, groupName).
+        return res.ok({
+          body: {
+            records: result.records.map((d) => d.attributes),
+            truncated: result.truncated,
+          },
+        });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        logger.warn(`Legacy-audit list failed: ${message}`);
+        return res.customError({
+          statusCode: 500,
+          body: {
+            message,
+            attributes: { error: 'AUDIT_LIST_FAILED' },
+          },
+        });
+      }
     }
   );
 }

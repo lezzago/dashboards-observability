@@ -43,6 +43,9 @@ describe('ReconcilerMetrics — zero state', () => {
       legacyPurgeSucceeded: 0,
       legacyPurgeSkippedValidation: 0,
       legacyPurgeFailed: 0,
+      legacyObservationsWritten: 0,
+      legacyObservationsDeleted: 0,
+      legacyAuditRecordsExpired: 0,
     });
   });
 });
@@ -101,6 +104,9 @@ describe('ReconcilerMetrics — increments', () => {
       legacyPurgeSucceeded: 0,
       legacyPurgeSkippedValidation: 0,
       legacyPurgeFailed: 0,
+      legacyObservationsWritten: 0,
+      legacyObservationsDeleted: 0,
+      legacyAuditRecordsExpired: 0,
     });
   });
 
@@ -198,6 +204,9 @@ describe('ReconcilerMetrics — reset', () => {
       legacyPurgeSucceeded: 0,
       legacyPurgeSkippedValidation: 0,
       legacyPurgeFailed: 0,
+      legacyObservationsWritten: 0,
+      legacyObservationsDeleted: 0,
+      legacyAuditRecordsExpired: 0,
     });
   });
 
@@ -225,6 +234,9 @@ describe('ReconcilerMetrics — reset', () => {
       legacyPurgeSucceeded: 0,
       legacyPurgeSkippedValidation: 0,
       legacyPurgeFailed: 0,
+      legacyObservationsWritten: 0,
+      legacyObservationsDeleted: 0,
+      legacyAuditRecordsExpired: 0,
     });
   });
 });
@@ -270,6 +282,9 @@ describe('ReconcilerMetrics — negative-n clamping', () => {
       legacyPurgeSucceeded: 0,
       legacyPurgeSkippedValidation: 0,
       legacyPurgeFailed: 0,
+      legacyObservationsWritten: 0,
+      legacyObservationsDeleted: 0,
+      legacyAuditRecordsExpired: 0,
     });
   });
 

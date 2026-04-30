@@ -61,6 +61,14 @@ const observabilityConfig = {
       // zero-ref recording group. Default 24h; floor at 60s so tests can
       // pick a tight window without risking accidental prod misconfig.
       recordingGraceMs: schema.number({ defaultValue: 24 * 60 * 60_000, min: 60_000 }),
+      // Session E (F4): retention window for legacy-orphan purge audit
+      // records. Sweep-deleted by the reconciler once `requestedAt +
+      // retentionMs <= now`. Default 30d. Floor at 60s so tests can pick a
+      // tight window without risking accidental prod misconfig.
+      legacyOrphanAuditRetentionMs: schema.number({
+        defaultValue: 30 * 24 * 60 * 60_000,
+        min: 60_000,
+      }),
     }),
   }),
 };

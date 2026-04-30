@@ -28,20 +28,29 @@
 
 import React, { useCallback, useMemo, useState } from 'react';
 import {
+  EuiBadge,
   EuiBasicTableColumn,
   EuiButton,
+  EuiButtonIcon,
   EuiCallOut,
   EuiConfirmModal,
   EuiEmptyPrompt,
   EuiFlexGroup,
   EuiFlexItem,
   EuiInMemoryTable,
+  EuiLoadingSpinner,
   EuiPanel,
   EuiSpacer,
   EuiText,
+  EuiToolTip,
 } from '@elastic/eui';
 import type { NotificationsStart } from '../../../../../../../../src/core/public';
-import type { LegacyPurgeResponse, OrphanUnknown, SloApiClient } from '../slo_api_client';
+import type {
+  LegacyPurgeAuditRecord,
+  LegacyPurgeResponse,
+  OrphanUnknown,
+  SloApiClient,
+} from '../slo_api_client';
 
 export interface LegacyTabProps {
   apiClient: SloApiClient;
@@ -69,6 +78,37 @@ function parseOriginatingSloSlug(groupName: string): string {
   return stripped.slice(0, underscoreIdx);
 }
 
+/**
+ * Session E (F3) — format `firstSeenAt` as a relative-time string. Matches
+ * the thresholds called out in the plan: "Just now" under a minute,
+ * "N minutes ago" under an hour, "N hours ago" under a day, "N days ago"
+ * from there. Fallback "Unknown" when the observation hook hasn't run yet
+ * (e.g. pre-F3 deployment or first sweep still pending).
+ *
+ * Not using `EuiRelativeTime` / `moment.fromNow` here — both pull in i18n
+ * context we don't wire in this tab, and the granularity we need is
+ * coarser than their defaults. A small pure function keeps the column
+ * cheap to render while a table is being mousemove-re-rendered inside an
+ * EuiResizableContainer (see CLAUDE.md).
+ */
+export function formatRelativeAge(firstSeenAt: string | undefined, now: Date = new Date()): string {
+  if (!firstSeenAt) return 'Unknown';
+  const firstMs = Date.parse(firstSeenAt);
+  if (!Number.isFinite(firstMs)) return 'Unknown';
+  const deltaMs = now.getTime() - firstMs;
+  if (deltaMs < 60_000) return 'Just now';
+  if (deltaMs < 60 * 60_000) {
+    const n = Math.floor(deltaMs / 60_000);
+    return `${n} minute${n === 1 ? '' : 's'} ago`;
+  }
+  if (deltaMs < 24 * 60 * 60_000) {
+    const n = Math.floor(deltaMs / (60 * 60_000));
+    return `${n} hour${n === 1 ? '' : 's'} ago`;
+  }
+  const n = Math.floor(deltaMs / (24 * 60 * 60_000));
+  return `${n} day${n === 1 ? '' : 's'} ago`;
+}
+
 function errorMessage(err: unknown): string {
   if (!err || typeof err !== 'object') return String(err);
   const body = (err as { body?: { message?: unknown; attributes?: { message?: unknown } } }).body;
@@ -91,6 +131,14 @@ interface LegacyTableProps {
   };
   itemId: (o: OrphanUnknown) => string;
   loading: boolean;
+  /**
+   * Session E (F4) — per-row audit history accordion. Passed from the
+   * parent so the expansion state lives in one place; the parent owns
+   * the audit fetch because the map is keyed on row identity and the
+   * table re-renders on every mousemove inside an EuiResizableContainer
+   * (see CLAUDE.md). Keys are `rowKey(orphan)`.
+   */
+  itemIdToExpandedRowMap: Record<string, React.ReactNode>;
 }
 
 const LegacyTableUI: React.FC<LegacyTableProps> = ({
@@ -99,6 +147,7 @@ const LegacyTableUI: React.FC<LegacyTableProps> = ({
   selection,
   itemId,
   loading,
+  itemIdToExpandedRowMap,
 }) => (
   <EuiInMemoryTable<OrphanUnknown>
     items={items}
@@ -106,6 +155,8 @@ const LegacyTableUI: React.FC<LegacyTableProps> = ({
     itemId={itemId}
     isSelectable
     selection={selection}
+    isExpandable
+    itemIdToExpandedRowMap={itemIdToExpandedRowMap}
     pagination={{ initialPageSize: 20, pageSizeOptions: [10, 20, 50, 100] }}
     loading={loading}
     data-test-subj="sloAdoption-legacyTab-table"
@@ -113,6 +164,133 @@ const LegacyTableUI: React.FC<LegacyTableProps> = ({
 );
 
 const LegacyTable = React.memo(LegacyTableUI);
+
+/**
+ * Session E (F4) — renders the audit timeline for a single legacy orphan
+ * group. Called only when the row is expanded.
+ *
+ * Three states:
+ *   - `loading` — fetch in flight, render a spinner.
+ *   - `error`   — fetch failed, render the message.
+ *   - otherwise — render the audit records in descending `requestedAt`
+ *     order, or the empty-state "No purge history for this group."
+ */
+interface AuditTimelineProps {
+  state: AuditFetchState;
+}
+
+function outcomeBadgeColor(o: LegacyPurgeAuditRecord['outcome']): string {
+  switch (o) {
+    case 'purged':
+      return 'success';
+    case 'skipped_validation':
+      return 'warning';
+    case 'failed':
+      return 'danger';
+    default:
+      return 'default';
+  }
+}
+
+const AuditTimeline: React.FC<AuditTimelineProps> = ({ state }) => {
+  if (state.status === 'loading') {
+    return (
+      <EuiPanel
+        paddingSize="s"
+        color="subdued"
+        data-test-subj="sloAdoption-legacyTab-auditTimeline-loading"
+      >
+        <EuiFlexGroup alignItems="center" gutterSize="s">
+          <EuiFlexItem grow={false}>
+            <EuiLoadingSpinner size="s" />
+          </EuiFlexItem>
+          <EuiFlexItem>
+            <EuiText size="s">Loading purge history…</EuiText>
+          </EuiFlexItem>
+        </EuiFlexGroup>
+      </EuiPanel>
+    );
+  }
+  if (state.status === 'error') {
+    return (
+      <EuiCallOut
+        color="warning"
+        size="s"
+        iconType="alert"
+        title="Could not load purge history"
+        data-test-subj="sloAdoption-legacyTab-auditTimeline-error"
+      >
+        <EuiText size="s">{state.message}</EuiText>
+      </EuiCallOut>
+    );
+  }
+  if (state.records.length === 0) {
+    return (
+      <EuiText size="s" color="subdued" data-test-subj="sloAdoption-legacyTab-auditTimeline-empty">
+        No purge history for this group.
+      </EuiText>
+    );
+  }
+  return (
+    <EuiPanel paddingSize="s" color="subdued" data-test-subj="sloAdoption-legacyTab-auditTimeline">
+      <EuiText size="xs" color="subdued">
+        <strong>Purge history</strong>
+      </EuiText>
+      <EuiSpacer size="xs" />
+      <ul style={{ listStyle: 'none', paddingLeft: 0, margin: 0 }}>
+        {state.records.map((r) => (
+          <li
+            key={`${r.requestedAt}::${r.outcome}`}
+            data-test-subj={`sloAdoption-legacyTab-auditRecord-${r.outcome}`}
+            style={{ marginBottom: 4 }}
+          >
+            <EuiFlexGroup alignItems="center" gutterSize="s" responsive={false}>
+              <EuiFlexItem grow={false}>
+                <EuiBadge color={outcomeBadgeColor(r.outcome)}>{r.outcome}</EuiBadge>
+              </EuiFlexItem>
+              <EuiFlexItem grow={false}>
+                <EuiText size="xs">{r.requestedAt}</EuiText>
+              </EuiFlexItem>
+              {r.requestedBy ? (
+                <EuiFlexItem grow={false}>
+                  <EuiText size="xs" color="subdued">
+                    by {r.requestedBy}
+                  </EuiText>
+                </EuiFlexItem>
+              ) : null}
+              {r.reason ? (
+                <EuiFlexItem>
+                  <EuiText size="xs" color="subdued">
+                    {r.reason}
+                    {r.claimantSloId ? ` (claimed by ${r.claimantSloId})` : ''}
+                  </EuiText>
+                </EuiFlexItem>
+              ) : null}
+              {r.errorCode ? (
+                <EuiFlexItem>
+                  <EuiText size="xs" color="subdued">
+                    {r.errorCode}
+                    {r.errorHttpStatus ? ` (HTTP ${r.errorHttpStatus})` : ''}
+                  </EuiText>
+                </EuiFlexItem>
+              ) : null}
+            </EuiFlexGroup>
+          </li>
+        ))}
+      </ul>
+    </EuiPanel>
+  );
+};
+
+/**
+ * Session E (F4) — parent-managed per-row audit fetch state. Keyed on
+ * rowKey so the parent can keep the state out of the memoized table's
+ * render path.
+ */
+type AuditFetchState =
+  | { status: 'loading' }
+  | { status: 'error'; message: string }
+  | { status: 'ready'; records: LegacyPurgeAuditRecord[] };
 
 export const LegacyTab: React.FC<LegacyTabProps> = ({
   apiClient,
@@ -125,6 +303,10 @@ export const LegacyTab: React.FC<LegacyTabProps> = ({
   const [inFlight, setInFlight] = useState(false);
   const [purgeError, setPurgeError] = useState<string | null>(null);
   const [lastResult, setLastResult] = useState<LegacyPurgeResponse | null>(null);
+  // Session E (F4) — per-row audit fetch state keyed by rowKey. When a row
+  // collapses, we drop its entry so the next expand triggers a fresh fetch
+  // (audit records may have accrued since).
+  const [auditByKey, setAuditByKey] = useState<Record<string, AuditFetchState>>({});
 
   const datasourceIdsInSelection = useMemo(
     () => Array.from(new Set(selected.map((o) => o.datasourceId))),
@@ -146,6 +328,54 @@ export const LegacyTab: React.FC<LegacyTabProps> = ({
   );
 
   const itemId = useCallback((o: OrphanUnknown) => rowKey(o), []);
+
+  // Session E (F4) — row-expand handler. Toggles the audit timeline for a
+  // given orphan. First expansion fires off an audit-list fetch scoped to
+  // (datasourceId, groupName); failures render inline, success replaces
+  // the loading state with the records. Collapses drop the entry so a
+  // re-expansion picks up any new audit records.
+  const toggleExpand = useCallback(
+    async (o: OrphanUnknown) => {
+      const key = rowKey(o);
+      setAuditByKey((prev) => {
+        if (prev[key]) {
+          const { [key]: _drop, ...rest } = prev;
+          return rest;
+        }
+        return { ...prev, [key]: { status: 'loading' } as AuditFetchState };
+      });
+      // Avoid a stale closure by checking the open-or-closed state we just
+      // scheduled: if we just collapsed, skip the fetch.
+      const willCollapse = auditByKey[key] !== undefined;
+      if (willCollapse) return;
+      try {
+        const result = await apiClient.listLegacyPurgeAudit({
+          datasourceId: o.datasourceId,
+          groupName: o.groupName,
+        });
+        setAuditByKey((prev) => ({
+          ...prev,
+          [key]: { status: 'ready', records: result.records },
+        }));
+      } catch (err) {
+        setAuditByKey((prev) => ({
+          ...prev,
+          [key]: { status: 'error', message: errorMessage(err) },
+        }));
+      }
+    },
+    [apiClient, auditByKey]
+  );
+
+  const itemIdToExpandedRowMap = useMemo(() => {
+    const map: Record<string, React.ReactNode> = {};
+    for (const o of legacyOrphans) {
+      const key = rowKey(o);
+      const state = auditByKey[key];
+      if (state) map[key] = <AuditTimeline state={state} />;
+    }
+    return map;
+  }, [legacyOrphans, auditByKey]);
 
   const columns = useMemo<Array<EuiBasicTableColumn<OrphanUnknown>>>(
     () => [
@@ -177,8 +407,56 @@ export const LegacyTab: React.FC<LegacyTabProps> = ({
         name: 'Datasource',
         render: (o: OrphanUnknown) => <EuiText size="s">{o.datasourceId}</EuiText>,
       },
+      {
+        // Session E (F4) — row-expand column. Toggles an inline audit
+        // history timeline. The arrow orientation reflects the expansion
+        // state so admins can see at a glance which rows they've opened.
+        align: 'right',
+        width: '40px',
+        name: '',
+        render: (o: OrphanUnknown) => {
+          const isOpen = Boolean(auditByKey[rowKey(o)]);
+          return (
+            <EuiButtonIcon
+              onClick={() => toggleExpand(o)}
+              aria-label={isOpen ? 'Collapse purge history' : 'Expand purge history'}
+              iconType={isOpen ? 'arrowDown' : 'arrowRight'}
+              data-test-subj={`sloAdoption-legacyTab-expand-${o.groupName}`}
+            />
+          );
+        },
+      },
+      {
+        // Session E (F3) — Age column reads the reconciler-persisted
+        // firstSeenAt. Fallback "Unknown" when the sweep hasn't written an
+        // observation yet (either pre-F3 deployment or fresh install
+        // before the first sweep interval). Hover tooltip surfaces the
+        // absolute ISO timestamp for operator diagnostics.
+        name: 'Age',
+        render: (o: OrphanUnknown) => {
+          const label = formatRelativeAge(o.firstSeenAt);
+          if (!o.firstSeenAt) {
+            return (
+              <EuiText
+                size="s"
+                color="subdued"
+                data-test-subj={`sloAdoption-legacyTab-age-${o.groupName}`}
+              >
+                {label}
+              </EuiText>
+            );
+          }
+          return (
+            <EuiToolTip position="top" content={o.firstSeenAt}>
+              <EuiText size="s" data-test-subj={`sloAdoption-legacyTab-age-${o.groupName}`}>
+                {label}
+              </EuiText>
+            </EuiToolTip>
+          );
+        },
+      },
     ],
-    []
+    [auditByKey, toggleExpand]
   );
 
   const performPurge = useCallback(async () => {
@@ -323,6 +601,7 @@ export const LegacyTab: React.FC<LegacyTabProps> = ({
             selection={selectionConfig}
             itemId={itemId}
             loading={inFlight}
+            itemIdToExpandedRowMap={itemIdToExpandedRowMap}
           />
         )}
       </EuiPanel>

@@ -62,6 +62,21 @@ export interface ReconcilerMetricsSnapshot {
   legacyPurgeSucceeded: number;
   legacyPurgeSkippedValidation: number;
   legacyPurgeFailed: number;
+  /**
+   * Session E (F3) — legacy-orphan observation SOs written this process
+   * lifetime (`observe` calls that succeeded, including updates).
+   */
+  legacyObservationsWritten: number;
+  /**
+   * Session E (F3) — legacy-orphan observation SOs deleted because the
+   * corresponding group disappeared from the ruler between sweeps.
+   */
+  legacyObservationsDeleted: number;
+  /**
+   * Session E (F4) — legacy-purge audit SOs expired by the reconciler's
+   * retention sweep (`requestedAt + retentionMs <= now`).
+   */
+  legacyAuditRecordsExpired: number;
 }
 
 /**
@@ -90,6 +105,12 @@ export interface ReconcilerMetrics {
   incLegacyPurgeSkippedValidation(n?: number): void;
   /** Session C — candidates whose ruler delete raised. */
   incLegacyPurgeFailed(n?: number): void;
+  /** Session E (F3) — observation SOs upserted this sweep. */
+  incLegacyObservationsWritten(n?: number): void;
+  /** Session E (F3) — observation SOs deleted because the group vanished. */
+  incLegacyObservationsDeleted(n?: number): void;
+  /** Session E (F4) — audit SOs expired by the retention sweep. */
+  incLegacyAuditRecordsExpired(n?: number): void;
   /**
    * Return a frozen copy of the current counters. Mutating the returned
    * object does not affect internal state; subsequent `snapshot()` calls
@@ -118,7 +139,10 @@ type CounterName =
   | 'legacyPurgeRequested'
   | 'legacyPurgeSucceeded'
   | 'legacyPurgeSkippedValidation'
-  | 'legacyPurgeFailed';
+  | 'legacyPurgeFailed'
+  | 'legacyObservationsWritten'
+  | 'legacyObservationsDeleted'
+  | 'legacyAuditRecordsExpired';
 
 /**
  * Factory. Keeps the counter state in a closure so callers can't reach past
@@ -138,6 +162,9 @@ export function createReconcilerMetrics(logger: Logger): ReconcilerMetrics {
     legacyPurgeSucceeded: 0,
     legacyPurgeSkippedValidation: 0,
     legacyPurgeFailed: 0,
+    legacyObservationsWritten: 0,
+    legacyObservationsDeleted: 0,
+    legacyAuditRecordsExpired: 0,
   };
 
   /**
@@ -196,6 +223,15 @@ export function createReconcilerMetrics(logger: Logger): ReconcilerMetrics {
     incLegacyPurgeFailed(n: number = 1): void {
       bump('legacyPurgeFailed', n);
     },
+    incLegacyObservationsWritten(n: number = 1): void {
+      bump('legacyObservationsWritten', n);
+    },
+    incLegacyObservationsDeleted(n: number = 1): void {
+      bump('legacyObservationsDeleted', n);
+    },
+    incLegacyAuditRecordsExpired(n: number = 1): void {
+      bump('legacyAuditRecordsExpired', n);
+    },
     snapshot(): ReconcilerMetricsSnapshot {
       // `Object.freeze` on a fresh object literal prevents the caller from
       // mutating the returned snapshot while leaving `counters` untouched.
@@ -212,6 +248,9 @@ export function createReconcilerMetrics(logger: Logger): ReconcilerMetrics {
         legacyPurgeSucceeded: counters.legacyPurgeSucceeded,
         legacyPurgeSkippedValidation: counters.legacyPurgeSkippedValidation,
         legacyPurgeFailed: counters.legacyPurgeFailed,
+        legacyObservationsWritten: counters.legacyObservationsWritten,
+        legacyObservationsDeleted: counters.legacyObservationsDeleted,
+        legacyAuditRecordsExpired: counters.legacyAuditRecordsExpired,
       });
     },
     reset(): void {
@@ -227,6 +266,9 @@ export function createReconcilerMetrics(logger: Logger): ReconcilerMetrics {
       counters.legacyPurgeSucceeded = 0;
       counters.legacyPurgeSkippedValidation = 0;
       counters.legacyPurgeFailed = 0;
+      counters.legacyObservationsWritten = 0;
+      counters.legacyObservationsDeleted = 0;
+      counters.legacyAuditRecordsExpired = 0;
     },
   };
 }
