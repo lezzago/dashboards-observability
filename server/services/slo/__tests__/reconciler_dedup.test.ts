@@ -3,6 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+/* eslint-disable max-classes-per-file */
+
 /**
  * Phase 3 W3.11 — reconciler dedup extensions.
  *
@@ -112,9 +114,9 @@ class FakeRefStore {
   }
   async listByDatasource(workspaceId: string, datasourceId: string) {
     const out: SloRuleRefDoc[] = [];
-    for (const doc of this.entries.values()) {
-      const a = doc.attributes;
-      if (a.workspaceId === workspaceId && a.datasourceId === datasourceId) out.push(doc);
+    for (const entry of this.entries.values()) {
+      const a = entry.attributes;
+      if (a.workspaceId === workspaceId && a.datasourceId === datasourceId) out.push(entry);
     }
     return out;
   }
