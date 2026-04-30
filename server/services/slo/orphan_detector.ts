@@ -109,16 +109,6 @@ export interface OrphanEntry {
   specIntegrity?: SpecIntegrity;
   /** Human-readable note for unknownOrphans that pass no provenance check. */
   diagnostic?: string;
-  /**
-   * Session E (F3) — ISO time the reconciler first observed this group as a
-   * legacy orphan. Populated post-detection by the reconciler when a
-   * `SloLegacyOrphanObservationStore` is wired; undefined otherwise (e.g.
-   * pre-F3 boot before the first sweep has hit this group). The UI renders
-   * this as an "Age" column on the Legacy-orphans tab.
-   */
-  firstSeenAt?: string;
-  /** Session E (F3) — ISO time the reconciler most recently observed this group. */
-  lastSeenAt?: string;
 }
 
 export interface OrphanDiffResult {

@@ -41,17 +41,8 @@ import type { InMemoryDatasourceService } from '../../services/alerting/datasour
 import type { DatasourceDiscoveryService } from '../../services/alerting/datasource_discovery';
 import type { RulerClient } from '../../services/slo/ruler_client';
 import type { SloReconciler } from '../../services/slo/reconciler';
-import type { ReconcilerMetrics } from '../../services/slo/reconciler_metrics';
-import { handleListOrphans, handlePurgeLegacy, handleRecoverSlo } from './handlers';
-import type {
-  PurgeLegacyInputLite,
-  PurgeLegacyResultLite,
-  RecoverSloInputLite,
-  SloAdoptionServiceLite,
-  SloReconcilerLite,
-} from './handlers';
-import { purgeLegacyOrphans } from '../../services/slo/slo_legacy_purger';
-import type { SloLegacyPurgeAuditStore } from '../../services/slo/slo_legacy_purge_audit_store';
+import { handleListOrphans, handleRecoverSlo } from './handlers';
+import type { RecoverSloInputLite, SloAdoptionServiceLite, SloReconcilerLite } from './handlers';
 
 const SLO_BASE = `${OBSERVABILITY_BASE}/v1/slos`;
 
@@ -104,25 +95,6 @@ export interface RegisterSloAdoptionRoutesOptions {
   reconciler?: SloReconciler;
   ruleDedupEnabled: boolean;
   ruleAdoptionEnabled: boolean;
-  /**
-   * Session C — `observability.slo.legacyOrphanPurge.enabled`. Default false.
-   * Gates the `_purge_legacy` admin endpoint: when off, the route handler
-   * returns 404 so the endpoint appears "not registered" to the client (per
-   * the feature-flag decision D1).
-   */
-  legacyOrphanPurgeEnabled?: boolean;
-  /**
-   * Session C — metrics bank the purger reports to. Optional so offline-dev
-   * / test wiring can omit it.
-   */
-  reconcilerMetrics?: ReconcilerMetrics;
-  /**
-   * Session E (F4) — lazy getter for the legacy-purge audit store.
-   * `undefined` until `start()` wires the SO-backed store; the purge
-   * handler reads it per-request and passes it to the purger when
-   * available. The audit-list endpoint returns 503 when still unavailable.
-   */
-  legacyPurgeAuditStoreGetter?: () => SloLegacyPurgeAuditStore | undefined;
 }
 
 /**
@@ -179,10 +151,10 @@ async function buildAdoptionDeployContext(
 }
 
 /**
- * Register the three W4.6 adoption endpoints. Each handler applies the
- * 412 gate up front; unflagged plugins still see the endpoints (so UI
- * error surfaces don't have to branch on 404-vs-412) but get a consistent
- * 412 envelope back.
+ * Register the W4.6 adoption endpoints. Each handler applies the 412 gate
+ * up front; unflagged plugins still see the endpoints (so UI error
+ * surfaces don't have to branch on 404-vs-412) but get a consistent 412
+ * envelope back.
  */
 export function registerSloAdoptionRoutes(options: RegisterSloAdoptionRoutesOptions): void {
   const {
@@ -195,9 +167,6 @@ export function registerSloAdoptionRoutes(options: RegisterSloAdoptionRoutesOpti
     reconciler,
     ruleDedupEnabled,
     ruleAdoptionEnabled,
-    legacyOrphanPurgeEnabled = false,
-    reconcilerMetrics,
-    legacyPurgeAuditStoreGetter,
   } = options;
 
   // The structural service interface that the handlers consume. SloService
@@ -307,216 +276,6 @@ export function registerSloAdoptionRoutes(options: RegisterSloAdoptionRoutesOpti
           attributes: result.body as Record<string, unknown>,
         },
       });
-    }
-  );
-
-  // --------------------------------------------------------------------------
-  // POST /api/observability/v1/slos/_purge_legacy  (Session C)
-  //
-  // Admin-only. Gated on `observability.slo.legacyOrphanPurge.enabled`; when
-  // off the handler returns 404 so the endpoint appears unregistered to
-  // clients (decision D1). Independent of the other two flags — legacy
-  // groups exist because dedup wasn't on at create time, so the purge has
-  // to work regardless of `ruleDedup` / `ruleAdoption`.
-  //
-  // The server-side purger enforces every safety invariant (name pattern,
-  // namespace shape, no-owning-SO, currently-on-ruler). The client is not
-  // trusted; a client request that would pass its own checks but fail
-  // server-side (e.g. an SO claiming a group the client didn't know about)
-  // must land in `skipped_validation`, not be deleted.
-  // --------------------------------------------------------------------------
-  const purgeLegacyBody = schema.object({
-    datasourceId: schema.string({ minLength: 1 }),
-    groups: schema.arrayOf(
-      schema.object({
-        groupName: schema.string({ minLength: 1 }),
-        namespace: schema.string({ minLength: 1 }),
-      }),
-      { minSize: 1 }
-    ),
-  });
-
-  router.post(
-    {
-      path: `${SLO_BASE}/_purge_legacy`,
-      validate: { body: purgeLegacyBody },
-    },
-    async (ctx, req, res) => {
-      // Access to this endpoint is intentionally open to any authenticated
-      // caller in the workspace. SLOs are pre-GA and the feature flag
-      // (observability.slo.legacyOrphanPurge.enabled /
-      // observability.slo.ruleDedup.enabled) is the only gate today. A
-      // runtime admin-role check may be added later once a real
-      // multi-user threat model exists; until then, don't introduce one.
-      if (!legacyOrphanPurgeEnabled) {
-        return res.customError({
-          statusCode: 404,
-          body: {
-            message: 'Not Found',
-            attributes: { error: 'NOT_FOUND' },
-          },
-        });
-      }
-      // Resolve deploy context just for the datasource + ruler + OS client;
-      // the purger doesn't need a workspaceId beyond the
-      // workspaceId-equals-datasourceId convention this plugin already
-      // uses. Reuse `buildAdoptionDeployContext` so the same 400 surface
-      // fires on unknown / non-Prometheus datasources.
-      let deploy: SloDeployContext;
-      try {
-        deploy = await buildAdoptionDeployContext(
-          ctx as SloHandlerContext,
-          req.body.datasourceId,
-          undefined,
-          rulerClient,
-          datasourceService,
-          discoveryService
-        );
-      } catch (e) {
-        if (e instanceof SloValidationError) {
-          return res.customError({
-            statusCode: 400,
-            body: {
-              message: 'Validation failed',
-              attributes: { error: 'Validation failed', errors: e.errors },
-            },
-          });
-        }
-        throw e;
-      }
-      if (!rulerClient) {
-        return res.customError({
-          statusCode: 501,
-          body: {
-            message: 'Ruler client not configured',
-            attributes: { error: 'RULER_NOT_CONFIGURED' },
-          },
-        });
-      }
-      const input: PurgeLegacyInputLite = {
-        datasourceId: req.body.datasourceId,
-        workspaceId: deploy.workspaceId,
-        candidates: req.body.groups,
-      };
-      // Session E (F4) — best-effort username extraction for audit
-      // records. OSD's request headers carry the admin's user id via
-      // x-proxy-user on direct-proxy setups; when absent, leave the
-      // field undefined on the audit record.
-      const requestedBy =
-        (typeof req.headers?.['x-proxy-user'] === 'string'
-          ? (req.headers['x-proxy-user'] as string)
-          : undefined) ?? undefined;
-      const auditStore = legacyPurgeAuditStoreGetter?.();
-      const result = await handlePurgeLegacy(
-        async (i) => {
-          const purged = await purgeLegacyOrphans(
-            {
-              datasourceId: i.datasourceId,
-              workspaceId: i.workspaceId,
-              candidates: i.candidates,
-            },
-            {
-              listSlos: (dsId) => sloService.listRawByDatasource(dsId),
-              ruler: rulerClient,
-              client: deploy.client,
-              datasource: deploy.datasource,
-              logger,
-              metrics: reconcilerMetrics,
-              auditStore,
-              requestedBy,
-            }
-          );
-          // Widen the typed arrays to Record<string, unknown>[] so the
-          // framework-agnostic handler surface stays decoupled from the
-          // concrete purger module's types. Shape is preserved verbatim.
-          return (purged as unknown) as PurgeLegacyResultLite;
-        },
-        input,
-        logger
-      );
-      if (result.status === 200) return res.ok({ body: result.body });
-      return res.customError({
-        statusCode: result.status,
-        body: {
-          message: String((result.body as { error?: string }).error ?? 'Purge failed'),
-          attributes: result.body as Record<string, unknown>,
-        },
-      });
-    }
-  );
-
-  // --------------------------------------------------------------------------
-  // GET /api/observability/v1/slos/_purge_legacy/audit  (Session E F4)
-  //
-  // Read-only. Gated on the same `legacyOrphanPurge.enabled` flag as the
-  // purge endpoint itself — if purge is off, audit is unreachable. No
-  // separate flag; audit is part of the purge feature.
-  //
-  // Returns `{ records, truncated }`. Default `since` is 7 days ago; all
-  // query params are optional. `truncated: true` signals the result
-  // exceeded the configured limit (capped at MAX_LIMIT=500 server-side).
-  // --------------------------------------------------------------------------
-  router.get(
-    {
-      path: `${SLO_BASE}/_purge_legacy/audit`,
-      validate: {
-        query: schema.object({
-          datasourceId: schema.maybe(schema.string()),
-          groupName: schema.maybe(schema.string()),
-          since: schema.maybe(schema.string()),
-          limit: schema.maybe(schema.number({ min: 1 })),
-        }),
-      },
-    },
-    async (_ctx, req, res) => {
-      if (!legacyOrphanPurgeEnabled) {
-        return res.customError({
-          statusCode: 404,
-          body: {
-            message: 'Not Found',
-            attributes: { error: 'NOT_FOUND' },
-          },
-        });
-      }
-      const auditStore = legacyPurgeAuditStoreGetter?.();
-      if (!auditStore) {
-        return res.customError({
-          statusCode: 503,
-          body: {
-            message: 'Legacy-orphan audit store not yet wired',
-            attributes: { error: 'AUDIT_STORE_UNAVAILABLE' },
-          },
-        });
-      }
-      const defaultSinceMs = Date.now() - 7 * 24 * 60 * 60_000;
-      const since = req.query.since ?? new Date(defaultSinceMs).toISOString();
-      try {
-        const result = await auditStore.list({
-          datasourceId: req.query.datasourceId,
-          groupName: req.query.groupName,
-          since,
-          limit: req.query.limit,
-        });
-        // Flatten SO docs to a public-friendly shape. `attributes` carry
-        // the audit fields; the id is omitted from the public envelope
-        // because it's fully derivable from (requestedAt, ds, groupName).
-        return res.ok({
-          body: {
-            records: result.records.map((d) => d.attributes),
-            truncated: result.truncated,
-          },
-        });
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        logger.warn(`Legacy-audit list failed: ${message}`);
-        return res.customError({
-          statusCode: 500,
-          body: {
-            message,
-            attributes: { error: 'AUDIT_LIST_FAILED' },
-          },
-        });
-      }
     }
   );
 }

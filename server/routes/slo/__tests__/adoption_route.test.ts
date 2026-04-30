@@ -26,7 +26,6 @@ import { SloAdoptionError } from '../../../../common/slo/slo_errors';
 import type { AdoptionErrorCode } from '../../../../common/slo/slo_errors';
 import type { SloService } from '../../../../common/slo/slo_service';
 import type { SloReconciler } from '../../../services/slo/reconciler';
-import { ruleSuffix, slugifySloObjective } from '../../../../common/slo/slo_promql_generator';
 
 // ============================================================================
 // Fixtures + helpers
@@ -139,10 +138,6 @@ function makeFakeReconciler() {
 function makeFakeService() {
   return {
     recover: jest.fn(),
-    // Session C — needed for `_purge_legacy`. Default to empty SO list so
-    // every legacy candidate passes the no-owning-SO invariant. Tests that
-    // care about claimed-by-SO override via `.mockResolvedValueOnce`.
-    listRawByDatasource: jest.fn(async () => [] as unknown[]),
   };
 }
 
@@ -160,10 +155,6 @@ async function seedDatasource(service: InMemoryDatasourceService): Promise<strin
 const fakeRulerClient = {
   upsertRuleGroup: jest.fn(async () => undefined),
   deleteRuleGroup: jest.fn(async () => undefined),
-  // Session C — `_purge_legacy` uses `listRuleGroups` to verify the groups
-  // it's about to delete actually exist on the ruler. Tests override the
-  // resolved value per-case via `fakeRulerClient.listRuleGroups.mockResolvedValueOnce(...)`.
-  listRuleGroups: jest.fn(async () => [] as unknown[]),
   getRuleGroup: jest.fn(async () => null),
 } as never;
 
@@ -178,21 +169,12 @@ interface Wiring {
 async function setupWiring(options: {
   ruleDedupEnabled: boolean;
   ruleAdoptionEnabled: boolean;
-  /** Session C — default off to preserve pre-existing test expectations. */
-  legacyOrphanPurgeEnabled?: boolean;
 }): Promise<Wiring> {
   const datasourceService = new InMemoryDatasourceService(mockLogger as never);
   const datasourceId = await seedDatasource(datasourceService);
   const router = makeRouter();
   const reconciler = makeFakeReconciler();
   const service = makeFakeService();
-  // Reset fakeRulerClient's shared list mock so tests don't bleed state.
-  (fakeRulerClient as {
-    listRuleGroups: jest.Mock;
-  }).listRuleGroups.mockReset();
-  (fakeRulerClient as {
-    listRuleGroups: jest.Mock;
-  }).listRuleGroups.mockResolvedValue([]);
   (fakeRulerClient as {
     deleteRuleGroup: jest.Mock;
   }).deleteRuleGroup.mockReset();
@@ -208,7 +190,6 @@ async function setupWiring(options: {
     reconciler: (reconciler as unknown) as SloReconciler,
     ruleDedupEnabled: options.ruleDedupEnabled,
     ruleAdoptionEnabled: options.ruleAdoptionEnabled,
-    legacyOrphanPurgeEnabled: options.legacyOrphanPurgeEnabled ?? false,
   });
   return { router, datasourceService, reconciler, service, datasourceId };
 }
@@ -613,308 +594,5 @@ describe('W4.6 POST /_recover', () => {
     };
     expect(bodyValidator).toBeDefined();
     expect(() => bodyValidator.validate({ datasourceId: 'ds-7' })).toThrow();
-  });
-});
-
-// ============================================================================
-// Session C — POST /_purge_legacy
-// ============================================================================
-
-/** Build a legacy-shape group name matching `/^slo:<slug>_<8-hex>$/`. */
-function legacyName(slug: string, hex: string = 'abcdef12'): string {
-  return `slo:${slug}_${hex}`;
-}
-
-describe('Session C POST /_purge_legacy — feature flag gate', () => {
-  it('returns 404 when legacyOrphanPurge.enabled is off (endpoint appears unregistered)', async () => {
-    const { router, datasourceId } = await setupWiring({
-      ruleDedupEnabled: true,
-      ruleAdoptionEnabled: true,
-      legacyOrphanPurgeEnabled: false,
-    });
-
-    const handler = getHandler(router, 'post', (p) => p.endsWith('/_purge_legacy'));
-    const res = makeRes();
-    await handler(
-      makeCtx(),
-      {
-        body: {
-          datasourceId,
-          groups: [{ groupName: legacyName('x'), namespace: `slo-generated-${datasourceId}` }],
-        },
-        query: {},
-      },
-      res
-    );
-    expect(res.customError).toHaveBeenCalledWith(
-      expect.objectContaining({ statusCode: 404 })
-    );
-  });
-
-  it('does not require ruleDedup/ruleAdoption — works with those flags off, purge flag on', async () => {
-    const { router, datasourceId } = await setupWiring({
-      ruleDedupEnabled: false,
-      ruleAdoptionEnabled: false,
-      legacyOrphanPurgeEnabled: true,
-    });
-    const groupName = legacyName('x');
-    const namespace = `slo-generated-${datasourceId}`;
-    (fakeRulerClient as { listRuleGroups: jest.Mock }).listRuleGroups.mockResolvedValueOnce([
-      { groupName, interval: 60, rules: [], yaml: '' },
-    ]);
-
-    const handler = getHandler(router, 'post', (p) => p.endsWith('/_purge_legacy'));
-    const res = makeRes();
-    await handler(
-      makeCtx(),
-      {
-        body: { datasourceId, groups: [{ groupName, namespace }] },
-        query: {},
-      },
-      res
-    );
-    expect(res.ok).toHaveBeenCalled();
-    const body = (res.ok.mock.calls[0][0] as { body: unknown }).body as {
-      purged: number;
-    };
-    expect(body.purged).toBe(1);
-  });
-});
-
-describe('Session C POST /_purge_legacy — validation + outcomes', () => {
-  it('deletes every unclaimed legacy group present on the ruler (happy path 3/3)', async () => {
-    const { router, datasourceId } = await setupWiring({
-      ruleDedupEnabled: true,
-      ruleAdoptionEnabled: true,
-      legacyOrphanPurgeEnabled: true,
-    });
-    const namespace = `slo-generated-${datasourceId}`;
-    const names = [legacyName('a'), legacyName('b', 'cafebabe'), legacyName('c', '0011aabb')];
-    (fakeRulerClient as { listRuleGroups: jest.Mock }).listRuleGroups.mockResolvedValueOnce(
-      names.map((groupName) => ({ groupName, interval: 60, rules: [], yaml: '' }))
-    );
-
-    const handler = getHandler(router, 'post', (p) => p.endsWith('/_purge_legacy'));
-    const res = makeRes();
-    await handler(
-      makeCtx(),
-      {
-        body: {
-          datasourceId,
-          groups: names.map((groupName) => ({ groupName, namespace })),
-        },
-        query: {},
-      },
-      res
-    );
-    expect(res.ok).toHaveBeenCalled();
-    const body = (res.ok.mock.calls[0][0] as { body: unknown }).body as {
-      requested: number;
-      purged: number;
-      skipped_validation: unknown[];
-      failed: unknown[];
-    };
-    expect(body).toMatchObject({
-      requested: 3,
-      purged: 3,
-      skipped_validation: [],
-      failed: [],
-    });
-    expect(
-      (fakeRulerClient as { deleteRuleGroup: jest.Mock }).deleteRuleGroup
-    ).toHaveBeenCalledTimes(3);
-  });
-
-  it('skips candidates whose name does not match the legacy regex', async () => {
-    const { router, datasourceId } = await setupWiring({
-      ruleDedupEnabled: true,
-      ruleAdoptionEnabled: true,
-      legacyOrphanPurgeEnabled: true,
-    });
-    const namespace = `slo-generated-${datasourceId}`;
-    const valid = legacyName('ok');
-    const bogus = 'not_legacy_shape';
-    (fakeRulerClient as { listRuleGroups: jest.Mock }).listRuleGroups.mockResolvedValueOnce([
-      { groupName: valid, interval: 60, rules: [], yaml: '' },
-    ]);
-
-    const handler = getHandler(router, 'post', (p) => p.endsWith('/_purge_legacy'));
-    const res = makeRes();
-    await handler(
-      makeCtx(),
-      {
-        body: {
-          datasourceId,
-          groups: [
-            { groupName: valid, namespace },
-            { groupName: bogus, namespace },
-          ],
-        },
-        query: {},
-      },
-      res
-    );
-    const body = (res.ok.mock.calls[0][0] as { body: unknown }).body as {
-      purged: number;
-      skipped_validation: Array<{ reason: string; groupName: string }>;
-    };
-    expect(body.purged).toBe(1);
-    expect(body.skipped_validation).toEqual([
-      expect.objectContaining({ groupName: bogus, reason: 'name_pattern_mismatch' }),
-    ]);
-  });
-
-  it('refuses to purge a group an SLO claims via recomputed legacy name (client is not trusted)', async () => {
-    const { router, service, datasourceId } = await setupWiring({
-      ruleDedupEnabled: true,
-      ruleAdoptionEnabled: true,
-      legacyOrphanPurgeEnabled: true,
-    });
-    const namespace = `slo-generated-${datasourceId}`;
-    // Build a claim via the purger's recompute path: the SO spec.name +
-    // sloId hash back to the same monolithic group name the client sent.
-    const specName = 'Claiming SLO';
-    const sloId = 'slo-claim';
-    const workspaceId = datasourceId;
-    const claimedName = `slo:${slugifySloObjective(specName, 'group')}_${ruleSuffix(
-      workspaceId,
-      sloId,
-      'group'
-    )}`;
-    (fakeRulerClient as { listRuleGroups: jest.Mock }).listRuleGroups.mockResolvedValueOnce([
-      { groupName: claimedName, interval: 60, rules: [], yaml: '' },
-    ]);
-    service.listRawByDatasource.mockResolvedValueOnce([
-      {
-        id: sloId,
-        spec: { name: specName, datasourceId },
-        status: {
-          provisioning: { backend: 'prometheus' },
-        },
-      },
-    ] as never[]);
-
-    const handler = getHandler(router, 'post', (p) => p.endsWith('/_purge_legacy'));
-    const res = makeRes();
-    await handler(
-      makeCtx(),
-      {
-        body: { datasourceId, groups: [{ groupName: claimedName, namespace }] },
-        query: {},
-      },
-      res
-    );
-    const body = (res.ok.mock.calls[0][0] as { body: unknown }).body as {
-      purged: number;
-      skipped_validation: Array<Record<string, unknown>>;
-    };
-    expect(body.purged).toBe(0);
-    expect(body.skipped_validation).toEqual([
-      {
-        groupName: claimedName,
-        namespace,
-        reason: 'claimed_by_so',
-        claimantSloId: 'slo-claim',
-      },
-    ]);
-    expect(
-      (fakeRulerClient as { deleteRuleGroup: jest.Mock }).deleteRuleGroup
-    ).not.toHaveBeenCalled();
-  });
-
-  it('flags Cortex 5xx as failed without blocking siblings', async () => {
-    const { router, datasourceId } = await setupWiring({
-      ruleDedupEnabled: true,
-      ruleAdoptionEnabled: true,
-      legacyOrphanPurgeEnabled: true,
-    });
-    const namespace = `slo-generated-${datasourceId}`;
-    const okName = legacyName('ok');
-    const failName = legacyName('fail', '00112233');
-    (fakeRulerClient as { listRuleGroups: jest.Mock }).listRuleGroups.mockResolvedValueOnce([
-      { groupName: okName, interval: 60, rules: [], yaml: '' },
-      { groupName: failName, interval: 60, rules: [], yaml: '' },
-    ]);
-    const {
-      SloRulerError,
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
-    } = require('../../../../common/slo/slo_errors');
-    (fakeRulerClient as {
-      deleteRuleGroup: jest.Mock;
-    }).deleteRuleGroup.mockImplementation(
-      async (_c: unknown, _d: unknown, _ns: string, gn: string) => {
-        if (gn === failName) {
-          throw new SloRulerError('RULER_UNREACHABLE', 502, 'upstream gateway timeout');
-        }
-        return undefined;
-      }
-    );
-
-    const handler = getHandler(router, 'post', (p) => p.endsWith('/_purge_legacy'));
-    const res = makeRes();
-    await handler(
-      makeCtx(),
-      {
-        body: {
-          datasourceId,
-          groups: [
-            { groupName: okName, namespace },
-            { groupName: failName, namespace },
-          ],
-        },
-        query: {},
-      },
-      res
-    );
-    const body = (res.ok.mock.calls[0][0] as { body: unknown }).body as {
-      purged: number;
-      failed: Array<{ groupName: string; error: { code: string; httpStatus: number } }>;
-    };
-    expect(body.purged).toBe(1);
-    expect(body.failed).toEqual([
-      expect.objectContaining({
-        groupName: failName,
-        error: expect.objectContaining({ code: 'RULER_UNREACHABLE', httpStatus: 502 }),
-      }),
-    ]);
-  });
-
-  it('returns 400 when the datasource is unknown', async () => {
-    const { router } = await setupWiring({
-      ruleDedupEnabled: true,
-      ruleAdoptionEnabled: true,
-      legacyOrphanPurgeEnabled: true,
-    });
-
-    const handler = getHandler(router, 'post', (p) => p.endsWith('/_purge_legacy'));
-    const res = makeRes();
-    await handler(
-      makeCtx(),
-      {
-        body: {
-          datasourceId: 'ds-unknown',
-          groups: [{ groupName: legacyName('x'), namespace: 'slo-generated-ds-unknown' }],
-        },
-        query: {},
-      },
-      res
-    );
-    expect(res.customError).toHaveBeenCalledWith(
-      expect.objectContaining({ statusCode: 400 })
-    );
-  });
-
-  it('rejects an empty groups array at the schema layer', async () => {
-    const { router } = await setupWiring({
-      ruleDedupEnabled: true,
-      ruleAdoptionEnabled: true,
-      legacyOrphanPurgeEnabled: true,
-    });
-
-    const cfg = getRouteConfig(router, 'post', (p) => p.endsWith('/_purge_legacy'));
-    const bodyValidator = (cfg.validate?.body as unknown) as {
-      validate: (value: unknown) => unknown;
-    };
-    expect(() => bodyValidator.validate({ datasourceId: 'ds-7', groups: [] })).toThrow();
   });
 });

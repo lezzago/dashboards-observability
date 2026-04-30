@@ -24,7 +24,6 @@ import type { DirectQueryPrometheusBackend } from '../../services/alerting/direc
 import type { RulerClient } from '../../services/slo/ruler_client';
 import type { RuleHealthChecker } from '../../services/slo/rule_health_checker';
 import type { SloReconciler } from '../../services/slo/reconciler';
-import type { ReconcilerMetrics } from '../../services/slo/reconciler_metrics';
 import {
   handleCreateSLO,
   handleDeleteSLO,
@@ -442,19 +441,6 @@ export interface RegisterSloRoutesOptions {
   ruleDedupEnabled?: boolean;
   /** Phase 4 (W4.6) — gates `_orphans`, `_recover`, `_clone` adoption endpoints. Default false. */
   ruleAdoptionEnabled?: boolean;
-  /** Session C — gates `_purge_legacy` endpoint. Default false. */
-  legacyOrphanPurgeEnabled?: boolean;
-  /** Session C — shared metrics bank for legacy-purge counters. */
-  reconcilerMetrics?: ReconcilerMetrics;
-  /**
-   * Session E (F4) — lazy getter for the legacy-purge audit store.
-   * Returns `undefined` before `start()` wires the SO-backed store. The
-   * purger gets `.writeMany(...)` on every request; the audit-list
-   * endpoint gets `.list(...)`.
-   */
-  legacyPurgeAuditStoreGetter?: () =>
-    | import('../../services/slo/slo_legacy_purge_audit_store').SloLegacyPurgeAuditStore
-    | undefined;
 }
 
 export function registerSloRoutes(options: RegisterSloRoutesOptions) {
@@ -470,9 +456,6 @@ export function registerSloRoutes(options: RegisterSloRoutesOptions) {
     reconciler,
     ruleDedupEnabled = false,
     ruleAdoptionEnabled = false,
-    legacyOrphanPurgeEnabled = false,
-    reconcilerMetrics,
-    legacyPurgeAuditStoreGetter,
   } = options;
   if (prometheusBackend) {
     registerProbeSliRoute(router, logger, prometheusBackend, datasourceService, discoveryService);
@@ -934,8 +917,5 @@ export function registerSloRoutes(options: RegisterSloRoutesOptions) {
     reconciler,
     ruleDedupEnabled,
     ruleAdoptionEnabled,
-    legacyOrphanPurgeEnabled,
-    reconcilerMetrics,
-    legacyPurgeAuditStoreGetter,
   });
 }

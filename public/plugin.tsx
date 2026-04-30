@@ -150,11 +150,6 @@ interface PublicConfig {
   alertManager: {
     enabled: boolean;
   };
-  slo?: {
-    legacyOrphanPurge?: {
-      enabled?: boolean;
-    };
-  };
 }
 
 export const [
@@ -592,7 +587,6 @@ export class ObservabilityPlugin
     coreRefs.dashboard = startDeps.dashboard;
     coreRefs.queryAssistEnabled = this.config.query_assist.enabled;
     coreRefs.summarizeEnabled = this.config.summarize.enabled;
-    coreRefs.legacyOrphanPurgeEnabled = this.config.slo?.legacyOrphanPurge?.enabled ?? false;
     coreRefs.overlays = core.overlays;
     coreRefs.dataSource = startDeps.dataSource;
     coreRefs.navigation = startDeps.navigation;

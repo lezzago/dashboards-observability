@@ -34,7 +34,6 @@ class CoreRefs {
   public application?: ApplicationStart;
   public queryAssistEnabled?: boolean;
   public summarizeEnabled?: boolean;
-  public legacyOrphanPurgeEnabled?: boolean;
   public dashboard?: DashboardStart;
   public dashboardProviders?: unknown;
   public overlays?: OverlayStart;

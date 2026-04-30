@@ -90,65 +90,6 @@ export interface SloTombstoneReaderLite {
   get(sloId: string): Promise<{ createdAt: string } | null>;
 }
 
-/**
- * Session E (F3) — minimal observation-store contract the reconciler needs.
- * The real SO-backed `SloLegacyOrphanObservationStore` structurally
- * satisfies this interface; kept here (not imported) so the reconciler
- * compiles even when F3 wiring is absent (pre-start or tests).
- *
- * Semantics:
- *   - `observe(...)` — upsert. First call sets firstSeenAt=lastSeenAt=now;
- *     subsequent calls refresh lastSeenAt only.
- *   - `listForDatasource(...)` — enumerate observations for cross-checking
- *     against the sweep's current set, so vanished groups can be cleaned up.
- *   - `remove(...)` — delete the observation for a group that disappeared.
- *
- * All three are best-effort from the reconciler's point of view; failures
- * log at warn and don't block orphan surfacing.
- */
-export interface SloLegacyOrphanObservationStoreLite {
-  observe(input: {
-    workspaceId: string;
-    datasourceId: string;
-    namespace: string;
-    groupName: string;
-    now?: () => Date;
-  }): Promise<{
-    doc: { attributes: { firstSeenAt: string; lastSeenAt: string } };
-    created: boolean;
-  }>;
-  listForDatasource(
-    workspaceId: string,
-    datasourceId: string
-  ): Promise<
-    Array<{
-      attributes: { groupName: string; firstSeenAt: string; lastSeenAt: string };
-    }>
-  >;
-  remove(workspaceId: string, datasourceId: string, groupName: string): Promise<boolean>;
-}
-
-/**
- * Diagnostic tag the orphan detector assigns to pre-Phase-3 rule layouts.
- * Session E (F3) gates observation tracking on this exact string so we don't
- * write observations for every unknown-bucket entry (e.g. recording-only
- * orphans, unsupported schemaVersion), only true legacy groups.
- *
- * Kept in sync with `orphan_detector.ts:318`. If the detector changes the
- * string the unit tests here will catch the drift (reconciler test asserts
- * observation writes go through only on matching diagnostic).
- */
-export const LEGACY_ORPHAN_DIAGNOSTIC = 'pre-Phase-3 rule layout; not eligible for adoption';
-
-/**
- * Session E (F4) — minimal read-side contract for the audit store's
- * retention sweep. The real `SloLegacyPurgeAuditStore` structurally
- * satisfies this interface.
- */
-export interface SloLegacyPurgeAuditRetentionLite {
-  deleteBefore(cutoff: string): Promise<number>;
-}
-
 export interface ReconcileErrorEntry {
   datasourceId: string;
   namespace: string;
@@ -238,26 +179,6 @@ export interface SloReconcilerDeps {
    * for adoption purposes — the orphan surfaces with `tombstoned: false`.
    */
   tombstoneTtlMs?: number;
-  /**
-   * Session E (F3) — optional observation store. When wired, the reconciler
-   * upserts `firstSeenAt` / `lastSeenAt` for every legacy orphan it
-   * surfaces this sweep, and deletes observations whose group has since
-   * vanished from the ruler. Absent: orphans surface without timestamps
-   * (UI renders "Unknown" in the Age column).
-   */
-  legacyOrphanObservationStore?: SloLegacyOrphanObservationStoreLite;
-  /**
-   * Session E (F4) — optional audit store for the retention sweep. When
-   * wired, the reconciler deletes audit records older than
-   * `legacyOrphanAuditRetentionMs` once per sweep. Absent: no retention —
-   * audit records accumulate until some external process cleans them up.
-   */
-  legacyPurgeAuditStore?: SloLegacyPurgeAuditRetentionLite;
-  /**
-   * Session E (F4) — retention window for audit records. Defaults to 30d.
-   * Records with `requestedAt + retentionMs <= now` are deleted.
-   */
-  legacyOrphanAuditRetentionMs?: number;
   /** Injected for deterministic tests. */
   now?: () => Date;
   intervalMs?: number;
@@ -266,7 +187,6 @@ export interface SloReconcilerDeps {
 const DEFAULT_INTERVAL_MS = 5 * 60_000;
 const DEFAULT_RECORDING_GRACE_MS = 24 * 60 * 60_000;
 const DEFAULT_TOMBSTONE_TTL_MS = 30 * 24 * 60 * 60_000;
-const DEFAULT_LEGACY_AUDIT_RETENTION_MS = 30 * 24 * 60 * 60_000;
 
 /**
  * Factory. Keeps `setInterval` / in-flight state encapsulated so consumers only
@@ -277,8 +197,6 @@ export function createSloReconciler(deps: SloReconcilerDeps): SloReconciler {
   const now = deps.now ?? (() => new Date());
   const recordingGraceMs = deps.recordingGraceMs ?? DEFAULT_RECORDING_GRACE_MS;
   const tombstoneTtlMs = deps.tombstoneTtlMs ?? DEFAULT_TOMBSTONE_TTL_MS;
-  const legacyOrphanAuditRetentionMs =
-    deps.legacyOrphanAuditRetentionMs ?? DEFAULT_LEGACY_AUDIT_RETENTION_MS;
   const workspaceIdFor = deps.workspaceIdForDatasource ?? ((datasourceId: string) => datasourceId);
 
   let timer: ReturnType<typeof setInterval> | undefined;
@@ -460,80 +378,6 @@ export function createSloReconciler(deps: SloReconcilerDeps): SloReconciler {
         }
       }
 
-      // Session E (F3) — legacy-orphan observation tracking. Runs inside the
-      // per-datasource loop so observations stay scoped to the datasource
-      // whose groups we just read. Two-phase:
-      //   1. Upsert an observation SO for every orphan carrying the legacy
-      //      diagnostic. Mutate the entry with firstSeenAt/lastSeenAt so the
-      //      response carries them (same reference appears in both
-      //      `diff.orphans` and `diff.unknownOrphans`, so mutating here
-      //      propagates downstream without re-plumbing).
-      //   2. Cross-check against observations already on disk; delete ones
-      //      whose group is no longer present in the sweep's legacy set.
-      //      Covers admin purges (Session C) and out-of-band deletes.
-      //
-      // Failures at any step log at warn; the sweep continues with a
-      // best-effort result (orphans without `firstSeenAt` render as
-      // "Unknown" in the UI).
-      if (deps.legacyOrphanObservationStore) {
-        const obsStore = deps.legacyOrphanObservationStore;
-        const legacyOrphansThisSlice: OrphanEntry[] = [];
-        for (const entry of diff.orphans) {
-          if (entry.diagnostic === LEGACY_ORPHAN_DIAGNOSTIC) {
-            legacyOrphansThisSlice.push(entry);
-          }
-        }
-        const currentLegacyNames = new Set<string>(legacyOrphansThisSlice.map((e) => e.groupName));
-
-        for (const entry of legacyOrphansThisSlice) {
-          try {
-            const { doc } = await obsStore.observe({
-              workspaceId,
-              datasourceId,
-              namespace,
-              groupName: entry.groupName,
-              now,
-            });
-            entry.firstSeenAt = doc.attributes.firstSeenAt;
-            entry.lastSeenAt = doc.attributes.lastSeenAt;
-            deps.metrics.incLegacyObservationsWritten();
-          } catch (err) {
-            const message = err instanceof Error ? err.message : String(err);
-            deps.logger.warn(
-              `SloReconciler: legacy-orphan observation write failed ds=${datasourceId} group=${entry.groupName} — ${message}`
-            );
-          }
-        }
-
-        // Phase 2: delete observations that no longer correspond to a live
-        // legacy orphan. List-then-diff keeps the sweep simple; N is bounded
-        // by the number of legacy groups a datasource has ever had.
-        try {
-          const existing = await obsStore.listForDatasource(workspaceId, datasourceId);
-          for (const obs of existing) {
-            if (currentLegacyNames.has(obs.attributes.groupName)) continue;
-            try {
-              const deleted = await obsStore.remove(
-                workspaceId,
-                datasourceId,
-                obs.attributes.groupName
-              );
-              if (deleted) deps.metrics.incLegacyObservationsDeleted();
-            } catch (err) {
-              const message = err instanceof Error ? err.message : String(err);
-              deps.logger.warn(
-                `SloReconciler: legacy-orphan observation delete failed ds=${datasourceId} group=${obs.attributes.groupName} — ${message}`
-              );
-            }
-          }
-        } catch (err) {
-          const message = err instanceof Error ? err.message : String(err);
-          deps.logger.warn(
-            `SloReconciler: legacy-orphan observation list failed ds=${datasourceId} — ${message}`
-          );
-        }
-      }
-
       for (const entry of diff.orphans) {
         orphans.push(entry);
       }
@@ -604,25 +448,6 @@ export function createSloReconciler(deps: SloReconcilerDeps): SloReconciler {
             }
           }
         }
-      }
-    }
-
-    // Session E (F4) — audit retention sweep. Runs once per reconciler
-    // sweep, across all datasources (the audit store is not per-datasource;
-    // one delete-before-cutoff call expires all matching records in one
-    // pass). Best-effort: failures log at warn and don't inflate the error
-    // counter.
-    if (deps.legacyPurgeAuditStore) {
-      const cutoffMs = now().getTime() - legacyOrphanAuditRetentionMs;
-      const cutoffIso = new Date(cutoffMs).toISOString();
-      try {
-        const deletedCount = await deps.legacyPurgeAuditStore.deleteBefore(cutoffIso);
-        if (deletedCount > 0) {
-          deps.metrics.incLegacyAuditRecordsExpired(deletedCount);
-        }
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        deps.logger.warn(`SloReconciler: legacy-audit retention sweep failed — ${message}`);
       }
     }
 

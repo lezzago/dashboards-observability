@@ -39,13 +39,6 @@ describe('ReconcilerMetrics — zero state', () => {
       graceDeletions: 0,
       adoptableOrphans: 0,
       unknownOrphans: 0,
-      legacyPurgeRequested: 0,
-      legacyPurgeSucceeded: 0,
-      legacyPurgeSkippedValidation: 0,
-      legacyPurgeFailed: 0,
-      legacyObservationsWritten: 0,
-      legacyObservationsDeleted: 0,
-      legacyAuditRecordsExpired: 0,
     });
   });
 });
@@ -100,13 +93,6 @@ describe('ReconcilerMetrics — increments', () => {
       graceDeletions: 0,
       adoptableOrphans: 0,
       unknownOrphans: 0,
-      legacyPurgeRequested: 0,
-      legacyPurgeSucceeded: 0,
-      legacyPurgeSkippedValidation: 0,
-      legacyPurgeFailed: 0,
-      legacyObservationsWritten: 0,
-      legacyObservationsDeleted: 0,
-      legacyAuditRecordsExpired: 0,
     });
   });
 
@@ -200,13 +186,6 @@ describe('ReconcilerMetrics — reset', () => {
       graceDeletions: 0,
       adoptableOrphans: 0,
       unknownOrphans: 0,
-      legacyPurgeRequested: 0,
-      legacyPurgeSucceeded: 0,
-      legacyPurgeSkippedValidation: 0,
-      legacyPurgeFailed: 0,
-      legacyObservationsWritten: 0,
-      legacyObservationsDeleted: 0,
-      legacyAuditRecordsExpired: 0,
     });
   });
 
@@ -230,13 +209,6 @@ describe('ReconcilerMetrics — reset', () => {
       graceDeletions: 0,
       adoptableOrphans: 0,
       unknownOrphans: 0,
-      legacyPurgeRequested: 0,
-      legacyPurgeSucceeded: 0,
-      legacyPurgeSkippedValidation: 0,
-      legacyPurgeFailed: 0,
-      legacyObservationsWritten: 0,
-      legacyObservationsDeleted: 0,
-      legacyAuditRecordsExpired: 0,
     });
   });
 });
@@ -278,13 +250,6 @@ describe('ReconcilerMetrics — negative-n clamping', () => {
       graceDeletions: 0,
       adoptableOrphans: 0,
       unknownOrphans: 0,
-      legacyPurgeRequested: 0,
-      legacyPurgeSucceeded: 0,
-      legacyPurgeSkippedValidation: 0,
-      legacyPurgeFailed: 0,
-      legacyObservationsWritten: 0,
-      legacyObservationsDeleted: 0,
-      legacyAuditRecordsExpired: 0,
     });
   });
 
@@ -301,35 +266,6 @@ describe('ReconcilerMetrics — negative-n clamping', () => {
     expect(logger.debug).toHaveBeenCalledWith(
       expect.stringMatching(/negative increment clamped to 0.*counter=unknownOrphans/)
     );
-  });
-});
-
-// Session C — legacy-orphan purge counters share the same bank so admin
-// dashboards can surface purge activity alongside orphan counts.
-describe('ReconcilerMetrics — legacy purge counters', () => {
-  it('each legacy-purge counter increments independently', () => {
-    const metrics = createReconcilerMetrics(mockLogger());
-    metrics.incLegacyPurgeRequested(7);
-    metrics.incLegacyPurgeSucceeded(5);
-    metrics.incLegacyPurgeSkippedValidation(1);
-    metrics.incLegacyPurgeFailed(1);
-    const snap = metrics.snapshot();
-    expect(snap.legacyPurgeRequested).toBe(7);
-    expect(snap.legacyPurgeSucceeded).toBe(5);
-    expect(snap.legacyPurgeSkippedValidation).toBe(1);
-    expect(snap.legacyPurgeFailed).toBe(1);
-    // Pre-existing counters stay at zero — no cross-contamination.
-    expect(snap.sweeps).toBe(0);
-    expect(snap.adoptableOrphans).toBe(0);
-  });
-
-  it('reset() zeros every legacy-purge counter', () => {
-    const metrics = createReconcilerMetrics(mockLogger());
-    metrics.incLegacyPurgeRequested(10);
-    metrics.incLegacyPurgeSucceeded(8);
-    metrics.reset();
-    expect(metrics.snapshot().legacyPurgeRequested).toBe(0);
-    expect(metrics.snapshot().legacyPurgeSucceeded).toBe(0);
   });
 });
 

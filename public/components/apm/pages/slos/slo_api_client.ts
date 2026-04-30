@@ -160,16 +160,6 @@ export interface OrphanUnknown {
   sourceWorkspaceId?: string;
   schemaVersion?: number;
   specIntegrity?: OrphanSpecIntegrity;
-  /**
-   * Session E (F3) — ISO time the reconciler first observed this group as a
-   * legacy orphan. Populated only for entries carrying the pre-Phase-3
-   * legacy diagnostic, and only when the server-side observation registry is
-   * wired. Undefined on pre-F3 deployments or when the first sweep hasn't
-   * run yet; the Legacy-orphans tab renders "Unknown" in the Age column.
-   */
-  firstSeenAt?: string;
-  /** Session E (F3) — ISO time of the most recent reconciler observation. */
-  lastSeenAt?: string;
 }
 
 export interface OrphanListResponse {
@@ -194,84 +184,6 @@ export interface RecoverResponseBody {
   slo: SloDocument;
   tombstoneCleared: boolean;
   refcountChanges: RecoverRefcountChange[];
-}
-
-// ============================================================================
-// Session C — legacy-orphan purge types (browser-side mirror of the server
-// contract in `server/services/slo/slo_legacy_purger.ts`).
-// ============================================================================
-
-export type LegacyPurgeSkipReason =
-  | 'name_pattern_mismatch'
-  | 'namespace_mismatch'
-  | 'claimed_by_so'
-  | 'not_present_on_ruler';
-
-export interface LegacyPurgeCandidateRequest {
-  groupName: string;
-  namespace: string;
-}
-
-export interface LegacyPurgeSkippedEntry {
-  groupName: string;
-  namespace: string;
-  reason: LegacyPurgeSkipReason;
-  claimantSloId?: string;
-}
-
-export interface LegacyPurgeFailureEntry {
-  groupName: string;
-  namespace: string;
-  error: {
-    code: 'RULER_VALIDATION_FAILED' | 'RULER_AUTH_FAILED' | 'RULER_UNREACHABLE' | 'UNKNOWN';
-    httpStatus: number;
-    message: string;
-  };
-}
-
-export interface LegacyPurgeResponse {
-  requested: number;
-  purged: number;
-  skipped_validation: LegacyPurgeSkippedEntry[];
-  failed: LegacyPurgeFailureEntry[];
-}
-
-export interface PurgeLegacyRequestBody {
-  datasourceId: string;
-  groups: LegacyPurgeCandidateRequest[];
-}
-
-// ============================================================================
-// Session E (F4) — legacy-purge audit types.
-// ============================================================================
-
-export type LegacyPurgeAuditOutcome = 'purged' | 'skipped_validation' | 'failed';
-
-export interface LegacyPurgeAuditRecord {
-  workspaceId: string;
-  datasourceId: string;
-  namespace: string;
-  groupName: string;
-  outcome: LegacyPurgeAuditOutcome;
-  reason?: string;
-  errorCode?: string;
-  errorHttpStatus?: number;
-  claimantSloId?: string;
-  requestedBy?: string;
-  requestedAt: string;
-  schemaVersion: 1;
-}
-
-export interface LegacyPurgeAuditListResponse {
-  records: LegacyPurgeAuditRecord[];
-  truncated: boolean;
-}
-
-export interface LegacyPurgeAuditQuery {
-  datasourceId?: string;
-  groupName?: string;
-  since?: string;
-  limit?: number;
 }
 
 /**
@@ -407,37 +319,5 @@ export class SloApiClient {
 
   async recoverSlo(input: RecoverRequestBody): Promise<RecoverResponseBody> {
     return this.http.post(`${SLO_BASE}/_recover`, { body: JSON.stringify(input) });
-  }
-
-  /**
-   * Session C — purge legacy (pre-Phase-3) rule groups that have no owning
-   * SLO. The server re-validates every entry; a 200 response may still
-   * carry partial failures (see `LegacyPurgeResponse`).
-   *
-   * Throws an OSD `IHttpFetchError` when:
-   *   - Feature flag off (404).
-   *   - Datasource unknown / non-Prometheus (400).
-   *   - Body schema violation (400 — e.g. empty `groups`).
-   */
-  async purgeLegacyOrphans(input: PurgeLegacyRequestBody): Promise<LegacyPurgeResponse> {
-    return this.http.post(`${SLO_BASE}/_purge_legacy`, { body: JSON.stringify(input) });
-  }
-
-  /**
-   * Session E (F4) — read the legacy-orphan purge audit trail. Gated on
-   * the same `legacyOrphanPurge.enabled` flag as the purge endpoint — a
-   * 404 from the server means the feature is off. Returns `{records,
-   * truncated}`; truncated=true signals the result set hit the server's
-   * hard cap (500) and the caller should narrow filters.
-   */
-  async listLegacyPurgeAudit(
-    query: LegacyPurgeAuditQuery = {}
-  ): Promise<LegacyPurgeAuditListResponse> {
-    const q: Record<string, string | number> = {};
-    if (query.datasourceId) q.datasourceId = query.datasourceId;
-    if (query.groupName) q.groupName = query.groupName;
-    if (query.since) q.since = query.since;
-    if (query.limit !== undefined) q.limit = query.limit;
-    return this.http.get(`${SLO_BASE}/_purge_legacy/audit`, { query: q });
   }
 }

@@ -41,7 +41,6 @@ import type { SloService } from '../../common/slo/slo_service';
 import type { RulerClient } from '../services/slo/ruler_client';
 import type { RuleHealthChecker } from '../services/slo/rule_health_checker';
 import type { SloReconciler } from '../services/slo/reconciler';
-import type { ReconcilerMetrics } from '../services/slo/reconciler_metrics';
 
 /**
  * Wiring returned from `setupRoutes` so the plugin-level orchestrator
@@ -68,9 +67,6 @@ export function setupRoutes({
   reconciler,
   ruleDedupEnabled,
   ruleAdoptionEnabled,
-  legacyOrphanPurgeEnabled,
-  reconcilerMetrics,
-  legacyPurgeAuditStoreGetter,
 }: {
   router: IRouter;
   client: ILegacyClusterClient;
@@ -106,27 +102,6 @@ export function setupRoutes({
    * `_recover`, `_clone`) can apply the 412 feature-flag gate.
    */
   ruleAdoptionEnabled?: boolean;
-  /**
-   * Session C — `observability.slo.legacyOrphanPurge.enabled`. Forwarded
-   * into `registerSloRoutes` so the `_purge_legacy` endpoint gates itself
-   * to 404 when the flag is off.
-   */
-  legacyOrphanPurgeEnabled?: boolean;
-  /**
-   * Session C — shared metrics bank. The purge endpoint bumps the same
-   * counters the reconciler uses so the admin dashboard can show purge
-   * activity alongside orphan counts.
-   */
-  reconcilerMetrics?: ReconcilerMetrics;
-  /**
-   * Session E (F4) — lazy getter for the legacy-purge audit store.
-   * Returns `undefined` before `start()` wires the SO-backed store; the
-   * adoption route checks the getter on every request so the audit
-   * endpoint surfaces the right state as soon as the store is live.
-   */
-  legacyPurgeAuditStoreGetter?: () =>
-    | import('../services/slo/slo_legacy_purge_audit_store').SloLegacyPurgeAuditStore
-    | undefined;
 }): SetupRoutesResult {
   PanelsRouter(router);
   VisualizationsRouter(router);
@@ -219,9 +194,6 @@ export function setupRoutes({
       reconciler,
       ruleDedupEnabled,
       ruleAdoptionEnabled,
-      legacyOrphanPurgeEnabled,
-      reconcilerMetrics,
-      legacyPurgeAuditStoreGetter,
     });
   }
 
