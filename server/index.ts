@@ -27,8 +27,10 @@ const observabilityConfig = {
     // SLO server-side behavior. `reconcilerIntervalMs` drives the Phase 2
     // background sweep that reconciles SLO saved objects against the ruler.
     // Default 5m; floor at 1s to stay safe against misconfig that would make
-    // the dev server hammer Cortex. Never exposed to the browser — this is a
-    // purely server-side knob.
+    // the dev server hammer Cortex. The whole `slo` block is exposed to the
+    // browser (see `exposeToBrowser` below) so the adoption page can read
+    // `legacyOrphanPurge.enabled` synchronously; the other knobs leak too but
+    // none are sensitive.
     slo: schema.object({
       reconcilerIntervalMs: schema.number({ defaultValue: 300_000, min: 1_000 }),
       // Phase 3 (W3.6): dedup flag. Default-on in dev; operators flip off in
@@ -71,5 +73,13 @@ export const config: PluginConfigDescriptor<ObservabilityConfig> = {
     query_assist: true,
     summarize: true,
     alertManager: true,
+    // Session D (F1): expose the `slo` block so the adoption page can read
+    // `legacyOrphanPurge.enabled` synchronously at mount time instead of
+    // probing `_purge_legacy` with an empty body to infer registration. OSD's
+    // `exposeToBrowser` only supports top-level boolean expose, so the whole
+    // `slo` object leaks — `reconcilerIntervalMs` and `recordingGraceMs`
+    // become visible too. Neither is sensitive (operator-tunable intervals,
+    // not credentials or URLs), so whole-object expose is acceptable.
+    slo: true,
   },
 };

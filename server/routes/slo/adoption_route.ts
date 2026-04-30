@@ -333,6 +333,12 @@ export function registerSloAdoptionRoutes(options: RegisterSloAdoptionRoutesOpti
       validate: { body: purgeLegacyBody },
     },
     async (ctx, req, res) => {
+      // Access to this endpoint is intentionally open to any authenticated
+      // caller in the workspace. SLOs are pre-GA and the feature flag
+      // (observability.slo.legacyOrphanPurge.enabled /
+      // observability.slo.ruleDedup.enabled) is the only gate today. A
+      // runtime admin-role check may be added later once a real
+      // multi-user threat model exists; until then, don't introduce one.
       if (!legacyOrphanPurgeEnabled) {
         return res.customError({
           statusCode: 404,

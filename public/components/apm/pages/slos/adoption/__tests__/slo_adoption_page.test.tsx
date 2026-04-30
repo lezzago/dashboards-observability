@@ -8,6 +8,7 @@ import { act, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { SloAdoptionPage } from '../slo_adoption_page';
 import type { SloApiClient } from '../../slo_api_client';
+import { coreRefs } from '../../../../../../framework/core_refs';
 
 function makeApiClient(
   overrides: Partial<jest.Mocked<SloApiClient>> = {}
@@ -15,12 +16,17 @@ function makeApiClient(
   return ({
     listOrphans: jest.fn().mockResolvedValue({ candidates: [], unknowns: [] }),
     recoverSlo: jest.fn(),
-    // Session C — default the probe to "flag off" (404) so existing tests
-    // see the plain Recover tab without the new tab chrome.
-    purgeLegacyOrphans: jest.fn().mockRejectedValue({ response: { status: 404 } }),
+    purgeLegacyOrphans: jest.fn(),
     ...overrides,
   } as unknown) as jest.Mocked<SloApiClient>;
 }
+
+// Session D (F1): tab visibility is driven by `coreRefs.legacyOrphanPurgeEnabled`
+// instead of a probe against `_purge_legacy`. Reset per-test so one case's
+// toggle doesn't leak into the next.
+beforeEach(() => {
+  coreRefs.legacyOrphanPurgeEnabled = false;
+});
 
 function renderPage(
   apiClient: jest.Mocked<SloApiClient>,
@@ -113,22 +119,19 @@ describe('SloAdoptionPage — feature-flag gate', () => {
   });
 });
 
-describe('SloAdoptionPage — Session C legacy orphans tab', () => {
-  it('hides the Legacy-orphans tab when the purge flag is off (404 probe)', async () => {
-    const purgeLegacyOrphans = jest.fn().mockRejectedValue({ response: { status: 404 } });
+describe('SloAdoptionPage — legacy orphans tab (Session D: browser-exposed flag)', () => {
+  it('hides the Legacy-orphans tab when the purge flag is off', async () => {
+    coreRefs.legacyOrphanPurgeEnabled = false;
     await act(async () => {
-      renderPage(makeApiClient({ purgeLegacyOrphans }));
+      renderPage(makeApiClient());
     });
     await waitFor(() => expect(screen.getByTestId('sloAdoption-recoverTab')).toBeInTheDocument());
     expect(screen.queryByTestId('sloAdoption-page-tabs')).not.toBeInTheDocument();
     expect(screen.queryByTestId('sloAdoption-page-tab-legacy')).not.toBeInTheDocument();
   });
 
-  it('shows the Legacy-orphans tab when the purge flag is on (400 probe)', async () => {
-    // Server returns 400 when the flag is on (schema rejects empty groups).
-    const purgeLegacyOrphans = jest
-      .fn()
-      .mockRejectedValue({ response: { status: 400 }, body: { message: 'empty' } });
+  it('shows the Legacy-orphans tab when the purge flag is on', async () => {
+    coreRefs.legacyOrphanPurgeEnabled = true;
     const listOrphans = jest.fn().mockResolvedValue({
       candidates: [],
       unknowns: [
@@ -147,7 +150,7 @@ describe('SloAdoptionPage — Session C legacy orphans tab', () => {
       ],
     });
     await act(async () => {
-      renderPage(makeApiClient({ purgeLegacyOrphans, listOrphans }));
+      renderPage(makeApiClient({ listOrphans }));
     });
     await waitFor(() => expect(screen.getByTestId('sloAdoption-page-tabs')).toBeInTheDocument());
     // Badge count reflects only the legacy-diagnostic row (1 of 2 unknowns).
@@ -157,7 +160,7 @@ describe('SloAdoptionPage — Session C legacy orphans tab', () => {
   });
 
   it('switches to the Legacy tab on click and renders the purge table', async () => {
-    const purgeLegacyOrphans = jest.fn().mockRejectedValue({ response: { status: 400 } });
+    coreRefs.legacyOrphanPurgeEnabled = true;
     const listOrphans = jest.fn().mockResolvedValue({
       candidates: [],
       unknowns: [
@@ -170,7 +173,7 @@ describe('SloAdoptionPage — Session C legacy orphans tab', () => {
       ],
     });
     await act(async () => {
-      renderPage(makeApiClient({ purgeLegacyOrphans, listOrphans }));
+      renderPage(makeApiClient({ listOrphans }));
     });
     await waitFor(() =>
       expect(screen.getByTestId('sloAdoption-page-tab-legacy')).toBeInTheDocument()

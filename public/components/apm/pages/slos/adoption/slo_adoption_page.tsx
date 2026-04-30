@@ -16,12 +16,11 @@
  *     we don't make an immediate second request.
  *   - Any other error → render a retry-capable error callout.
  *
- * Session C — the page also hosts a "Legacy orphans" tab gated on
- * `observability.slo.legacyOrphanPurge.enabled`. Because that flag isn't
- * exposed to the browser via config, the page probes it by attempting a
- * minimal purge call with `groups: []` — server returns 400 (schema
- * rejects empty array) when the feature is enabled, 404 when disabled.
- * Probing via empty call is cheap and doesn't mutate state.
+ * Session C introduced a "Legacy orphans" tab gated on
+ * `observability.slo.legacyOrphanPurge.enabled`. Session D (F1) exposed that
+ * flag to the browser via `exposeToBrowser`, so the page now reads it
+ * synchronously from `coreRefs.legacyOrphanPurgeEnabled` instead of probing
+ * `_purge_legacy` with an empty body.
  */
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
@@ -45,6 +44,7 @@ import type {
   HttpStart,
   NotificationsStart,
 } from '../../../../../../../../src/core/public';
+import { coreRefs } from '../../../../../framework/core_refs';
 import type { OrphanListResponse, OrphanUnknown, SloApiClient } from '../slo_api_client';
 import { isPreconditionFailed } from '../slo_api_client';
 import { RecoverTab } from './recover_tab';
@@ -97,13 +97,11 @@ export const SloAdoptionPage: React.FC<SloAdoptionPageProps> = ({
   const [featureState, setFeatureState] = useState<FeatureState>('loading');
   const [initialData, setInitialData] = useState<OrphanListResponse | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  /**
-   * Session C — legacy-purge flag probe. `null` = not yet probed,
-   * `true` = flag on (tab visible), `false` = flag off (tab hidden). The
-   * probe runs once on mount alongside the `_orphans` call so a single
-   * render cycle resolves both feature gates.
-   */
-  const [legacyPurgeEnabled, setLegacyPurgeEnabled] = useState<boolean | null>(null);
+  // Session D (F1) — legacy-purge flag is now browser-exposed via
+  // `exposeToBrowser` in `server/index.ts`, so tab visibility resolves
+  // synchronously at mount. The exposed config is read once at plugin
+  // start; a server-side flag flip requires a page reload to take effect.
+  const legacyPurgeEnabled = coreRefs.legacyOrphanPurgeEnabled ?? false;
   const [activeTab, setActiveTab] = useState<AdoptionTabId>('recover');
 
   // Breadcrumb is mount-only.
@@ -137,56 +135,12 @@ export const SloAdoptionPage: React.FC<SloAdoptionPageProps> = ({
     };
   }, [apiClient]);
 
-  /**
-   * Probe whether `legacyOrphanPurge.enabled` is on. The server returns 404
-   * when disabled (endpoint appears unregistered) and 400 otherwise (the
-   * schema rejects an empty `groups` array). Either response is cheap — no
-   * state mutation either way.
-   *
-   * Tolerant of older api-client instances that don't ship the probe method
-   * — treats `purgeLegacyOrphans` absent as "feature unknown/off" so legacy
-   * tests and offline-dev paths don't crash on mount.
-   */
-  const probeLegacyPurge = useCallback(() => {
-    let cancelled = false;
-    if (typeof apiClient.purgeLegacyOrphans !== 'function') {
-      setLegacyPurgeEnabled(false);
-      return () => {
-        cancelled = true;
-      };
-    }
-    apiClient
-      .purgeLegacyOrphans({ datasourceId: '__probe__', groups: [] })
-      .then(() => {
-        // Unexpected: server returned 200 on an empty probe. Treat as
-        // enabled — the flag is definitely on, whatever the server decided
-        // to do with `__probe__`.
-        if (!cancelled) setLegacyPurgeEnabled(true);
-      })
-      .catch((err: unknown) => {
-        if (cancelled) return;
-        const status = (err as { response?: { status?: number } })?.response?.status;
-        if (status === 404) {
-          setLegacyPurgeEnabled(false);
-          return;
-        }
-        // Any other status (400 from schema rejection is the expected
-        // flag-on path) means the endpoint is registered → flag on.
-        setLegacyPurgeEnabled(true);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [apiClient]);
-
   useEffect(() => {
     const cancelList = load();
-    const cancelProbe = probeLegacyPurge();
     return () => {
       cancelList?.();
-      cancelProbe?.();
     };
-  }, [load, probeLegacyPurge]);
+  }, [load]);
 
   const legacyOrphans = useMemo(() => {
     if (!initialData) return [] as OrphanUnknown[];
