@@ -136,8 +136,8 @@ describe('SloService.repair — integration (W1.10)', () => {
     const doc = await svc.create({ spec: validSpec() }, 'alice', deploy);
 
     const groupName =
-      doc.status.provisioning.backend === 'prometheus' && doc.status.provisioning.ruleGroupName
-        ? doc.status.provisioning.ruleGroupName
+      doc.status.provisioning.backend === 'prometheus' && doc.status.provisioning.alertGroupName
+        ? doc.status.provisioning.alertGroupName
         : '';
 
     // Sanity: create wrote the group to the fake ruler.
@@ -196,8 +196,8 @@ describe('SloService.repair — integration (W1.10)', () => {
     const doc = await svc.create({ spec: validSpec() }, 'alice', deploy);
 
     const groupName =
-      doc.status.provisioning.backend === 'prometheus' && doc.status.provisioning.ruleGroupName
-        ? doc.status.provisioning.ruleGroupName
+      doc.status.provisioning.backend === 'prometheus' && doc.status.provisioning.alertGroupName
+        ? doc.status.provisioning.alertGroupName
         : '';
     ruler.dropGroup(namespace, groupName);
 
@@ -223,8 +223,8 @@ describe('SloService.repair — integration (W1.10)', () => {
     const doc = await svc.create({ spec: validSpec() }, 'alice', deploy);
 
     const groupName =
-      doc.status.provisioning.backend === 'prometheus' && doc.status.provisioning.ruleGroupName
-        ? doc.status.provisioning.ruleGroupName
+      doc.status.provisioning.backend === 'prometheus' && doc.status.provisioning.alertGroupName
+        ? doc.status.provisioning.alertGroupName
         : '';
     ruler.dropGroup(namespace, groupName);
 
@@ -257,8 +257,8 @@ describe('SloService.repair — integration (W1.10)', () => {
     const doc = await svc.create({ spec: validSpec() }, 'alice', deploy);
 
     const groupName =
-      doc.status.provisioning.backend === 'prometheus' && doc.status.provisioning.ruleGroupName
-        ? doc.status.provisioning.ruleGroupName
+      doc.status.provisioning.backend === 'prometheus' && doc.status.provisioning.alertGroupName
+        ? doc.status.provisioning.alertGroupName
         : '';
     expect(ruler.hasGroup(namespace, groupName)).toBe(true);
 

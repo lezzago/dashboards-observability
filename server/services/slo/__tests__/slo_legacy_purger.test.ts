@@ -60,7 +60,6 @@ function stubSloDoc(options: {
   sloId: string;
   specName: string;
   datasourceId?: string;
-  ruleGroupName?: string;
 }): SloDocument {
   return ({
     id: options.sloId,
@@ -95,9 +94,7 @@ function stubSloDoc(options: {
       updatedBy: 'test',
       provisioning: {
         backend: 'prometheus',
-        ruleGroupName: options.ruleGroupName,
         rulerNamespace: NS,
-        generatedRuleNames: [],
       },
     },
   } as unknown) as SloDocument;
@@ -220,46 +217,10 @@ describe('purgeLegacyOrphans', () => {
     expect(ruler.deleteCalls).toBe(0);
   });
 
-  it('refuses to purge a group an SLO still claims via ruleGroupName', async () => {
-    const claimedName = legacyName('claimed');
-    ruler.seedGroup(NS, ({
-      groupName: claimedName,
-      interval: 60,
-      rules: [],
-      yaml: '',
-    } as unknown) as never);
-    const claimingDoc = stubSloDoc({
-      sloId: 'slo-claim',
-      specName: 'Claiming SLO',
-      ruleGroupName: claimedName,
-    });
-
-    const result = await purgeLegacyOrphans(
-      {
-        datasourceId: TEST_DS_ID,
-        workspaceId: TEST_WS_ID,
-        candidates: [{ groupName: claimedName, namespace: NS }],
-      },
-      makeDeps([claimingDoc])
-    );
-
-    expect(result.purged).toBe(0);
-    expect(result.skipped_validation).toEqual([
-      {
-        groupName: claimedName,
-        namespace: NS,
-        reason: 'claimed_by_so',
-        claimantSloId: 'slo-claim',
-      },
-    ]);
-    expect(ruler.hasGroup(NS, claimedName)).toBe(true);
-    expect(ruler.deleteCalls).toBe(0);
-  });
-
-  it('refuses to purge a group an SLO claims via legacy-name recomputation (no ruleGroupName)', async () => {
-    // SO without ruleGroupName but whose spec.name + sloId still maps to the
-    // same legacy group name. This is the "partial migration" case —
-    // the redeploy task owns that group and must own this one.
+  it('refuses to purge a group an SLO claims via legacy-name recomputation', async () => {
+    // SO whose spec.name + sloId maps to the same legacy group name. This
+    // is the "partial migration" case — the redeploy task owns that group
+    // and must own this one.
     const specName = 'Migrated SLO';
     const sloId = 'slo-migrated';
     const recomputedName = legacyNameForSo(sloId, specName, TEST_WS_ID);
@@ -269,7 +230,7 @@ describe('purgeLegacyOrphans', () => {
       rules: [],
       yaml: '',
     } as unknown) as never);
-    const claimingDoc = stubSloDoc({ sloId, specName }); // no ruleGroupName
+    const claimingDoc = stubSloDoc({ sloId, specName });
 
     const result = await purgeLegacyOrphans(
       {

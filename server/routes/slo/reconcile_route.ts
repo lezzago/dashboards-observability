@@ -13,14 +13,10 @@
  * single SLO — and it ships with a dedicated admin dependency (the
  * `SloReconciler`) that the per-SLO CRUD handlers don't need.
  *
- * Authorization: this route is admin-gated in principle but the plugin
- * doesn't yet expose an RBAC gate — the W1 repair/rule_health routes ship
- * the same way. Phase 4 (rule adoption) will add the shared admin gate and
- * this endpoint will be wrapped at that time.
- *
- * TODO(Phase 4 — admin gating): wrap with the admin RBAC check once the
- * shared admin-auth helper lands (tracked alongside W4.6 `_orphans` /
- * `_recover` / `_clone` admin endpoints).
+ * Authorization: this route is intentionally open to any authenticated
+ * caller in the workspace. SLOs are pre-GA and the feature flag is the
+ * only gate today. A runtime admin-role check may be added later once a
+ * real multi-user threat model exists; until then, don't introduce one.
  */
 
 import { schema } from '@osd/config-schema';

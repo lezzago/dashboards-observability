@@ -72,7 +72,7 @@ function mockDatasource(overrides: Partial<Datasource> = {}): Datasource {
 function mockDoc(overrides: {
   id: string;
   datasourceId?: string;
-  ruleGroupName?: string;
+  alertGroupName?: string;
   rulerNamespace?: string;
 }): SloDocument {
   return {
@@ -113,10 +113,9 @@ function mockDoc(overrides: {
       updatedBy: 'u',
       provisioning: {
         backend: 'prometheus',
-        ruleGroupName: overrides.ruleGroupName ?? `slo:${overrides.id}_suffix`,
+        alertGroupName: overrides.alertGroupName ?? `slo:${overrides.id}_suffix`,
         rulerNamespace:
           overrides.rulerNamespace ?? `slo-generated-${overrides.datasourceId ?? 'ds-1'}`,
-        generatedRuleNames: [],
       },
     },
   };
@@ -247,8 +246,8 @@ beforeEach(() => {
 describe('SloReconciler — reconcileOnce', () => {
   it('happy path: 2 SLOs in one datasource, both groups present → empty missing/orphan arrays', async () => {
     const mocks = buildMocks();
-    const docA = mockDoc({ id: 'slo-a', ruleGroupName: 'slo:a_suffix' });
-    const docB = mockDoc({ id: 'slo-b', ruleGroupName: 'slo:b_suffix' });
+    const docA = mockDoc({ id: 'slo-a', alertGroupName: 'slo:a_suffix' });
+    const docB = mockDoc({ id: 'slo-b', alertGroupName: 'slo:b_suffix' });
     mocks.store.list.mockResolvedValue([docA, docB]);
     mocks.ruler.listRuleGroups.mockResolvedValue([
       mockGroup('slo:a_suffix'),
@@ -271,7 +270,7 @@ describe('SloReconciler — reconcileOnce', () => {
 
   it('missing detection: ruler returns [] → entry in missingBySlo, metric emitted, invalidate called (W2.3)', async () => {
     const mocks = buildMocks();
-    const doc = mockDoc({ id: 'slo-a', ruleGroupName: 'slo:a_suffix' });
+    const doc = mockDoc({ id: 'slo-a', alertGroupName: 'slo:a_suffix' });
     mocks.store.list.mockResolvedValue([doc]);
     mocks.ruler.listRuleGroups.mockResolvedValue([]);
 
@@ -297,7 +296,7 @@ describe('SloReconciler — reconcileOnce', () => {
 
   it('orphan detection: ruler has a group no SLO claims → entry in orphans', async () => {
     const mocks = buildMocks();
-    const doc = mockDoc({ id: 'slo-a', ruleGroupName: 'slo:a_suffix' });
+    const doc = mockDoc({ id: 'slo-a', alertGroupName: 'slo:a_suffix' });
     mocks.store.list.mockResolvedValue([doc]);
     mocks.ruler.listRuleGroups.mockResolvedValue([
       mockGroup('slo:a_suffix'),
@@ -334,8 +333,8 @@ describe('SloReconciler — reconcileOnce', () => {
 
   it('multi-datasource: each datasource gets its own listRuleGroups call with the right namespace', async () => {
     const mocks = buildMocks();
-    const docA = mockDoc({ id: 'slo-a', datasourceId: 'ds-a', ruleGroupName: 'grpA' });
-    const docB = mockDoc({ id: 'slo-b', datasourceId: 'ds-b', ruleGroupName: 'grpB' });
+    const docA = mockDoc({ id: 'slo-a', datasourceId: 'ds-a', alertGroupName: 'grpA' });
+    const docB = mockDoc({ id: 'slo-b', datasourceId: 'ds-b', alertGroupName: 'grpB' });
     mocks.store.list.mockResolvedValue([docA, docB]);
     mocks.datasourceService.get.mockImplementation(async (id: string) => mockDatasource({ id }));
     mocks.ruler.listRuleGroups.mockImplementation(async (_c, ds, ns) => {
@@ -357,8 +356,8 @@ describe('SloReconciler — reconcileOnce', () => {
 
   it("ruler 5xx for one datasource doesn't kill the sweep for others", async () => {
     const mocks = buildMocks();
-    const docA = mockDoc({ id: 'slo-a', datasourceId: 'ds-a', ruleGroupName: 'grpA' });
-    const docB = mockDoc({ id: 'slo-b', datasourceId: 'ds-b', ruleGroupName: 'grpB' });
+    const docA = mockDoc({ id: 'slo-a', datasourceId: 'ds-a', alertGroupName: 'grpA' });
+    const docB = mockDoc({ id: 'slo-b', datasourceId: 'ds-b', alertGroupName: 'grpB' });
     mocks.store.list.mockResolvedValue([docA, docB]);
     mocks.datasourceService.get.mockImplementation(async (id: string) => mockDatasource({ id }));
     mocks.ruler.listRuleGroups.mockImplementation(async (_c, ds) => {
@@ -416,8 +415,8 @@ describe('SloReconciler — reconcileOnce', () => {
 
   it('reconcileOnce({ datasourceIds: ["ds-a"] }) only sweeps that datasource', async () => {
     const mocks = buildMocks();
-    const docA = mockDoc({ id: 'slo-a', datasourceId: 'ds-a', ruleGroupName: 'grpA' });
-    const docB = mockDoc({ id: 'slo-b', datasourceId: 'ds-b', ruleGroupName: 'grpB' });
+    const docA = mockDoc({ id: 'slo-a', datasourceId: 'ds-a', alertGroupName: 'grpA' });
+    const docB = mockDoc({ id: 'slo-b', datasourceId: 'ds-b', alertGroupName: 'grpB' });
     mocks.store.list.mockResolvedValue([docA, docB]);
     mocks.datasourceService.get.mockImplementation(async (id: string) => mockDatasource({ id }));
     mocks.ruler.listRuleGroups.mockResolvedValue([mockGroup('grpA')]);
@@ -447,7 +446,7 @@ describe('SloReconciler — reconcileOnce', () => {
 
   it('invariant: invalidate fires only on the sweep where a diff was observed', async () => {
     const mocks = buildMocks();
-    const doc = mockDoc({ id: 'slo-a', ruleGroupName: 'slo:a_suffix' });
+    const doc = mockDoc({ id: 'slo-a', alertGroupName: 'slo:a_suffix' });
     mocks.store.list.mockResolvedValue([doc]);
     // First sweep: rule missing. Second sweep: rule present (recovered).
     mocks.ruler.listRuleGroups
@@ -508,7 +507,7 @@ describe('SloReconciler — interval lifecycle', () => {
     const pending = new Promise<GeneratedRuleGroup[]>((r) => {
       resolveList = r;
     });
-    mocks.store.list.mockResolvedValue([mockDoc({ id: 'slo-a', ruleGroupName: 'grpA' })]);
+    mocks.store.list.mockResolvedValue([mockDoc({ id: 'slo-a', alertGroupName: 'grpA' })]);
     mocks.ruler.listRuleGroups.mockReturnValue(pending);
 
     const reconciler = makeReconciler(mocks, { intervalMs: 1000 });
@@ -540,7 +539,7 @@ describe('SloReconciler — interval lifecycle', () => {
     const pending = new Promise<GeneratedRuleGroup[]>((r) => {
       resolveList = r;
     });
-    mocks.store.list.mockResolvedValue([mockDoc({ id: 'slo-a', ruleGroupName: 'grpA' })]);
+    mocks.store.list.mockResolvedValue([mockDoc({ id: 'slo-a', alertGroupName: 'grpA' })]);
     mocks.ruler.listRuleGroups.mockReturnValue(pending);
 
     const reconciler = makeReconciler(mocks, { intervalMs: 1000 });
@@ -654,8 +653,8 @@ describe('W2.6 coverage audit', () => {
     // actualGroupNames, but the reconciler must not treat it as an orphan
     // of ds-B because the two namespaces are separate.
     const mocks = buildMocks();
-    const docA = mockDoc({ id: 'slo-a', datasourceId: 'ds-a', ruleGroupName: 'slo:a_suffix' });
-    const docB = mockDoc({ id: 'slo-b', datasourceId: 'ds-b', ruleGroupName: 'slo:b_suffix' });
+    const docA = mockDoc({ id: 'slo-a', datasourceId: 'ds-a', alertGroupName: 'slo:a_suffix' });
+    const docB = mockDoc({ id: 'slo-b', datasourceId: 'ds-b', alertGroupName: 'slo:b_suffix' });
     mocks.store.list.mockResolvedValue([docA, docB]);
     mocks.datasourceService.get.mockImplementation(async (id: string) => mockDatasource({ id }));
     mocks.ruler.listRuleGroups.mockImplementation(async (_c, ds, ns) => {

@@ -143,15 +143,7 @@ describe('SloService.delete — ruler 404 tolerance (W1.9)', () => {
 
     expect(ruler.deleteRuleGroup).toHaveBeenCalledTimes(1);
     expect(saved.has(doc.id)).toBe(false);
-    expect(result).toEqual({
-      deleted: true,
-      generatedRuleNames:
-        doc.status.provisioning.backend === 'prometheus'
-          ? doc.status.provisioning.generatedRuleNames
-          : [],
-    });
-    // And the names we returned are the ones the SO persisted, not some stub.
-    expect(result.generatedRuleNames.length).toBeGreaterThan(0);
+    expect(result).toEqual({ deleted: true });
   });
 
   it('ruler unreachable (non-404) → SloRulerError propagates and SO stays intact', async () => {

@@ -25,7 +25,6 @@ import {
   EuiBadge,
   EuiBasicTable,
   EuiBasicTableColumn,
-  EuiCodeBlock,
   EuiDescriptionList,
   EuiFlexGroup,
   EuiFlexItem,
@@ -247,22 +246,22 @@ interface ProvisioningBlockProps {
 }
 
 const ProvisioningBlock: React.FC<ProvisioningBlockProps> = ({ provisioning }) => {
+  const uniqueRecordingGroups = provisioning.recordingFingerprints
+    ? new Set(Object.values(provisioning.recordingFingerprints)).size
+    : 0;
   return (
-    <>
-      <EuiDescriptionList
-        compressed
-        type="column"
-        listItems={[
-          { title: 'Rule group', description: provisioning.ruleGroupName },
-          { title: 'Namespace', description: provisioning.rulerNamespace },
-          { title: 'Rule count', description: String(provisioning.generatedRuleNames.length) },
-        ]}
-      />
-      <EuiSpacer size="s" />
-      <EuiCodeBlock paddingSize="s" language="text" isCopyable overflowHeight={200}>
-        {provisioning.generatedRuleNames.join('\n')}
-      </EuiCodeBlock>
-    </>
+    <EuiDescriptionList
+      compressed
+      type="column"
+      listItems={[
+        { title: 'Alert group', description: provisioning.alertGroupName ?? '—' },
+        { title: 'Namespace', description: provisioning.rulerNamespace },
+        {
+          title: 'Recording groups',
+          description: `${uniqueRecordingGroups} shared`,
+        },
+      ]}
+    />
   );
 };
 

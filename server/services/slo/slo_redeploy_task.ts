@@ -221,9 +221,7 @@ export function createSloRedeployTask(deps: SloRedeployTaskDeps): SloRedeployTas
         updatedAt: now().toISOString(),
         provisioning: {
           backend: 'prometheus',
-          ruleGroupName: alertGroupName,
           rulerNamespace: namespace,
-          generatedRuleNames: annotatedAlert.rules.map((r) => r.name),
           recordingFingerprints,
           alertGroupName,
           needsRedeploy: false,
@@ -256,12 +254,10 @@ function pickRepresentative(
 }
 
 /**
- * Name of the legacy monolithic group the pre-migration SO carried under
- * `ruleGroupName`. Recomputed here rather than read straight off the SO
- * because the migration preserves the old name in `ruleGroupName` alongside
- * the new `alertGroupName` — they differ (`slo:<slug>_<suffix>` vs
- * `slo:alerts:<slug>_<suffix>`), and we need to target the old one
- * specifically.
+ * Name of the legacy monolithic group the pre-migration SO targeted. The
+ * migration carries no explicit field for this; we recompute it from spec +
+ * sloId so the redeploy can delete the old `slo:<slug>_<suffix>` group
+ * after upserting the new dedup-shape groups.
  */
 function legacyMonolithicGroupName(spec: SloSpec, workspaceId: string, sloId: string): string {
   const slug = slugifySloObjective(spec.name, 'group');

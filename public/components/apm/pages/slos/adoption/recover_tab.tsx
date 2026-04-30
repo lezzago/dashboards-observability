@@ -117,37 +117,6 @@ export const RecoverTab: React.FC<RecoverTabProps> = ({
       } else {
         next[key] = (
           <div data-test-subj={`sloAdoption-recoverTab-expanded-${c.sloId}`}>
-            {c.specIntegrity === 'mismatch' ? (
-              <>
-                <EuiCallOut
-                  color="warning"
-                  size="s"
-                  iconType="alert"
-                  title="Spec drift detected"
-                  data-test-subj={`sloAdoption-recoverTab-driftCallout-${c.sloId}`}
-                >
-                  The embedded spec hash does not match the recording rules. Recovery is disabled
-                  for this row — inspect the rules in your Prometheus-compatible tooling before
-                  deciding how to proceed.
-                </EuiCallOut>
-                <EuiSpacer size="s" />
-              </>
-            ) : null}
-            {c.specIntegrity === 'unsupported_schema' ? (
-              <>
-                <EuiCallOut
-                  color="danger"
-                  size="s"
-                  iconType="alert"
-                  title="Provenance schema not recognized"
-                  data-test-subj={`sloAdoption-recoverTab-unsupportedSchemaCallout-${c.sloId}`}
-                >
-                  The rule group carries a provenance version this plugin version can&apos;t parse.
-                  Upgrade the plugin or adopt manually.
-                </EuiCallOut>
-                <EuiSpacer size="s" />
-              </>
-            ) : null}
             <ReadOnlySpecPreview spec={c.spec} fingerprints={c.fingerprints} />
           </div>
         );

@@ -34,7 +34,7 @@ type FullDoc = SloDocument & { liveStatus: SloLiveStatus };
 function makeDoc(
   overrides: {
     liveStatusState?: SloHealthState;
-    generatedRuleNames?: string[];
+    recordingFingerprints?: Record<string, string>;
   } = {}
 ): FullDoc {
   const liveStatus: SloLiveStatus = {
@@ -108,13 +108,9 @@ function makeDoc(
       updatedBy: 'tester',
       provisioning: {
         backend: 'prometheus',
-        ruleGroupName: 'slo-api-availability',
+        alertGroupName: 'slo:alerts:slo-api-availability',
         rulerNamespace: 'slo-api-availability',
-        generatedRuleNames: overrides.generatedRuleNames ?? [
-          'slo:sli_error:ratio_rate_5m:abcd1234',
-          'slo:sli_error:ratio_rate_1h:abcd1234',
-          'slo:objectives:abcd1234',
-        ],
+        recordingFingerprints: overrides.recordingFingerprints ?? { 'obj-1': 'abcd1234' },
       },
     },
     liveStatus,
@@ -322,25 +318,18 @@ describe('SloDetailPage — rule-health callout', () => {
 });
 
 describe('SloDetailPage — Recording rules accordion', () => {
-  it('renders one code block per matching generated rule name', async () => {
+  it('renders one code block per recording window × unique fingerprint', async () => {
     const doc = makeDoc({
-      generatedRuleNames: [
-        'slo:sli_error:ratio_rate_5m:abcd1234',
-        'slo:sli_error:ratio_rate_1h:abcd1234',
-        'slo:sli_error:ratio_rate_6h:abcd1234',
-        'slo:objectives:abcd1234',
-        'slo:alerts:abcd1234',
-      ],
+      recordingFingerprints: { 'obj-1': 'abcd1234' },
     });
     renderPage({ get: jest.fn().mockResolvedValue(doc) });
 
     expect(await screen.findByTestId('slosDetailRecordingRulesAccordion')).toBeInTheDocument();
 
+    // 7 recording windows expand into 7 code blocks for a single fingerprint.
     const rules = [0, 1, 2].map((i) => screen.getByTestId(`slosDetailRecordingRule-${i}`));
-    expect(rules[0]).toHaveTextContent('slo:sli_error:ratio_rate_5m:abcd1234');
-    expect(rules[1]).toHaveTextContent('slo:sli_error:ratio_rate_1h:abcd1234');
-    expect(rules[2]).toHaveTextContent('slo:sli_error:ratio_rate_6h:abcd1234');
-    // Non-matching prefixes are filtered out when some match the prefix.
-    expect(screen.queryByTestId('slosDetailRecordingRule-3')).not.toBeInTheDocument();
+    expect(rules[0]).toHaveTextContent('slo:sli_error:ratio_rate_5m:sli_abcd1234');
+    expect(rules[1]).toHaveTextContent('slo:sli_error:ratio_rate_30m:sli_abcd1234');
+    expect(rules[2]).toHaveTextContent('slo:sli_error:ratio_rate_1h:sli_abcd1234');
   });
 });

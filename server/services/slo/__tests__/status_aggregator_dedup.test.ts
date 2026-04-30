@@ -26,11 +26,7 @@ import {
   expectedRuleGroupsFor,
 } from '../status_aggregator';
 import type { SloRuleHealthChecker, SloStatusAggregationContext } from '../status_aggregator';
-import type {
-  AlertingOSClient,
-  Datasource,
-  Logger,
-} from '../../../../common/types/alerting/types';
+import type { AlertingOSClient, Datasource, Logger } from '../../../../common/types/alerting/types';
 import type { SloDocument, SloSpec } from '../../../../common/slo/slo_types';
 
 function noopLogger(): Logger {
@@ -48,7 +44,11 @@ function ds(): Datasource {
   };
 }
 
-function dedupDoc(id: string, fps: Record<string, string>, specOverrides: Partial<SloSpec> = {}): SloDocument {
+function dedupDoc(
+  id: string,
+  fps: Record<string, string>,
+  specOverrides: Partial<SloSpec> = {}
+): SloDocument {
   const spec: SloSpec = {
     datasourceId: 'prom-ds-001',
     name: 'checkout availability',
@@ -93,9 +93,7 @@ function dedupDoc(id: string, fps: Record<string, string>, specOverrides: Partia
       updatedBy: 'tester',
       provisioning: {
         backend: 'prometheus',
-        ruleGroupName: `slo:alerts:checkout_group_${id}`,
         rulerNamespace: 'slo-generated-default',
-        generatedRuleNames: [],
         recordingFingerprints: fps,
         alertGroupName: `slo:alerts:checkout_group_${id}`,
         needsRedeploy: false,
@@ -134,7 +132,10 @@ function mockClient(
   };
 }
 
-function ctxDedup(client: AlertingOSClient, checker?: SloRuleHealthChecker): SloStatusAggregationContext {
+function ctxDedup(
+  client: AlertingOSClient,
+  checker?: SloRuleHealthChecker
+): SloStatusAggregationContext {
   return {
     client,
     workspaceId: 'default',
@@ -204,7 +205,9 @@ describe('DirectQueryStatusAggregator — dedup path (W3.9)', () => {
   it('rules_missing overlay still wins over sample derivation', async () => {
     const doc = dedupDoc('slo-a', { 'availability-99-9': 'abcdef0123456789' });
     const { client } = mockClient(() =>
-      instantForMetrics([{ name: 'slo:sli_error:ratio_rate_3d:sli_abcdef0123456789', ratio: 0.0002 }])
+      instantForMetrics([
+        { name: 'slo:sli_error:ratio_rate_3d:sli_abcdef0123456789', ratio: 0.0002 },
+      ])
     );
     const checker: SloRuleHealthChecker = {
       check: jest.fn().mockResolvedValue({
@@ -263,13 +266,4 @@ describe('expectedRuleGroupsFor — dedup fields (W3.9)', () => {
     expect(recs).toEqual(['slo:rec:cccccccccccccccc']);
   });
 
-  it('falls back to ruleGroupName when dedup fields are absent (pre-migration docs)', () => {
-    const doc = dedupDoc('slo-legacy', { o: 'aaaaaaaaaaaaaaaa' });
-    if (doc.status.provisioning.backend === 'prometheus') {
-      delete doc.status.provisioning.recordingFingerprints;
-      delete doc.status.provisioning.alertGroupName;
-      doc.status.provisioning.ruleGroupName = 'slo:legacy_monolithic';
-    }
-    expect(expectedRuleGroupsFor(doc)).toEqual(['slo:legacy_monolithic']);
-  });
 });

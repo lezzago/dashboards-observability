@@ -14,7 +14,7 @@
  *   - `detectOrphanDiff` transitively through the reconciler (NOT mocked).
  *   - The real `InMemoryDatasourceService`.
  *   - The real `SloService` backed by `InMemorySloStore`, seeded via
- *     `SloService.create(...)` so `status.provisioning.ruleGroupName` matches
+ *     `SloService.create(...)` so `status.provisioning.alertGroupName` matches
  *     what `deriveExpectedGroups` returns inside the reconciler.
  *   - A `FakeRulerClient` backed by a per-namespace in-memory Map with
  *     error-injection hooks — modelled on the class in
@@ -191,8 +191,8 @@ async function seedSlo(h: Harness, datasourceId: string, specOverrides: Partial<
   const spec = validSpec({ datasourceId, ...specOverrides });
   const doc = await h.svc.create({ spec }, 'alice', deploy);
   const groupName =
-    doc.status.provisioning.backend === 'prometheus' && doc.status.provisioning.ruleGroupName
-      ? doc.status.provisioning.ruleGroupName
+    doc.status.provisioning.backend === 'prometheus' && doc.status.provisioning.alertGroupName
+      ? doc.status.provisioning.alertGroupName
       : '';
   return { doc, groupName, deploy };
 }

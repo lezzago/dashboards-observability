@@ -19,20 +19,17 @@ import {
 } from '../../../../common/slo/slo_promql_generator';
 import type { RulerClient } from '../ruler_client';
 import type { SloRuleRefStore } from '../slo_rule_ref_store';
-import type {
-  AlertingOSClient,
-  Datasource,
-  Logger,
-} from '../../../../common/types/alerting/types';
-import type {
-  GeneratedRuleGroup,
-  SloDocument,
-  SloSpec,
-} from '../../../../common/slo/slo_types';
+import type { AlertingOSClient, Datasource, Logger } from '../../../../common/types/alerting/types';
+import type { GeneratedRuleGroup, SloDocument, SloSpec } from '../../../../common/slo/slo_types';
 import { InMemoryDatasourceService } from '../../alerting/datasource_service';
 
 function noopLogger(): Logger {
-  return { info: () => undefined, warn: () => undefined, error: () => undefined, debug: () => undefined };
+  return {
+    info: () => undefined,
+    warn: () => undefined,
+    error: () => undefined,
+    debug: () => undefined,
+  };
 }
 
 function validSpec(overrides: Partial<SloSpec> = {}): SloSpec {
@@ -73,8 +70,10 @@ function validSpec(overrides: Partial<SloSpec> = {}): SloSpec {
 
 /**
  * Build a migrated-but-not-yet-redeployed SO. Mirrors the shape `slo_v2`
- * leaves behind: new fields populated, `needsRedeploy: true`, old
- * `ruleGroupName` still pointing at the monolithic group.
+ * leaves behind: dedup fields populated, `needsRedeploy: true`. The
+ * redeploy task still targets the legacy monolithic group for deletion;
+ * the group name is recomputed inside the task from spec + workspaceId +
+ * sloId (no explicit field carries it).
  */
 function migratedDoc(id: string, spec: SloSpec, workspaceId: string): SloDocument {
   const fingerprints: Record<string, string> = {};
@@ -95,9 +94,7 @@ function migratedDoc(id: string, spec: SloSpec, workspaceId: string): SloDocumen
       updatedBy: 'migrate',
       provisioning: {
         backend: 'prometheus',
-        ruleGroupName: `slo:${slug}_${suffix}`,
         rulerNamespace: `slo-generated-${workspaceId}`,
-        generatedRuleNames: [],
         recordingFingerprints: fingerprints,
         alertGroupName: `slo:alerts:${slug}_${suffix}`,
         needsRedeploy: true,
@@ -219,11 +216,7 @@ class FakeRefStore {
       wasZero,
     };
   }
-  async decrementRef(input: {
-    workspaceId: string;
-    datasourceId: string;
-    fingerprint: string;
-  }) {
+  async decrementRef(input: { workspaceId: string; datasourceId: string; fingerprint: string }) {
     const k = `${input.workspaceId}|${input.datasourceId}|${input.fingerprint}`;
     const e = this.refs.get(k);
     if (!e) return { doc: null, droppedToZero: false, underflow: true };
@@ -311,9 +304,9 @@ describe('SloRedeployTask (W3.10)', () => {
 
     // needsRedeploy cleared on SO.
     const after = await store.get('slo-a');
-    expect(after?.status.provisioning.backend === 'prometheus' && after.status.provisioning.needsRedeploy).toBe(
-      false
-    );
+    expect(
+      after?.status.provisioning.backend === 'prometheus' && after.status.provisioning.needsRedeploy
+    ).toBe(false);
     expect(refStore.refcount(workspaceId, spec.datasourceId, fp)).toBe(1);
   });
 

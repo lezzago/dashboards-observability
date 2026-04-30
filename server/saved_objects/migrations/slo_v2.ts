@@ -7,19 +7,11 @@
  * `slo-definition` v2 migration (Phase 3 W3.5).
  *
  * Rewrites `status.provisioning` so existing SLOs gain the dedup-era fields
- * (`recordingFingerprints`, `alertGroupName`, `needsRedeploy`) while
- * preserving the pre-Phase-3 `ruleGroupName` during its deprecation window.
- * See SLO_RULE_DEDUP_PLAN.md "Breaking changes accepted" — the migration
- * is additive and safe to run unconditionally.
- *
- * Orchestrator deviation: the plan calls for `ruleGroupName` to be removed,
- * but the feature flag `observability.slo.ruleDedup.enabled` lets operators
- * fall back to the single-group path. We keep `ruleGroupName` populated so
- * the flag-off codepath keeps working; a follow-up workstream drops it once
- * the flag is permanently on.
- *
- * This migration runs unconditionally — it does NOT consult the feature
- * flag. The new fields are additive; the old fields stay where they are.
+ * (`recordingFingerprints`, `alertGroupName`, `needsRedeploy`). See
+ * SLO_RULE_DEDUP_PLAN.md "Breaking changes accepted" — the migration is
+ * additive (it only adds fields; whatever was in `provisioning` is spread
+ * through unchanged) and safe to run unconditionally. It does NOT consult
+ * the feature flag.
  *
  * Workspace scoping: Phase 3 uses `spec.datasourceId` as the workspace
  * discriminator (`workspaceId === datasourceId`). Same assumption as the

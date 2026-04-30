@@ -649,11 +649,6 @@ export function generateSloRuleGroup(
   };
 }
 
-/** Compute the `generatedRuleNames[]` array for a rule group. Used by the service layer. */
-export function extractGeneratedRuleNames(group: GeneratedRuleGroup): string[] {
-  return group.rules.map((r) => r.name);
-}
-
 // ============================================================================
 // Phase 3 (W3.7) — dedup-era split generation
 //

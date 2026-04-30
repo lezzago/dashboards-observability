@@ -203,7 +203,7 @@ describe('SloService.delete — tombstone (W4.1)', () => {
       const { svc, store, tombstones, deploy } = makeHarness({ dedup: false });
       const doc = await svc.create({ spec: validSpec() }, 'alice', deploy);
       if (doc.status.provisioning.backend === 'prometheus') {
-        doc.status.provisioning.ruleGroupName = '';
+        doc.status.provisioning.alertGroupName = '';
       }
       await store.save(doc);
 

@@ -38,7 +38,7 @@ import type {
 } from './slo_types';
 import {
   generateSloRuleGroup,
-  extractGeneratedRuleNames,
+  RECORDING_WINDOWS,
   SLO_RULER_NAMESPACE,
   generateRecordingGroupForFingerprint,
   generateAlertGroupFor,
@@ -528,9 +528,7 @@ export class SloService {
         updatedBy: createdBy,
         provisioning: {
           backend: 'prometheus',
-          ruleGroupName: '',
           rulerNamespace: namespace,
-          generatedRuleNames: [],
         },
       },
     };
@@ -539,8 +537,7 @@ export class SloService {
       workspaceId: deploy?.workspaceId,
     });
     if (doc.status.provisioning.backend === 'prometheus') {
-      doc.status.provisioning.ruleGroupName = group.groupName;
-      doc.status.provisioning.generatedRuleNames = extractGeneratedRuleNames(group);
+      doc.status.provisioning.alertGroupName = group.groupName;
     }
 
     // Ruler-first, SO-second (memo §Dual-write atomicity). An SloRulerError
@@ -689,9 +686,7 @@ export class SloService {
         updatedBy: createdBy,
         provisioning: {
           backend: 'prometheus',
-          ruleGroupName: alertGroupName,
           rulerNamespace: namespace,
-          generatedRuleNames: [],
           recordingFingerprints,
           alertGroupName,
           needsRedeploy: false,
@@ -707,9 +702,6 @@ export class SloService {
       this.pluginVersion,
       now
     );
-    if (doc.status.provisioning.backend === 'prometheus') {
-      doc.status.provisioning.generatedRuleNames = extractGeneratedRuleNames(alertGroup);
-    }
     try {
       await deploy.ruler.upsertRuleGroup(deploy.client, deploy.datasource, namespace, alertGroup);
     } catch (err) {
@@ -811,8 +803,7 @@ export class SloService {
       workspaceId: deploy?.workspaceId,
     });
     if (updated.status.provisioning.backend === 'prometheus') {
-      updated.status.provisioning.ruleGroupName = group.groupName;
-      updated.status.provisioning.generatedRuleNames = extractGeneratedRuleNames(group);
+      updated.status.provisioning.alertGroupName = group.groupName;
     }
 
     if (deploy) {
@@ -957,7 +948,6 @@ export class SloService {
           existing.status.provisioning.backend === 'prometheus'
             ? {
                 ...existing.status.provisioning,
-                ruleGroupName: alertGroupName,
                 rulerNamespace: namespace,
                 recordingFingerprints: newFingerprints,
                 alertGroupName,
@@ -977,9 +967,6 @@ export class SloService {
       existing.status.createdAt,
       now
     );
-    if (updated.status.provisioning.backend === 'prometheus') {
-      updated.status.provisioning.generatedRuleNames = extractGeneratedRuleNames(alertGroup);
-    }
     try {
       await deploy.ruler.upsertRuleGroup(deploy.client, deploy.datasource, namespace, alertGroup);
     } catch (err) {
@@ -1035,9 +1022,9 @@ export class SloService {
   async delete(
     id: string,
     deploy?: SloDeployContext
-  ): Promise<{ deleted: boolean; generatedRuleNames: string[] }> {
+  ): Promise<{ deleted: boolean }> {
     const existing = await this.store.get(id);
-    if (!existing) return { deleted: false, generatedRuleNames: [] };
+    if (!existing) return { deleted: false };
 
     // Phase 3 dedup path: tear down the per-SLO alert group, decrement refs,
     // but never synchronously delete a shared recording group — the
@@ -1052,7 +1039,7 @@ export class SloService {
     const provisioning = existing.status.provisioning;
 
     const needsRulerTeardown =
-      provisioning.backend === 'prometheus' && !!provisioning.ruleGroupName;
+      provisioning.backend === 'prometheus' && !!provisioning.alertGroupName;
 
     // Ruler-first, SO-second. If the ruler delete fails (network, auth, Cortex
     // 5xx), the SO stays so the user can retry — better than silently leaking
@@ -1065,16 +1052,13 @@ export class SloService {
       if (!deploy) {
         throw new SloRulerTeardownRequiredError(id, existing.spec.datasourceId);
       }
-      // `needsRulerTeardown` gated on the prometheus branch + a non-empty
-      // ruleGroupName; re-narrow explicitly because the branch predicate
-      // doesn't propagate through an intermediate boolean.
-      if (provisioning.backend === 'prometheus' && provisioning.ruleGroupName) {
+      if (provisioning.backend === 'prometheus' && provisioning.alertGroupName) {
         const namespace = provisioning.rulerNamespace || SLO_RULER_NAMESPACE;
         await deploy.ruler.deleteRuleGroup(
           deploy.client,
           deploy.datasource,
           namespace,
-          provisioning.ruleGroupName
+          provisioning.alertGroupName
         );
       }
     }
@@ -1086,10 +1070,8 @@ export class SloService {
     // tombstone absence is a UX degradation, not a data-integrity failure.
     await this.writeTombstone(existing, deploy?.workspaceId);
 
-    const names = provisioning.backend === 'prometheus' ? provisioning.generatedRuleNames : [];
-
     this.logger.info(`Deleted SLO: ${id}`);
-    return { deleted: true, generatedRuleNames: names };
+    return { deleted: true };
   }
 
   // ---------- delete (dedup path, W3.8) ----------
@@ -1116,9 +1098,9 @@ export class SloService {
   private async deleteDedup(
     existing: SloDocument,
     deploy: SloDeployContext
-  ): Promise<{ deleted: boolean; generatedRuleNames: string[] }> {
+  ): Promise<{ deleted: boolean }> {
     if (existing.status.provisioning.backend !== 'prometheus') {
-      return { deleted: false, generatedRuleNames: [] };
+      return { deleted: false };
     }
     const provisioning = existing.status.provisioning;
     const namespace = provisioning.rulerNamespace || sloRulerNamespaceFor(deploy.workspaceId);
@@ -1155,7 +1137,7 @@ export class SloService {
     await this.writeTombstone(existing, deploy.workspaceId);
 
     this.logger.info(`Deleted SLO (dedup): ${existing.id}`);
-    return { deleted: true, generatedRuleNames: provisioning.generatedRuleNames };
+    return { deleted: true };
   }
 
   // ---------- repair (W1.5) ----------
@@ -1165,9 +1147,10 @@ export class SloService {
    *
    * Algorithm:
    *   1. Load the SO; throw `SloNotFoundError` if missing (route → 404).
-   *   2. Compute expected groups from `status.provisioning`. Phase 1 stores a
-   *      single `ruleGroupName` — wrap it in a one-element array. The shape
-   *      generalizes directly to Phase 3's recording/alert split.
+   *   2. Compute expected groups from `status.provisioning` via
+   *      `deriveExpectedGroups` — dedup shape returns one recording group
+   *      per unique fingerprint plus the per-SLO alert group; legacy
+   *      (flag-off) shape returns just the alert group.
    *   3. Probe current rule health via the injected checker.
    *   4. If healthy (`state === 'ok'`), return `{ repaired: false, health }`
    *      without touching the ruler. Idempotent — repeat calls are cheap.
@@ -1654,7 +1637,6 @@ export class SloService {
         provisioning: {
           backend: 'prometheus',
           rulerNamespace: namespace,
-          generatedRuleNames: match.group.rules.map((r) => r.name),
           recordingFingerprints,
           alertGroupName,
           needsRedeploy: false,
@@ -1780,9 +1762,7 @@ export class SloService {
         updatedBy: 'preview',
         provisioning: {
           backend: 'prometheus',
-          ruleGroupName: '',
           rulerNamespace: SLO_RULER_NAMESPACE,
-          generatedRuleNames: [],
         },
       },
     };
@@ -1960,8 +1940,9 @@ export class SloService {
    *   - 'disabled' when spec.enabled is false
    *   - 'no_data' otherwise, with a full error budget and no measurements
    *
-   * Rule count is derived from the persisted generatedRuleNames[] so the
-   * listing UI can still show "X rules provisioned" without hitting the ruler.
+   * Rule count is derived from the spec shape (unique recording fingerprints
+   * × recording windows + one alert per objective) so the listing UI can
+   * still show "X rules provisioned" without hitting the ruler.
    */
   private computeStatus(doc: SloDocument): SloLiveStatus {
     const state: SloHealthState = doc.spec.enabled ? 'no_data' : 'disabled';
@@ -1974,16 +1955,12 @@ export class SloService {
       errorBudgetRemaining: 1,
       state,
     }));
-    const ruleCount =
-      doc.status.provisioning.backend === 'prometheus'
-        ? doc.status.provisioning.generatedRuleNames.length
-        : 0;
     return {
       sloId: doc.id,
       objectives: objectiveStatuses,
       state,
       firingCount: 0,
-      ruleCount,
+      ruleCount: deriveRuleCount(doc),
       computedAt: new Date().toISOString(),
     };
   }
@@ -2083,33 +2060,25 @@ function normalizeSpec<T extends Partial<SloSpec>>(spec: T): T {
 }
 
 /**
- * Derive the list of ruler group names an SLO expects to see on the ruler.
- *
- * Phase 1 stores a single `ruleGroupName`; we wrap it in a one-element array
- * so the rule-health probe (designed for arbitrary-length expected sets) can
- * consume it directly. Phase 3 dedup splits into one shared recording group
- * per fingerprint plus a per-SLO alert group — both shapes are returned from
- * the union of `recordingFingerprints` + `alertGroupName` with a fallback to
- * `ruleGroupName` when the dedup fields are absent (pre-migration docs and
- * flag-off path).
- *
- * Non-prometheus backends (reserved) return [] — nothing to probe.
- */
-/**
  * Phase 3 dedup predicate — mirrors the gate the `delete`/`update` paths use.
- * A dedup-shape SO has either `recordingFingerprints` or `alertGroupName`
- * populated by `createDedup` / the slo_v2 migration. Legacy (flag-off /
- * pre-migration) SOs have neither and fall through to the single-group path.
+ * A dedup-shape SO has `recordingFingerprints` populated by `createDedup` /
+ * the slo_v2 migration. Legacy (flag-off) SOs don't, and fall through to the
+ * single-group path keyed on `alertGroupName` alone.
  */
 function isDedupSo(doc: SloDocument): boolean {
   if (doc.status.provisioning.backend !== 'prometheus') return false;
-  const p = doc.status.provisioning;
-  return (
-    p.recordingFingerprints !== undefined ||
-    (typeof p.alertGroupName === 'string' && p.alertGroupName.length > 0)
-  );
+  return doc.status.provisioning.recordingFingerprints !== undefined;
 }
 
+/**
+ * Derive the list of ruler group names an SLO expects to see on the ruler.
+ *
+ * Phase 3 dedup: one shared recording group per unique fingerprint plus the
+ * per-SLO `alertGroupName`. Legacy (flag-off) shape carries only
+ * `alertGroupName` (populated with the monolithic group name at create time).
+ *
+ * Non-prometheus backends (reserved) return [] — nothing to probe.
+ */
 export function deriveExpectedGroups(doc: SloDocument): string[] {
   if (doc.status.provisioning.backend !== 'prometheus') return [];
   const p = doc.status.provisioning;
@@ -2121,11 +2090,27 @@ export function deriveExpectedGroups(doc: SloDocument): string[] {
   }
   if (p.alertGroupName) {
     names.push(p.alertGroupName);
-  } else if (p.ruleGroupName) {
-    // Legacy (flag-off) path — single monolithic group.
-    names.push(p.ruleGroupName);
   }
   return names;
+}
+
+/**
+ * Count of rules provisioned for this SLO. Derived from the SLI/objective
+ * shape (not the ruler) so listing pages can render without a ruler round
+ * trip. Dedup shape: unique recording fingerprints × recording windows, plus
+ * one alert per objective. Legacy shape: one alert per objective (the
+ * monolithic group is not fingerprint-sharded so we conservatively count
+ * objectives only). Non-prometheus backends return 0.
+ */
+function deriveRuleCount(doc: SloDocument): number {
+  if (doc.status.provisioning.backend !== 'prometheus') return 0;
+  const p = doc.status.provisioning;
+  const objectiveCount = Math.max(doc.spec.objectives.length, 1);
+  if (p.recordingFingerprints) {
+    const uniqueFps = new Set(Object.values(p.recordingFingerprints)).size;
+    return uniqueFps * RECORDING_WINDOWS.length + objectiveCount;
+  }
+  return objectiveCount;
 }
 
 /**

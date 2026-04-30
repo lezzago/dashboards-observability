@@ -298,7 +298,6 @@ function seedRuler(
       provisioning: {
         backend: 'prometheus',
         rulerNamespace: namespace,
-        generatedRuleNames: [],
         recordingFingerprints: fingerprints,
         alertGroupName: dedupAlertGroupName(opts.spec.name, opts.workspaceId, opts.sloId),
       },
@@ -439,7 +438,6 @@ describe('SloService.recover (W4.4)', () => {
         provisioning: {
           backend: 'prometheus',
           rulerNamespace: 'slo-generated-ws-001',
-          generatedRuleNames: [],
         },
       },
     });

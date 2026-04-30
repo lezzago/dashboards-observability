@@ -99,9 +99,8 @@ function baseSlo(): SloDocument {
       updatedBy: 'me',
       provisioning: {
         backend: 'prometheus',
-        ruleGroupName: 'rg',
+        alertGroupName: 'rg',
         rulerNamespace: 'ns',
-        generatedRuleNames: [],
       },
     },
   };

@@ -102,9 +102,8 @@ function makeDoc(overrides: Partial<SloSpec> = {}, id = 'slo-1'): SloDocument {
       updatedBy: 'tester',
       provisioning: {
         backend: 'prometheus',
-        ruleGroupName: 'slo:group_aaaaaaaa',
+        alertGroupName: 'slo:group_aaaaaaaa',
         rulerNamespace: 'slo-generated-default',
-        generatedRuleNames: ['slo:sli_error:ratio_rate_5m:x_aaaaaaaa'],
       },
     },
   };
@@ -537,15 +536,15 @@ describe('NoopStatusAggregator', () => {
 // ============================================================================
 
 describe('expectedRuleGroupsFor', () => {
-  it('returns [ruleGroupName] for prometheus-backed docs with a name', () => {
+  it('returns [alertGroupName] for prometheus-backed docs with a name', () => {
     const doc = makeDoc();
     expect(expectedRuleGroupsFor(doc)).toEqual(['slo:group_aaaaaaaa']);
   });
 
-  it('returns [] when the rule group name is empty', () => {
+  it('returns [] when the alert group name is empty', () => {
     const doc = makeDoc();
     if (doc.status.provisioning.backend === 'prometheus') {
-      doc.status.provisioning.ruleGroupName = '';
+      doc.status.provisioning.alertGroupName = '';
     }
     expect(expectedRuleGroupsFor(doc)).toEqual([]);
   });
@@ -705,10 +704,10 @@ describe('W1.6 rule-health priority merge', () => {
     );
   });
 
-  it('expectedGroups passed to the checker comes from provisioning.ruleGroupName', async () => {
+  it('expectedGroups passed to the checker comes from provisioning.alertGroupName', async () => {
     const doc = makeDoc();
     if (doc.status.provisioning.backend === 'prometheus') {
-      doc.status.provisioning.ruleGroupName = 'slo:foo_123';
+      doc.status.provisioning.alertGroupName = 'slo:foo_123';
     }
     const { client } = mockClient({
       query: () =>

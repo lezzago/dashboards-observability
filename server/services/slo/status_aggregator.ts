@@ -57,6 +57,7 @@ import {
   dedupRecordingRuleName,
   findClosestRecordingWindow,
   parseDurationToMs,
+  RECORDING_WINDOWS,
 } from '../../../common/slo/slo_promql_generator';
 
 // ============================================================================
@@ -138,9 +139,9 @@ export interface SloStatusAggregator {
 
 /**
  * Offline fallback. Mirrors the W1.2 stub semantics: `disabled` when
- * spec.enabled is false, `no_data` otherwise. The rule count is taken from
- * `status.provisioning.generatedRuleNames` so the listing can still show
- * "X rules provisioned".
+ * spec.enabled is false, `no_data` otherwise. The rule count is derived
+ * from the spec's recording fingerprints + objective count so the listing
+ * can still show "X rules provisioned".
  *
  * This is what `SloService` falls back to when no aggregator is configured
  * (or when the DirectQuery one catastrophically rejects).
@@ -400,16 +401,12 @@ export class DirectQueryStatusAggregator implements SloStatusAggregator {
       objectiveStatuses
     );
 
-    const ruleCount =
-      doc.status.provisioning.backend === 'prometheus'
-        ? doc.status.provisioning.generatedRuleNames.length
-        : 0;
     return {
       sloId: doc.id,
       objectives: objectiveStatuses,
       state: topState,
       firingCount,
-      ruleCount,
+      ruleCount: deriveRuleCount(doc),
       computedAt: new Date().toISOString(),
       lastEvaluatedAt: lastEvalMs ? new Date(lastEvalMs).toISOString() : undefined,
     };
@@ -660,10 +657,7 @@ function noDataStatus(doc: SloDocument): SloLiveStatus {
     objectives: doc.spec.objectives.map((o) => emptyObjectiveStatus(o, doc)),
     state: 'no_data',
     firingCount: 0,
-    ruleCount:
-      doc.status.provisioning.backend === 'prometheus'
-        ? doc.status.provisioning.generatedRuleNames.length
-        : 0,
+    ruleCount: deriveRuleCount(doc),
     computedAt: new Date().toISOString(),
   };
 }
@@ -681,12 +675,25 @@ function disabledStatus(doc: SloDocument): SloLiveStatus {
     })),
     state: 'disabled',
     firingCount: 0,
-    ruleCount:
-      doc.status.provisioning.backend === 'prometheus'
-        ? doc.status.provisioning.generatedRuleNames.length
-        : 0,
+    ruleCount: deriveRuleCount(doc),
     computedAt: new Date().toISOString(),
   };
+}
+
+/**
+ * Count of rules provisioned for this SLO, derived from spec shape so the
+ * listing UI can render without a ruler round trip. Mirrors the helper in
+ * `slo_service.ts`; both use the same RECORDING_WINDOWS constant.
+ */
+function deriveRuleCount(doc: SloDocument): number {
+  if (doc.status.provisioning.backend !== 'prometheus') return 0;
+  const p = doc.status.provisioning;
+  const objectiveCount = Math.max(doc.spec.objectives.length, 1);
+  if (p.recordingFingerprints) {
+    const uniqueFps = new Set(Object.values(p.recordingFingerprints)).size;
+    return uniqueFps * RECORDING_WINDOWS.length + objectiveCount;
+  }
+  return objectiveCount;
 }
 
 // Values sometimes arrive as NaN (dividing by zero rate on a scraped-once
@@ -783,9 +790,9 @@ function errMsg(err: unknown): string {
  * Derive the list of rule-group names the ruler is expected to serve for
  * this SLO.
  *
- * Phase 1: one monolithic group per SLO (`ruleGroupName`).
- * Phase 3 dedup: one shared recording group per unique fingerprint
- * (`slo:rec:<fp>`) plus one per-SLO alert group (`alertGroupName`).
+ * Dedup shape: one shared recording group per unique fingerprint
+ * (`slo:rec:<fp>`) plus one per-SLO alert group (`alertGroupName`). Legacy
+ * (flag-off) shape carries only `alertGroupName`.
  *
  * Returns an empty array when there's nothing to probe (non-prometheus
  * backend, or neither shape populated).
@@ -801,8 +808,6 @@ export function expectedRuleGroupsFor(doc: SloDocument): string[] {
   }
   if (p.alertGroupName) {
     names.push(p.alertGroupName);
-  } else if (p.ruleGroupName) {
-    names.push(p.ruleGroupName);
   }
   return names;
 }

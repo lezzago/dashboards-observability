@@ -165,7 +165,7 @@ describe('handleRepairSLO', () => {
     ruler.upsertRuleGroup.mockClear();
     const groups =
       doc.status.provisioning.backend === 'prometheus'
-        ? [doc.status.provisioning.ruleGroupName ?? '']
+        ? [doc.status.provisioning.alertGroupName ?? '']
         : [];
     const health = makeHealth([missingReport(groups), okReport(groups)]);
 
@@ -193,7 +193,7 @@ describe('handleRepairSLO', () => {
     ruler.upsertRuleGroup.mockClear();
     const groups =
       doc.status.provisioning.backend === 'prometheus'
-        ? [doc.status.provisioning.ruleGroupName ?? '']
+        ? [doc.status.provisioning.alertGroupName ?? '']
         : [];
     const health = makeHealth([okReport(groups)]);
 
@@ -229,7 +229,7 @@ describe('handleRepairSLO', () => {
     const doc = await svc.create({ spec: validSpec() }, 'alice', deploy);
     const groups =
       doc.status.provisioning.backend === 'prometheus'
-        ? [doc.status.provisioning.ruleGroupName ?? '']
+        ? [doc.status.provisioning.alertGroupName ?? '']
         : [];
     const health = makeHealth([
       {
@@ -276,7 +276,7 @@ describe('handleRepairSLO', () => {
     const doc = await svc.create({ spec: validSpec() }, 'alice', makeDeploy(makeRuler()));
     const groups =
       doc.status.provisioning.backend === 'prometheus'
-        ? [doc.status.provisioning.ruleGroupName ?? '']
+        ? [doc.status.provisioning.alertGroupName ?? '']
         : [];
     const health = makeHealth([missingReport(groups)]);
 
@@ -300,7 +300,7 @@ describe('handleGetRuleHealth', () => {
     const doc = await svc.create({ spec: validSpec() }, 'alice', deploy);
     const groups =
       doc.status.provisioning.backend === 'prometheus'
-        ? [doc.status.provisioning.ruleGroupName ?? '']
+        ? [doc.status.provisioning.alertGroupName ?? '']
         : [];
     const health = makeHealth([okReport(groups)]);
 
@@ -330,7 +330,7 @@ describe('handleGetRuleHealth', () => {
     const doc = await svc.create({ spec: validSpec() }, 'alice', deploy);
     const groups =
       doc.status.provisioning.backend === 'prometheus'
-        ? [doc.status.provisioning.ruleGroupName ?? '']
+        ? [doc.status.provisioning.alertGroupName ?? '']
         : [];
     const health = makeHealth([missingReport(groups)]);
 

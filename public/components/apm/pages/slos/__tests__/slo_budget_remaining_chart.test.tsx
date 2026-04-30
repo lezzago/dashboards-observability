@@ -89,9 +89,8 @@ function makeSlo(
       updatedBy: 'me',
       provisioning: {
         backend: 'prometheus',
-        ruleGroupName: 'rg',
+        alertGroupName: 'rg',
         rulerNamespace: 'ns',
-        generatedRuleNames: [],
       },
     },
     liveStatus: {

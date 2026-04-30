@@ -66,16 +66,6 @@ function makeInitial(): OrphanListResponse {
       makeCandidate({ sloId: 'ok-1', spec: makeSpec('Ok One') }),
       makeCandidate({ sloId: 'ok-2', spec: makeSpec('Ok Two') }),
       makeCandidate({
-        sloId: 'mismatch-1',
-        spec: makeSpec('Drift One'),
-        specIntegrity: 'mismatch',
-      }),
-      makeCandidate({
-        sloId: 'unsupported-1',
-        spec: makeSpec('Unknown Schema One'),
-        specIntegrity: 'unsupported_schema',
-      }),
-      makeCandidate({
         sloId: 'tomb-1',
         spec: makeSpec('Tombstoned One'),
         tombstoned: true,
@@ -133,8 +123,6 @@ describe('RecoverTab', () => {
     expect(screen.getByTestId('sloAdoption-recoverTab-table')).toBeInTheDocument();
     expect(screen.getByText('Ok One')).toBeInTheDocument();
     expect(screen.getByText('Ok Two')).toBeInTheDocument();
-    expect(screen.getByText('Drift One')).toBeInTheDocument();
-    expect(screen.getByText('Unknown Schema One')).toBeInTheDocument();
     expect(screen.getByText('Tombstoned One')).toBeInTheDocument();
     expect(screen.getByTestId('sloAdoption-recoverTab-unknownsAccordion')).toBeInTheDocument();
   });
@@ -172,22 +160,6 @@ describe('RecoverTab', () => {
         acknowledgeTombstone: true,
       });
     });
-  });
-
-  it('disables the Recover button for mismatch rows', () => {
-    renderTab(makeApiClient());
-    const btn = screen.getByTestId(
-      'sloAdoption-recoverTab-recoverButton-mismatch-1'
-    ) as HTMLButtonElement;
-    expect(btn).toBeDisabled();
-  });
-
-  it('disables the Recover button for unsupported_schema rows', () => {
-    renderTab(makeApiClient());
-    const btn = screen.getByTestId(
-      'sloAdoption-recoverTab-recoverButton-unsupported-1'
-    ) as HTMLButtonElement;
-    expect(btn).toBeDisabled();
   });
 
   it('dismisses a row and restores it via the Show dismissed toggle', async () => {

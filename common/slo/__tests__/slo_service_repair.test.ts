@@ -202,8 +202,8 @@ describe('SloService.repair (W1.5)', () => {
     ruler.upsertRuleGroup.mockClear();
 
     const expected = [
-      doc.status.provisioning.backend === 'prometheus' && doc.status.provisioning.ruleGroupName
-        ? doc.status.provisioning.ruleGroupName
+      doc.status.provisioning.backend === 'prometheus' && doc.status.provisioning.alertGroupName
+        ? doc.status.provisioning.alertGroupName
         : '',
     ];
     const health = makeHealthProbe([okReport(expected)]);
@@ -227,8 +227,8 @@ describe('SloService.repair (W1.5)', () => {
     ruler.upsertRuleGroup.mockClear();
 
     const expected = [
-      doc.status.provisioning.backend === 'prometheus' && doc.status.provisioning.ruleGroupName
-        ? doc.status.provisioning.ruleGroupName
+      doc.status.provisioning.backend === 'prometheus' && doc.status.provisioning.alertGroupName
+        ? doc.status.provisioning.alertGroupName
         : '',
     ];
     const health = makeHealthProbe([missingReport(expected), okReport(expected)]);
@@ -256,8 +256,8 @@ describe('SloService.repair (W1.5)', () => {
     ruler.upsertRuleGroup.mockClear();
 
     const expected = [
-      doc.status.provisioning.backend === 'prometheus' && doc.status.provisioning.ruleGroupName
-        ? doc.status.provisioning.ruleGroupName
+      doc.status.provisioning.backend === 'prometheus' && doc.status.provisioning.alertGroupName
+        ? doc.status.provisioning.alertGroupName
         : '',
     ];
     const health = makeHealthProbe([partialReport(expected, []), okReport(expected)]);
@@ -277,8 +277,8 @@ describe('SloService.repair (W1.5)', () => {
     ruler.upsertRuleGroup.mockClear();
 
     const expected = [
-      doc.status.provisioning.backend === 'prometheus' && doc.status.provisioning.ruleGroupName
-        ? doc.status.provisioning.ruleGroupName
+      doc.status.provisioning.backend === 'prometheus' && doc.status.provisioning.alertGroupName
+        ? doc.status.provisioning.alertGroupName
         : '',
     ];
     const health = makeHealthProbe([unreachableReport(expected)]);
@@ -298,8 +298,8 @@ describe('SloService.repair (W1.5)', () => {
     ruler.upsertRuleGroup.mockClear();
 
     const expected = [
-      doc.status.provisioning.backend === 'prometheus' && doc.status.provisioning.ruleGroupName
-        ? doc.status.provisioning.ruleGroupName
+      doc.status.provisioning.backend === 'prometheus' && doc.status.provisioning.alertGroupName
+        ? doc.status.provisioning.alertGroupName
         : '',
     ];
     const health = makeHealthProbe([unreachableReport(expected, 'RULER_AUTH_FAILED')]);
@@ -334,8 +334,8 @@ describe('SloService.repair (W1.5)', () => {
     ruler.upsertRuleGroup.mockClear();
 
     const expected = [
-      doc.status.provisioning.backend === 'prometheus' && doc.status.provisioning.ruleGroupName
-        ? doc.status.provisioning.ruleGroupName
+      doc.status.provisioning.backend === 'prometheus' && doc.status.provisioning.alertGroupName
+        ? doc.status.provisioning.alertGroupName
         : '',
     ];
     // Three ok reports — one per check call across two repair invocations.
@@ -361,8 +361,8 @@ describe('SloService.repair (W1.5)', () => {
     ruler.upsertRuleGroup.mockClear();
 
     const expected = [
-      doc.status.provisioning.backend === 'prometheus' && doc.status.provisioning.ruleGroupName
-        ? doc.status.provisioning.ruleGroupName
+      doc.status.provisioning.backend === 'prometheus' && doc.status.provisioning.alertGroupName
+        ? doc.status.provisioning.alertGroupName
         : '',
     ];
     // Sequence: missing → ok (post-repair) → ok (second repair pre-check).

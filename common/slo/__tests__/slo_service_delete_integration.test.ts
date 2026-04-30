@@ -199,7 +199,7 @@ function makeHarness() {
 // ============================================================================
 
 describe('SloService.delete — integration (W1.10)', () => {
-  it('ruler 404-tolerant delete: group already gone → delete succeeds, SO is removed, generatedRuleNames surface', async () => {
+  it('ruler 404-tolerant delete: group already gone → delete succeeds and SO is removed', async () => {
     // Real-world case: out-of-band delete removed the rule group from Cortex
     // *before* the user clicked Delete in the UI. The fake ruler's
     // `deleteRuleGroup` resolves (404-tolerant by design); the service must
@@ -212,20 +212,14 @@ describe('SloService.delete — integration (W1.10)', () => {
       doc.status.provisioning.backend === 'prometheus'
         ? doc.status.provisioning.rulerNamespace
         : '',
-      doc.status.provisioning.backend === 'prometheus' && doc.status.provisioning.ruleGroupName
-        ? doc.status.provisioning.ruleGroupName
+      doc.status.provisioning.backend === 'prometheus' && doc.status.provisioning.alertGroupName
+        ? doc.status.provisioning.alertGroupName
         : ''
     );
 
     const result = await svc.delete(doc.id, deploy);
 
     expect(result.deleted).toBe(true);
-    expect(result.generatedRuleNames).toEqual(
-      doc.status.provisioning.backend === 'prometheus'
-        ? doc.status.provisioning.generatedRuleNames
-        : []
-    );
-    expect(result.generatedRuleNames.length).toBeGreaterThan(0);
     expect(ruler.deleteCalls).toBe(1);
     expect(await store.get(doc.id)).toBeNull();
   });
@@ -255,8 +249,8 @@ describe('SloService.delete — integration (W1.10)', () => {
         ? doc.status.provisioning.rulerNamespace
         : '';
     const groupName =
-      doc.status.provisioning.backend === 'prometheus' && doc.status.provisioning.ruleGroupName
-        ? doc.status.provisioning.ruleGroupName
+      doc.status.provisioning.backend === 'prometheus' && doc.status.provisioning.alertGroupName
+        ? doc.status.provisioning.alertGroupName
         : '';
 
     // First attempt: transient ruler failure.

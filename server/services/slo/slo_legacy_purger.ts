@@ -24,10 +24,10 @@
  *   2. `purgeLegacyOrphans` re-validates every entry server-side:
  *        a. Name matches the legacy regex.
  *        b. Namespace is exactly `slo-generated-<datasourceId>`.
- *        c. No SLO saved-object in the store claims the group (either via
- *           `status.provisioning.ruleGroupName` or via legacy-name
- *           recomputation from `slugifySloObjective(spec.name, 'group')` +
- *           `ruleSuffix(workspaceId, sloId, 'group')`).
+ *        c. No SLO saved-object in the store claims the group via
+ *           legacy-name recomputation from
+ *           `slugifySloObjective(spec.name, 'group')` +
+ *           `ruleSuffix(workspaceId, sloId, 'group')`.
  *        d. The group is currently present on the ruler.
  *   3. Every entry that passes all four invariants is deleted via the
  *      404-tolerant `RulerClient.deleteRuleGroup`. Entries that fail any
@@ -256,12 +256,11 @@ export async function purgeLegacyOrphans(
   }
 
   // Invariant 1c: no owning SO. Read the SO store once (`datasourceId`-
-  // filtered) and index the set of group names any live SO claims — either
-  // via the preserved `ruleGroupName` field or via legacy-name recomputation
-  // from spec.name + sloId (the deterministic shape the pre-migration SO
-  // wrote). We walk EVERY SO in the datasource, not just provisioned ones,
-  // because a partially-migrated SO might carry `ruleGroupName` without a
-  // fully-populated provisioning block.
+  // filtered) and index the set of group names any live SO claims via
+  // legacy-name recomputation from spec.name + sloId (the deterministic
+  // shape the pre-migration SO wrote). We walk EVERY SO in the datasource,
+  // not just provisioned ones, because a partially-migrated SO might not
+  // yet carry a fully-populated provisioning block.
   let docs: SloDocument[];
   try {
     docs = await listSlos(datasourceId);
@@ -300,18 +299,11 @@ export async function purgeLegacyOrphans(
 
   const claimedByName = new Map<string, string>();
   for (const doc of docs) {
-    const prov = doc.status.provisioning;
-    if (prov?.backend === 'prometheus' && typeof prov.ruleGroupName === 'string') {
-      claimedByName.set(prov.ruleGroupName, doc.id);
-    }
     // Recompute the legacy monolithic name from spec + sloId — mirrors
     // `legacyMonolithicGroupName` in slo_redeploy_task.ts.
     const slug = slugifySloObjective(doc.spec.name, 'group');
     const suffix = ruleSuffix(workspaceId, doc.id, 'group');
     const recomputed = `slo:${slug}_${suffix}`;
-    // Only register if the recomputation doesn't already match an existing
-    // entry; two SOs could theoretically collide but the first-writer wins
-    // for diagnostic purposes.
     if (!claimedByName.has(recomputed)) {
       claimedByName.set(recomputed, doc.id);
     }

@@ -21,20 +21,17 @@ import { InMemorySloStore } from '../../../../common/slo/slo_store';
 import { InMemoryDatasourceService } from '../../alerting/datasource_service';
 import type { RulerClient } from '../ruler_client';
 import type { SloRuleRefStore, SloRuleRefDoc } from '../slo_rule_ref_store';
-import type {
-  AlertingOSClient,
-  Datasource,
-  Logger,
-} from '../../../../common/types/alerting/types';
-import type {
-  GeneratedRuleGroup,
-  SloDocument,
-  SloSpec,
-} from '../../../../common/slo/slo_types';
+import type { AlertingOSClient, Datasource, Logger } from '../../../../common/types/alerting/types';
+import type { GeneratedRuleGroup, SloDocument, SloSpec } from '../../../../common/slo/slo_types';
 import type { RuleHealthChecker } from '../rule_health_checker';
 
 function noopLogger(): Logger {
-  return { info: () => undefined, warn: () => undefined, error: () => undefined, debug: () => undefined };
+  return {
+    info: () => undefined,
+    warn: () => undefined,
+    error: () => undefined,
+    debug: () => undefined,
+  };
 }
 
 class FakeRuler implements RulerClient {
@@ -174,7 +171,11 @@ function validSpec(overrides: Partial<SloSpec> = {}): SloSpec {
   };
 }
 
-function doc(id: string, spec: SloSpec, recordingFingerprints: Record<string, string>): SloDocument {
+function doc(
+  id: string,
+  spec: SloSpec,
+  recordingFingerprints: Record<string, string>
+): SloDocument {
   return {
     id,
     spec,
@@ -186,9 +187,7 @@ function doc(id: string, spec: SloSpec, recordingFingerprints: Record<string, st
       updatedBy: 'tester',
       provisioning: {
         backend: 'prometheus',
-        ruleGroupName: `slo:alerts:${id}`,
         rulerNamespace: `slo-generated-${spec.datasourceId}`,
-        generatedRuleNames: [],
         recordingFingerprints,
         alertGroupName: `slo:alerts:${id}`,
         needsRedeploy: false,

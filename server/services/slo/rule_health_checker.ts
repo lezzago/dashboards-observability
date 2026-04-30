@@ -69,10 +69,9 @@ export interface RuleHealthCheckInput {
   /** Ruler namespace (typically `slo-generated-<workspaceId>`). */
   namespace: string;
   /**
-   * Group names the SLO expects to exist. Phase 1 SLOs store a single
-   * `ruleGroupName`; callers pass a one-element array. The checker is
-   * already written for arbitrary length so Phase 3's recording/alert
-   * split drops in without changes.
+   * Group names the SLO expects to exist. Phase 3 dedup SLOs carry one
+   * shared recording group per fingerprint plus one per-SLO alert group;
+   * legacy (flag-off) SLOs carry just the per-SLO alert group.
    */
   expectedGroups: string[];
 }

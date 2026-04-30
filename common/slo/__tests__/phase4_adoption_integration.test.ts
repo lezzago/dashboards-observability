@@ -188,10 +188,7 @@ function okAggregator(): SloStatusAggregator {
         })),
         state: 'ok' as const,
         firingCount: 0,
-        ruleCount:
-          d.status.provisioning.backend === 'prometheus'
-            ? d.status.provisioning.generatedRuleNames.length
-            : 0,
+        ruleCount: 0,
         computedAt: new Date().toISOString(),
       })),
   };
@@ -445,7 +442,6 @@ describe('Phase 4 adoption integration (W4.10)', () => {
         provisioning: {
           backend: 'prometheus',
           rulerNamespace: namespace,
-          generatedRuleNames: [],
           recordingFingerprints: { [spec.objectives[0].name]: fp },
           alertGroupName: dedupAlertGroupName(spec.name, workspaceId, sloId),
         },
@@ -558,7 +554,6 @@ describe('Phase 4 adoption integration (W4.10)', () => {
         provisioning: {
           backend: 'prometheus',
           rulerNamespace: namespace,
-          generatedRuleNames: [],
           recordingFingerprints: { [sloA.spec.objectives[0].name]: fp },
           alertGroupName: dedupAlertGroupName(sloA.spec.name, 'W1', sloA.id),
         },

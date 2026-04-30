@@ -193,7 +193,7 @@ export async function handleDeleteSLO(
   try {
     const result = await svc.delete(id, deploy);
     if (!result.deleted) return { status: 404, body: { error: 'SLO not found' } };
-    return { status: 200, body: { deleted: true, generatedRuleNames: result.generatedRuleNames } };
+    return { status: 200, body: { deleted: true } };
   } catch (e) {
     return toSloError(e, logger);
   }

@@ -122,9 +122,8 @@ function seedSloDocument(): SloDocument {
       updatedBy: 'tester',
       provisioning: {
         backend: 'prometheus',
-        ruleGroupName: 'slo:scenario_s13_regression_group_abcdef12',
+        alertGroupName: 'slo:scenario_s13_regression_group_abcdef12',
         rulerNamespace: 'slo-generated-ds-7',
-        generatedRuleNames: ['slo:rule-a', 'slo:rule-b'],
       },
     },
   };

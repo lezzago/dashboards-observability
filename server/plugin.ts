@@ -417,8 +417,7 @@ export class ObservabilityPlugin
       },
       // Phase 3 (W3.5): slo_v2 migration extends status.provisioning with
       // `recordingFingerprints`, `alertGroupName`, and `needsRedeploy`. Runs
-      // unconditionally — it's additive and preserves the old `ruleGroupName`
-      // during the dedup flag's rollout window.
+      // unconditionally — it's additive and idempotent.
       migrations: {
         [SLO_V2_MIGRATION_VERSION]: sloV2Migration,
       },

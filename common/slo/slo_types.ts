@@ -252,16 +252,7 @@ export interface SloSpec {
 
 export interface PrometheusProvisioning {
   backend: 'prometheus';
-  /**
-   * @deprecated Phase 3: kept during the dedup rollout while the feature flag
-   * `observability.slo.ruleDedup.enabled` is toggleable. When the flag is off
-   * the service reads this single name; when on the service reads
-   * `recordingFingerprints` + `alertGroupName`. Removed in a future phase
-   * once the flag is permanently on.
-   */
-  ruleGroupName?: string;
   rulerNamespace: string;
-  generatedRuleNames: string[];
   /**
    * Phase 3 (W3.4) — map from objective name to the recording-rule
    * fingerprint that's written for that objective. Shared across SLOs that

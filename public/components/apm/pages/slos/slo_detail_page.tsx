@@ -443,10 +443,10 @@ export const SloDetailPage: React.FC<SloDetailPageProps> = ({
   const onDelete = useCallback(async () => {
     setConfirmDelete(false);
     try {
-      const result = await apiClient.delete(id);
+      await apiClient.delete(id);
       notifications.toasts.addSuccess({
         title: 'SLO deleted',
-        text: `Removed ${result.generatedRuleNames.length} generated rules.`,
+        text: 'Generated rules were removed.',
       });
       history.push('/slos');
     } catch (e) {
@@ -532,29 +532,17 @@ export const SloDetailPage: React.FC<SloDetailPageProps> = ({
       ? 'rules_missing'
       : null;
 
-  // Recording-rule names from the persisted provisioning record.
-  // Phase 3 dedup: SLOs carry `recordingFingerprints` (objective name →
-  // fingerprint). Expand each unique fingerprint into the 7 per-window rule
-  // names so the listing still shows "what to pin external dashboards to".
-  // Legacy (pre-migration / flag-off) SLOs keep using `generatedRuleNames`.
+  // Recording-rule names from the persisted provisioning record. Dedup
+  // shape: SLOs carry `recordingFingerprints` (objective name → fingerprint).
+  // Expand each unique fingerprint into the 7 per-window rule names so the
+  // listing still shows "what to pin external dashboards to".
   const dedupFingerprints = prov?.recordingFingerprints ?? null;
   const DEDUP_WINDOWS = ['5m', '30m', '1h', '2h', '6h', '1d', '3d'];
-  const dedupRecordingNames: string[] = dedupFingerprints
+  const recordingRuleNames: string[] = dedupFingerprints
     ? [...new Set(Object.values(dedupFingerprints))].flatMap((fp) =>
         DEDUP_WINDOWS.map((w) => `slo:sli_error:ratio_rate_${w}:sli_${fp}`)
       )
     : [];
-  const allRuleNames = prov?.generatedRuleNames ?? [];
-  const legacyRecordingNames =
-    allRuleNames.filter((n) => n.startsWith('slo:sli_error:ratio_rate_')).length > 0
-      ? allRuleNames.filter((n) => n.startsWith('slo:sli_error:ratio_rate_'))
-      : [];
-  const recordingRuleNames =
-    dedupRecordingNames.length > 0
-      ? dedupRecordingNames
-      : legacyRecordingNames.length > 0
-      ? legacyRecordingNames
-      : allRuleNames;
 
   // Phase 3 W3.12 — "Shared with N other SLOs" pill. Refcount includes the
   // current SLO's own claim, so N others = max(refcount-1, 0). We pick the
@@ -780,7 +768,7 @@ export const SloDetailPage: React.FC<SloDetailPageProps> = ({
                         ? [
                             {
                               title: 'Alert group',
-                              description: prov.alertGroupName || prov.ruleGroupName || '—',
+                              description: prov.alertGroupName || '—',
                             },
                             ...(dedupFingerprints
                               ? [
@@ -899,7 +887,7 @@ export const SloDetailPage: React.FC<SloDetailPageProps> = ({
               <>
                 <p>
                   The per-SLO alert group (
-                  <code>{prov?.alertGroupName ?? prov?.ruleGroupName}</code>) is removed
+                  <code>{prov?.alertGroupName}</code>) is removed
                   immediately. Shared recording rules are reference-counted: if no other SLO
                   references the same SLI shape the recording group is queued for deletion, with a
                   24h grace period in case you re-create the SLO.

@@ -72,11 +72,7 @@ function v1Doc(
     updatedBy: 'alice',
     provisioning: {
       backend: 'prometheus',
-      ruleGroupName: 'slo:api_availability_group_abcdef12',
       rulerNamespace: 'slo-generated-prom-ds-001',
-      generatedRuleNames: [
-        'slo:sli_error:ratio_rate_5m:api_availability_availability_99_9_xxxxxxxx',
-      ],
     },
   };
 
@@ -115,15 +111,14 @@ describe('sloV2Migration', () => {
     expect(prov.needsRedeploy).toBe(true);
   });
 
-  it('preserves the pre-Phase-3 ruleGroupName and generatedRuleNames', () => {
+  it('preserves rulerNamespace while layering the dedup fields on top', () => {
     const doc = v1Doc();
     const out = sloV2Migration(doc);
     const prov = out.attributes.status!.provisioning!;
     if (prov.backend !== 'prometheus') throw new Error('expected prometheus backend');
-    expect(prov.ruleGroupName).toBe('slo:api_availability_group_abcdef12');
-    expect(prov.generatedRuleNames).toEqual([
-      'slo:sli_error:ratio_rate_5m:api_availability_availability_99_9_xxxxxxxx',
-    ]);
+    expect(prov.rulerNamespace).toBe('slo-generated-prom-ds-001');
+    expect(prov.recordingFingerprints).toBeDefined();
+    expect(prov.alertGroupName).toMatch(/^slo:alerts:/);
   });
 
   it('leaves other top-level attributes untouched', () => {

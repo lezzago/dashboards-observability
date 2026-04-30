@@ -76,7 +76,6 @@ function doc(spec: SloSpec = validSpec(), id = 'slo-abc'): SloDocument {
       provisioning: {
         backend: 'prometheus',
         rulerNamespace: 'slo-generated-prom-ds-001',
-        generatedRuleNames: [],
       },
     },
   };

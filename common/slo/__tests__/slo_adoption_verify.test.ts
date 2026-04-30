@@ -87,7 +87,6 @@ function buildAnnotatedAlertGroup(
       provisioning: {
         backend: 'prometheus',
         rulerNamespace: `slo-generated-${workspaceId}`,
-        generatedRuleNames: [],
         recordingFingerprints: fingerprints,
         alertGroupName: dedupAlertGroupName(spec.name, workspaceId, sloId),
       },

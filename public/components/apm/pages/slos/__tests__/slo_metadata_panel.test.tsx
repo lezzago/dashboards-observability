@@ -86,9 +86,8 @@ function makeSlo(overrides: Partial<SloDocument['spec']> = {}): SloDocument {
       updatedBy: 'me',
       provisioning: {
         backend: 'prometheus',
-        ruleGroupName: 'slo:api-availability',
+        alertGroupName: 'slo:api-availability',
         rulerNamespace: 'slo-api-availability',
-        generatedRuleNames: ['slo:sli_error:ratio_rate_5m:abcd1234'],
       },
     },
   };

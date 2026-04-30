@@ -361,7 +361,7 @@ export class SloApiClient {
     });
   }
 
-  delete(id: string): Promise<{ deleted: boolean; generatedRuleNames: string[] }> {
+  delete(id: string): Promise<{ deleted: boolean }> {
     return this.http.delete(`${SLO_BASE}/${encodeURIComponent(id)}`);
   }
 
