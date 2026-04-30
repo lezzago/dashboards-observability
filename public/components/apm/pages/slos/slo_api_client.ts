@@ -186,6 +186,51 @@ export interface RecoverResponseBody {
   refcountChanges: RecoverRefcountChange[];
 }
 
+// ============================================================================
+// Session C — legacy-orphan purge types (browser-side mirror of the server
+// contract in `server/services/slo/slo_legacy_purger.ts`).
+// ============================================================================
+
+export type LegacyPurgeSkipReason =
+  | 'name_pattern_mismatch'
+  | 'namespace_mismatch'
+  | 'claimed_by_so'
+  | 'not_present_on_ruler';
+
+export interface LegacyPurgeCandidateRequest {
+  groupName: string;
+  namespace: string;
+}
+
+export interface LegacyPurgeSkippedEntry {
+  groupName: string;
+  namespace: string;
+  reason: LegacyPurgeSkipReason;
+  claimantSloId?: string;
+}
+
+export interface LegacyPurgeFailureEntry {
+  groupName: string;
+  namespace: string;
+  error: {
+    code: 'RULER_VALIDATION_FAILED' | 'RULER_AUTH_FAILED' | 'RULER_UNREACHABLE' | 'UNKNOWN';
+    httpStatus: number;
+    message: string;
+  };
+}
+
+export interface LegacyPurgeResponse {
+  requested: number;
+  purged: number;
+  skipped_validation: LegacyPurgeSkippedEntry[];
+  failed: LegacyPurgeFailureEntry[];
+}
+
+export interface PurgeLegacyRequestBody {
+  datasourceId: string;
+  groups: LegacyPurgeCandidateRequest[];
+}
+
 /**
  * Envelope returned by the 412 feature-flag gate in `adoption_route.ts`.
  * Populated into `IHttpFetchError.body.attributes` by OSD's `res.customError`
@@ -319,5 +364,19 @@ export class SloApiClient {
 
   async recoverSlo(input: RecoverRequestBody): Promise<RecoverResponseBody> {
     return this.http.post(`${SLO_BASE}/_recover`, { body: JSON.stringify(input) });
+  }
+
+  /**
+   * Session C — purge legacy (pre-Phase-3) rule groups that have no owning
+   * SLO. The server re-validates every entry; a 200 response may still
+   * carry partial failures (see `LegacyPurgeResponse`).
+   *
+   * Throws an OSD `IHttpFetchError` when:
+   *   - Feature flag off (404).
+   *   - Datasource unknown / non-Prometheus (400).
+   *   - Body schema violation (400 — e.g. empty `groups`).
+   */
+  async purgeLegacyOrphans(input: PurgeLegacyRequestBody): Promise<LegacyPurgeResponse> {
+    return this.http.post(`${SLO_BASE}/_purge_legacy`, { body: JSON.stringify(input) });
   }
 }

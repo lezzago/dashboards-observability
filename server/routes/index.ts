@@ -41,6 +41,7 @@ import type { SloService } from '../../common/slo/slo_service';
 import type { RulerClient } from '../services/slo/ruler_client';
 import type { RuleHealthChecker } from '../services/slo/rule_health_checker';
 import type { SloReconciler } from '../services/slo/reconciler';
+import type { ReconcilerMetrics } from '../services/slo/reconciler_metrics';
 
 /**
  * Wiring returned from `setupRoutes` so the plugin-level orchestrator
@@ -67,6 +68,8 @@ export function setupRoutes({
   reconciler,
   ruleDedupEnabled,
   ruleAdoptionEnabled,
+  legacyOrphanPurgeEnabled,
+  reconcilerMetrics,
 }: {
   router: IRouter;
   client: ILegacyClusterClient;
@@ -102,6 +105,18 @@ export function setupRoutes({
    * `_recover`, `_clone`) can apply the 412 feature-flag gate.
    */
   ruleAdoptionEnabled?: boolean;
+  /**
+   * Session C — `observability.slo.legacyOrphanPurge.enabled`. Forwarded
+   * into `registerSloRoutes` so the `_purge_legacy` endpoint gates itself
+   * to 404 when the flag is off.
+   */
+  legacyOrphanPurgeEnabled?: boolean;
+  /**
+   * Session C — shared metrics bank. The purge endpoint bumps the same
+   * counters the reconciler uses so the admin dashboard can show purge
+   * activity alongside orphan counts.
+   */
+  reconcilerMetrics?: ReconcilerMetrics;
 }): SetupRoutesResult {
   PanelsRouter(router);
   VisualizationsRouter(router);
@@ -194,6 +209,8 @@ export function setupRoutes({
       reconciler,
       ruleDedupEnabled,
       ruleAdoptionEnabled,
+      legacyOrphanPurgeEnabled,
+      reconcilerMetrics,
     });
   }
 

@@ -523,6 +523,65 @@ export async function handleListOrphans(
   }
 }
 
+// ============================================================================
+// Session C — legacy-orphan purge handler
+// ============================================================================
+
+/**
+ * Input shape for the `_purge_legacy` endpoint. Structural so the handler
+ * doesn't have to import the concrete purger module (keeping handler logic
+ * framework-agnostic).
+ */
+export interface PurgeLegacyInputLite {
+  datasourceId: string;
+  workspaceId: string;
+  candidates: Array<{ groupName: string; namespace: string }>;
+}
+
+export interface PurgeLegacyResultLite {
+  requested: number;
+  purged: number;
+  skipped_validation: Array<Record<string, unknown>>;
+  failed: Array<Record<string, unknown>>;
+}
+
+/**
+ * Function surface the handler consumes. The route adapter wires this to the
+ * real `purgeLegacyOrphans` with all the server-side collaborators bound
+ * in. The handler stays I/O-free beyond the one awaited call.
+ */
+export type PurgeLegacyExecutor = (input: PurgeLegacyInputLite) => Promise<PurgeLegacyResultLite>;
+
+/**
+ * `POST /api/observability/v1/slos/_purge_legacy` — delete pre-Phase-3 rule
+ * groups that have no owning SLO saved object.
+ *
+ * The server-side purger (not this handler) enforces every safety invariant.
+ * This handler is a thin adapter that surfaces the purger's result verbatim
+ * and maps the typed errors thrown during dependency wiring to HTTP codes.
+ * Partial failures are NOT 5xx — a 200 with `purged<requested` is the
+ * standard shape, which lets the client distinguish "we did some work" from
+ * "the whole request was rejected" without retry-doubling the successes.
+ */
+export async function handlePurgeLegacy(
+  execute: PurgeLegacyExecutor | undefined,
+  input: PurgeLegacyInputLite,
+  logger?: Logger
+): Promise<HandlerResult> {
+  try {
+    if (!execute) {
+      return {
+        status: 501,
+        body: { error: 'Legacy-orphan purge not configured in this environment' },
+      };
+    }
+    const result = await execute(input);
+    return { status: 200, body: result };
+  } catch (e) {
+    return toSloError(e, logger);
+  }
+}
+
 /**
  * `POST /api/observability/v1/slos/_recover` — reclaims an adoptable
  * orphan into a live SLO document, idempotently replaying the dedup-shape

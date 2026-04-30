@@ -15,6 +15,9 @@ function makeApiClient(
   return ({
     listOrphans: jest.fn().mockResolvedValue({ candidates: [], unknowns: [] }),
     recoverSlo: jest.fn(),
+    // Session C — default the probe to "flag off" (404) so existing tests
+    // see the plain Recover tab without the new tab chrome.
+    purgeLegacyOrphans: jest.fn().mockRejectedValue({ response: { status: 404 } }),
     ...overrides,
   } as unknown) as jest.Mocked<SloApiClient>;
 }
@@ -107,5 +110,75 @@ describe('SloAdoptionPage — feature-flag gate', () => {
     await waitFor(() => {
       expect(screen.getByTestId('sloAdoption-recoverTab')).toBeInTheDocument();
     });
+  });
+});
+
+describe('SloAdoptionPage — Session C legacy orphans tab', () => {
+  it('hides the Legacy-orphans tab when the purge flag is off (404 probe)', async () => {
+    const purgeLegacyOrphans = jest.fn().mockRejectedValue({ response: { status: 404 } });
+    await act(async () => {
+      renderPage(makeApiClient({ purgeLegacyOrphans }));
+    });
+    await waitFor(() => expect(screen.getByTestId('sloAdoption-recoverTab')).toBeInTheDocument());
+    expect(screen.queryByTestId('sloAdoption-page-tabs')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('sloAdoption-page-tab-legacy')).not.toBeInTheDocument();
+  });
+
+  it('shows the Legacy-orphans tab when the purge flag is on (400 probe)', async () => {
+    // Server returns 400 when the flag is on (schema rejects empty groups).
+    const purgeLegacyOrphans = jest
+      .fn()
+      .mockRejectedValue({ response: { status: 400 }, body: { message: 'empty' } });
+    const listOrphans = jest.fn().mockResolvedValue({
+      candidates: [],
+      unknowns: [
+        {
+          datasourceId: 'ds-1',
+          namespace: 'slo-generated-ds-1',
+          groupName: 'slo:foo_abcdef12',
+          diagnostic: 'pre-Phase-3 rule layout; not eligible for adoption',
+        },
+        {
+          datasourceId: 'ds-1',
+          namespace: 'slo-generated-ds-1',
+          groupName: 'slo:unsupported',
+          diagnostic: 'provenance schemaVersion 99 not supported (expected 1)',
+        },
+      ],
+    });
+    await act(async () => {
+      renderPage(makeApiClient({ purgeLegacyOrphans, listOrphans }));
+    });
+    await waitFor(() => expect(screen.getByTestId('sloAdoption-page-tabs')).toBeInTheDocument());
+    // Badge count reflects only the legacy-diagnostic row (1 of 2 unknowns).
+    expect(screen.getByTestId('sloAdoption-page-tab-legacy')).toHaveTextContent(
+      'Legacy orphans (1)'
+    );
+  });
+
+  it('switches to the Legacy tab on click and renders the purge table', async () => {
+    const purgeLegacyOrphans = jest.fn().mockRejectedValue({ response: { status: 400 } });
+    const listOrphans = jest.fn().mockResolvedValue({
+      candidates: [],
+      unknowns: [
+        {
+          datasourceId: 'ds-1',
+          namespace: 'slo-generated-ds-1',
+          groupName: 'slo:foo_abcdef12',
+          diagnostic: 'pre-Phase-3 rule layout; not eligible for adoption',
+        },
+      ],
+    });
+    await act(async () => {
+      renderPage(makeApiClient({ purgeLegacyOrphans, listOrphans }));
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId('sloAdoption-page-tab-legacy')).toBeInTheDocument()
+    );
+    await act(async () => {
+      screen.getByTestId('sloAdoption-page-tab-legacy').click();
+    });
+    expect(screen.getByTestId('sloAdoption-legacyTab')).toBeInTheDocument();
+    expect(screen.getByTestId('sloAdoption-legacyTab-table')).toBeInTheDocument();
   });
 });

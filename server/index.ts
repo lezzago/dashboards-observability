@@ -45,6 +45,16 @@ const observabilityConfig = {
       ruleAdoption: schema.object({
         enabled: schema.boolean({ defaultValue: false }),
       }),
+      // Session C: admin-only legacy-orphan purge. Default-off. Gates both
+      // the `_purge_legacy` endpoint (404 when disabled, as if not
+      // registered) and the "Legacy orphans" tab on the adoption page.
+      // Independent of ruleDedup / ruleAdoption — legacy groups exist
+      // precisely because dedup wasn't on at their time of creation, so
+      // operators need to be able to clean them up regardless of those
+      // flags' values.
+      legacyOrphanPurge: schema.object({
+        enabled: schema.boolean({ defaultValue: false }),
+      }),
       // Phase 3 (W3.11): grace period before the reconciler deletes a
       // zero-ref recording group. Default 24h; floor at 60s so tests can
       // pick a tight window without risking accidental prod misconfig.

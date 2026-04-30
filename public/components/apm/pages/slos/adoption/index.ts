@@ -9,3 +9,4 @@ export { OrphanIntegrityBadge } from './orphan_integrity_badge';
 export { TombstoneBadge } from './tombstone_badge';
 export { ReadOnlySpecPreview } from './read_only_spec_preview';
 export { RecoverTab } from './recover_tab';
+export { LegacyTab } from './legacy_tab';

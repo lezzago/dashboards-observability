@@ -41,8 +41,16 @@ import type { InMemoryDatasourceService } from '../../services/alerting/datasour
 import type { DatasourceDiscoveryService } from '../../services/alerting/datasource_discovery';
 import type { RulerClient } from '../../services/slo/ruler_client';
 import type { SloReconciler } from '../../services/slo/reconciler';
-import { handleListOrphans, handleRecoverSlo } from './handlers';
-import type { RecoverSloInputLite, SloAdoptionServiceLite, SloReconcilerLite } from './handlers';
+import type { ReconcilerMetrics } from '../../services/slo/reconciler_metrics';
+import { handleListOrphans, handlePurgeLegacy, handleRecoverSlo } from './handlers';
+import type {
+  PurgeLegacyInputLite,
+  PurgeLegacyResultLite,
+  RecoverSloInputLite,
+  SloAdoptionServiceLite,
+  SloReconcilerLite,
+} from './handlers';
+import { purgeLegacyOrphans } from '../../services/slo/slo_legacy_purger';
 
 const SLO_BASE = `${OBSERVABILITY_BASE}/v1/slos`;
 
@@ -95,6 +103,18 @@ export interface RegisterSloAdoptionRoutesOptions {
   reconciler?: SloReconciler;
   ruleDedupEnabled: boolean;
   ruleAdoptionEnabled: boolean;
+  /**
+   * Session C — `observability.slo.legacyOrphanPurge.enabled`. Default false.
+   * Gates the `_purge_legacy` admin endpoint: when off, the route handler
+   * returns 404 so the endpoint appears "not registered" to the client (per
+   * the feature-flag decision D1).
+   */
+  legacyOrphanPurgeEnabled?: boolean;
+  /**
+   * Session C — metrics bank the purger reports to. Optional so offline-dev
+   * / test wiring can omit it.
+   */
+  reconcilerMetrics?: ReconcilerMetrics;
 }
 
 /**
@@ -167,6 +187,8 @@ export function registerSloAdoptionRoutes(options: RegisterSloAdoptionRoutesOpti
     reconciler,
     ruleDedupEnabled,
     ruleAdoptionEnabled,
+    legacyOrphanPurgeEnabled = false,
+    reconcilerMetrics,
   } = options;
 
   // The structural service interface that the handlers consume. SloService
@@ -273,6 +295,124 @@ export function registerSloAdoptionRoutes(options: RegisterSloAdoptionRoutesOpti
         statusCode: result.status,
         body: {
           message: String((result.body as { error?: string }).error ?? 'Recover failed'),
+          attributes: result.body as Record<string, unknown>,
+        },
+      });
+    }
+  );
+
+  // --------------------------------------------------------------------------
+  // POST /api/observability/v1/slos/_purge_legacy  (Session C)
+  //
+  // Admin-only. Gated on `observability.slo.legacyOrphanPurge.enabled`; when
+  // off the handler returns 404 so the endpoint appears unregistered to
+  // clients (decision D1). Independent of the other two flags — legacy
+  // groups exist because dedup wasn't on at create time, so the purge has
+  // to work regardless of `ruleDedup` / `ruleAdoption`.
+  //
+  // The server-side purger enforces every safety invariant (name pattern,
+  // namespace shape, no-owning-SO, currently-on-ruler). The client is not
+  // trusted; a client request that would pass its own checks but fail
+  // server-side (e.g. an SO claiming a group the client didn't know about)
+  // must land in `skipped_validation`, not be deleted.
+  // --------------------------------------------------------------------------
+  const purgeLegacyBody = schema.object({
+    datasourceId: schema.string({ minLength: 1 }),
+    groups: schema.arrayOf(
+      schema.object({
+        groupName: schema.string({ minLength: 1 }),
+        namespace: schema.string({ minLength: 1 }),
+      }),
+      { minSize: 1 }
+    ),
+  });
+
+  router.post(
+    {
+      path: `${SLO_BASE}/_purge_legacy`,
+      validate: { body: purgeLegacyBody },
+    },
+    async (ctx, req, res) => {
+      if (!legacyOrphanPurgeEnabled) {
+        return res.customError({
+          statusCode: 404,
+          body: {
+            message: 'Not Found',
+            attributes: { error: 'NOT_FOUND' },
+          },
+        });
+      }
+      // Resolve deploy context just for the datasource + ruler + OS client;
+      // the purger doesn't need a workspaceId beyond the
+      // workspaceId-equals-datasourceId convention this plugin already
+      // uses. Reuse `buildAdoptionDeployContext` so the same 400 surface
+      // fires on unknown / non-Prometheus datasources.
+      let deploy: SloDeployContext;
+      try {
+        deploy = await buildAdoptionDeployContext(
+          ctx as SloHandlerContext,
+          req.body.datasourceId,
+          undefined,
+          rulerClient,
+          datasourceService,
+          discoveryService
+        );
+      } catch (e) {
+        if (e instanceof SloValidationError) {
+          return res.customError({
+            statusCode: 400,
+            body: {
+              message: 'Validation failed',
+              attributes: { error: 'Validation failed', errors: e.errors },
+            },
+          });
+        }
+        throw e;
+      }
+      if (!rulerClient) {
+        return res.customError({
+          statusCode: 501,
+          body: {
+            message: 'Ruler client not configured',
+            attributes: { error: 'RULER_NOT_CONFIGURED' },
+          },
+        });
+      }
+      const input: PurgeLegacyInputLite = {
+        datasourceId: req.body.datasourceId,
+        workspaceId: deploy.workspaceId,
+        candidates: req.body.groups,
+      };
+      const result = await handlePurgeLegacy(
+        async (i) => {
+          const purged = await purgeLegacyOrphans(
+            {
+              datasourceId: i.datasourceId,
+              workspaceId: i.workspaceId,
+              candidates: i.candidates,
+            },
+            {
+              listSlos: (dsId) => sloService.listRawByDatasource(dsId),
+              ruler: rulerClient,
+              client: deploy.client,
+              datasource: deploy.datasource,
+              logger,
+              metrics: reconcilerMetrics,
+            }
+          );
+          // Widen the typed arrays to Record<string, unknown>[] so the
+          // framework-agnostic handler surface stays decoupled from the
+          // concrete purger module's types. Shape is preserved verbatim.
+          return (purged as unknown) as PurgeLegacyResultLite;
+        },
+        input,
+        logger
+      );
+      if (result.status === 200) return res.ok({ body: result.body });
+      return res.customError({
+        statusCode: result.status,
+        body: {
+          message: String((result.body as { error?: string }).error ?? 'Purge failed'),
           attributes: result.body as Record<string, unknown>,
         },
       });

@@ -742,6 +742,20 @@ export class SloService {
     return this.store.get(id);
   }
 
+  /**
+   * Session C — raw document list scoped to a datasource. Used by the
+   * legacy-orphan purger to cross-check group names against live SO claims
+   * before deleting anything from the ruler. Returns full `SloDocument`
+   * values (not `SloSummary`) because the purger needs `status.provisioning`
+   * and `spec.name` to recompute the legacy monolithic group name shape.
+   *
+   * Exposed as a thin passthrough so the purger can be store-agnostic (the
+   * service owns the store reference; callers should not reach past it).
+   */
+  async listRawByDatasource(datasourceId: string): Promise<SloDocument[]> {
+    return this.store.list([datasourceId]);
+  }
+
   async update(
     id: string,
     input: SloUpdateInput,

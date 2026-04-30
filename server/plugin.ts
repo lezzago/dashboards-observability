@@ -131,6 +131,7 @@ export class ObservabilityPlugin
           reconcilerIntervalMs: number;
           ruleDedup?: { enabled: boolean };
           ruleAdoption?: { enabled: boolean };
+          legacyOrphanPurge?: { enabled: boolean };
           recordingGraceMs?: number;
         };
       }>()
@@ -159,6 +160,12 @@ export class ObservabilityPlugin
           'return 412 until dedup is enabled.'
       );
     }
+    // Session C: legacy-orphan purge flag. Default-off. Gates the
+    // `_purge_legacy` admin endpoint (404 when off) and the "Legacy
+    // orphans" tab on the adoption page. Independent of ruleDedup/
+    // ruleAdoption — legacy groups are a pre-dedup artifact, so the purge
+    // has to work regardless of those flags.
+    const legacyOrphanPurgeEnabled = observabilityConfig.slo?.legacyOrphanPurge?.enabled ?? false;
     // Phase 3 (W3.11): default 24h grace before a zero-ref recording group
     // gets deleted. Same default as the schema.
     const recordingGraceMs = observabilityConfig.slo?.recordingGraceMs ?? 24 * 60 * 60_000;
@@ -567,6 +574,8 @@ export class ObservabilityPlugin
       reconciler,
       ruleDedupEnabled,
       ruleAdoptionEnabled,
+      legacyOrphanPurgeEnabled,
+      reconcilerMetrics,
     });
     datasourceServiceRef.current = alertingDatasourceService;
 

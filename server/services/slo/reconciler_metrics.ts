@@ -52,6 +52,16 @@ export interface ReconcilerMetricsSnapshot {
    * unsupported schema, or recording-only without a paired alert).
    */
   unknownOrphans: number;
+  /**
+   * Session C — legacy-orphan purge counters. Not reconciler work per se
+   * (the purge fires on explicit admin request, not on the sweep timer), but
+   * the metrics bank is the existing home for orphan-related counts so the
+   * admin dashboard can show purge-related totals alongside orphan counts.
+   */
+  legacyPurgeRequested: number;
+  legacyPurgeSucceeded: number;
+  legacyPurgeSkippedValidation: number;
+  legacyPurgeFailed: number;
 }
 
 /**
@@ -72,6 +82,14 @@ export interface ReconcilerMetrics {
   incAdoptableOrphans(n?: number): void;
   /** Phase 4 W4.2 — orphans the reconciler refused to classify as adoptable. */
   incUnknownOrphans(n?: number): void;
+  /** Session C — one increment per purge request, counted by candidate count. */
+  incLegacyPurgeRequested(n?: number): void;
+  /** Session C — groups actually deleted (includes 404-already-gone as success). */
+  incLegacyPurgeSucceeded(n?: number): void;
+  /** Session C — candidates refused by server-side validation (name/ns/claim/presence). */
+  incLegacyPurgeSkippedValidation(n?: number): void;
+  /** Session C — candidates whose ruler delete raised. */
+  incLegacyPurgeFailed(n?: number): void;
   /**
    * Return a frozen copy of the current counters. Mutating the returned
    * object does not affect internal state; subsequent `snapshot()` calls
@@ -96,7 +114,11 @@ type CounterName =
   | 'danglingRefs'
   | 'graceDeletions'
   | 'adoptableOrphans'
-  | 'unknownOrphans';
+  | 'unknownOrphans'
+  | 'legacyPurgeRequested'
+  | 'legacyPurgeSucceeded'
+  | 'legacyPurgeSkippedValidation'
+  | 'legacyPurgeFailed';
 
 /**
  * Factory. Keeps the counter state in a closure so callers can't reach past
@@ -112,6 +134,10 @@ export function createReconcilerMetrics(logger: Logger): ReconcilerMetrics {
     graceDeletions: 0,
     adoptableOrphans: 0,
     unknownOrphans: 0,
+    legacyPurgeRequested: 0,
+    legacyPurgeSucceeded: 0,
+    legacyPurgeSkippedValidation: 0,
+    legacyPurgeFailed: 0,
   };
 
   /**
@@ -158,6 +184,18 @@ export function createReconcilerMetrics(logger: Logger): ReconcilerMetrics {
     incUnknownOrphans(n: number = 1): void {
       bump('unknownOrphans', n);
     },
+    incLegacyPurgeRequested(n: number = 1): void {
+      bump('legacyPurgeRequested', n);
+    },
+    incLegacyPurgeSucceeded(n: number = 1): void {
+      bump('legacyPurgeSucceeded', n);
+    },
+    incLegacyPurgeSkippedValidation(n: number = 1): void {
+      bump('legacyPurgeSkippedValidation', n);
+    },
+    incLegacyPurgeFailed(n: number = 1): void {
+      bump('legacyPurgeFailed', n);
+    },
     snapshot(): ReconcilerMetricsSnapshot {
       // `Object.freeze` on a fresh object literal prevents the caller from
       // mutating the returned snapshot while leaving `counters` untouched.
@@ -170,6 +208,10 @@ export function createReconcilerMetrics(logger: Logger): ReconcilerMetrics {
         graceDeletions: counters.graceDeletions,
         adoptableOrphans: counters.adoptableOrphans,
         unknownOrphans: counters.unknownOrphans,
+        legacyPurgeRequested: counters.legacyPurgeRequested,
+        legacyPurgeSucceeded: counters.legacyPurgeSucceeded,
+        legacyPurgeSkippedValidation: counters.legacyPurgeSkippedValidation,
+        legacyPurgeFailed: counters.legacyPurgeFailed,
       });
     },
     reset(): void {
@@ -181,6 +223,10 @@ export function createReconcilerMetrics(logger: Logger): ReconcilerMetrics {
       counters.graceDeletions = 0;
       counters.adoptableOrphans = 0;
       counters.unknownOrphans = 0;
+      counters.legacyPurgeRequested = 0;
+      counters.legacyPurgeSucceeded = 0;
+      counters.legacyPurgeSkippedValidation = 0;
+      counters.legacyPurgeFailed = 0;
     },
   };
 }
