@@ -119,7 +119,13 @@ export const RecoverTab: React.FC<RecoverTabProps> = ({
           <div data-test-subj={`sloAdoption-recoverTab-expanded-${c.sloId}`}>
             {c.specIntegrity === 'mismatch' ? (
               <>
-                <EuiCallOut color="warning" size="s" iconType="alert" title="Spec drift detected">
+                <EuiCallOut
+                  color="warning"
+                  size="s"
+                  iconType="alert"
+                  title="Spec drift detected"
+                  data-test-subj={`sloAdoption-recoverTab-driftCallout-${c.sloId}`}
+                >
                   The embedded spec hash does not match the recording rules. Recovery is disabled
                   for this row — inspect the rules in your Prometheus-compatible tooling before
                   deciding how to proceed.
@@ -134,6 +140,7 @@ export const RecoverTab: React.FC<RecoverTabProps> = ({
                   size="s"
                   iconType="alert"
                   title="Provenance schema not recognized"
+                  data-test-subj={`sloAdoption-recoverTab-unsupportedSchemaCallout-${c.sloId}`}
                 >
                   The rule group carries a provenance version this plugin version can&apos;t parse.
                   Upgrade the plugin or adopt manually.
@@ -441,16 +448,43 @@ export const RecoverTab: React.FC<RecoverTabProps> = ({
           <EuiInMemoryTable<OrphanUnknown>
             items={unknowns}
             columns={[
-              { name: 'Datasource', render: (u: OrphanUnknown) => u.datasourceId },
-              { name: 'Namespace', render: (u: OrphanUnknown) => u.namespace },
-              { name: 'Group', render: (u: OrphanUnknown) => u.groupName },
               {
-                name: 'Diagnostic',
+                name: 'SLO',
                 render: (u: OrphanUnknown) => (
-                  <EuiText size="s" color="subdued">
-                    {u.diagnostic ?? '—'}
+                  <EuiText
+                    size="s"
+                    data-test-subj={
+                      u.sourceSloId
+                        ? `sloAdoption-recoverTab-unknownsSloId-${u.sourceSloId}`
+                        : undefined
+                    }
+                  >
+                    {u.sourceSloId ?? '—'}
                   </EuiText>
                 ),
+              },
+              { name: 'Datasource', render: (u: OrphanUnknown) => u.datasourceId },
+              { name: 'Group', render: (u: OrphanUnknown) => u.groupName },
+              {
+                name: 'Reason',
+                render: (u: OrphanUnknown) =>
+                  u.specIntegrity === 'unsupported_schema' ? (
+                    <EuiText
+                      size="s"
+                      color="danger"
+                      data-test-subj={`sloAdoption-recoverTab-unknownsUnsupportedSchema-${
+                        u.sourceSloId ?? u.groupName
+                      }`}
+                    >
+                      Unsupported provenance schemaVersion{' '}
+                      {typeof u.schemaVersion === 'number' ? u.schemaVersion : '(unknown)'} —
+                      upgrade the plugin or adopt manually.
+                    </EuiText>
+                  ) : (
+                    <EuiText size="s" color="subdued">
+                      {u.diagnostic ?? '—'}
+                    </EuiText>
+                  ),
               },
             ]}
             data-test-subj="sloAdoption-recoverTab-unknownsTable"

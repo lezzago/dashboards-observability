@@ -476,15 +476,37 @@ describe('SloService.recover (W4.4)', () => {
         return JSON.stringify(parsed);
       },
     });
-    // With an unrecognized schema, findAdoptableAlertGroup returns null
-    // (parseAlertProvenance rejects the schema). The service surfaces this
-    // as SloNotFoundError — which is the correct UX ("we don't see an
-    // adoptable group here"). Verify that; any SloAdoptionError with
-    // UNSUPPORTED_SCHEMA code would only arrive if the group had been
-    // tagged by our own `findAdoptableAlertGroup` wrapper. Today the group
-    // is invisible to the scanner.
+    // Session B Item 1: the service disambiguates "schemaVersion we can't
+    // parse" from "no matching group" by scanning annotations with a loose
+    // parse when `findAdoptableAlertGroup` returned null. The orphan here
+    // has the caller's sloId but schemaVersion=99; recover surfaces
+    // `ORPHAN_UNSUPPORTED_SCHEMA` so the UI can render "upgrade plugin"
+    // instead of "SLO not found".
     await expect(
       svc.recover({ sloId: 'slo-v99', datasourceId: 'prom-ds-001', workspaceId: 'ws-001' }, deploy)
+    ).rejects.toMatchObject({
+      name: 'SloAdoptionError',
+      code: 'ORPHAN_UNSUPPORTED_SCHEMA',
+      context: expect.objectContaining({ sloId: 'slo-v99', schemaVersion: '99' }),
+    });
+  });
+
+  it('SloNotFoundError when no alert group with matching sloId is present (legacy-layout fallthrough)', async () => {
+    const { svc, ruler, deploy } = makeHarness();
+    // Seed an adoptable orphan under a different sloId — the recover call
+    // below asks for `slo-other`, which is not present at all. Neither the
+    // strict scanner nor the loose unsupported-schema scanner should match.
+    seedRuler(ruler, {
+      spec: validSpec(),
+      sloId: 'slo-present',
+      workspaceId: 'ws-001',
+      datasourceId: 'prom-ds-001',
+    });
+    await expect(
+      svc.recover(
+        { sloId: 'slo-other', datasourceId: 'prom-ds-001', workspaceId: 'ws-001' },
+        deploy
+      )
     ).rejects.toBeInstanceOf(SloNotFoundError);
   });
 

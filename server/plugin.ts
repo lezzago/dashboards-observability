@@ -146,6 +146,19 @@ export class ObservabilityPlugin
     // `_recover`, `_clone`). Tombstones are still written unconditionally
     // on delete — only the read path (and thus the Recover UI) is gated.
     const ruleAdoptionEnabled = observabilityConfig.slo?.ruleAdoption?.enabled ?? false;
+    // Session B Item 2 — adoption depends on dedup-shape provenance, which
+    // only exists when `ruleDedup.enabled=true`. The combo
+    // (ruleAdoption=true, ruleDedup=false) is a silent no-op today: every
+    // adoption endpoint returns 412 because no adoptable provenance is ever
+    // emitted. Surface a startup warn so operators see the mis-config in
+    // logs instead of discovering it by inspecting 412 responses.
+    if (ruleAdoptionEnabled && !ruleDedupEnabled) {
+      this.logger.warn(
+        'observability.slo.ruleAdoption.enabled=true requires ' +
+          'observability.slo.ruleDedup.enabled=true. Adoption endpoints will ' +
+          'return 412 until dedup is enabled.'
+      );
+    }
     // Phase 3 (W3.11): default 24h grace before a zero-ref recording group
     // gets deleted. Same default as the schema.
     const recordingGraceMs = observabilityConfig.slo?.recordingGraceMs ?? 24 * 60 * 60_000;

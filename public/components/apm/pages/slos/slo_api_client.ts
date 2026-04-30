@@ -149,6 +149,17 @@ export interface OrphanUnknown {
   namespace: string;
   groupName: string;
   diagnostic?: string;
+  /**
+   * Populated when the detector found an alert-provenance annotation on the
+   * group but rejected it — today only the schemaVersion-mismatch path lands
+   * here, and only when the payload was parseable JSON. The UI renders an
+   * "upgrade plugin" affordance on rows where `specIntegrity ===
+   * 'unsupported_schema'`.
+   */
+  sourceSloId?: string;
+  sourceWorkspaceId?: string;
+  schemaVersion?: number;
+  specIntegrity?: OrphanSpecIntegrity;
 }
 
 export interface OrphanListResponse {

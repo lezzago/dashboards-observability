@@ -57,6 +57,7 @@ import {
 } from './slo_errors';
 import { computeSliFingerprint, FINGERPRINT_VERSION } from './slo_sli_fingerprint';
 import {
+  ALERT_PROVENANCE_ANNOTATION_KEY,
   AlertProvenance,
   annotateAlertGroup,
   buildAlertProvenance,
@@ -1248,10 +1249,7 @@ export class SloService {
    * Recording groups deliberately get NO annotation — Cortex rejects
    * annotations on recording rules (commit e25376c2).
    */
-  private async repairDedup(
-    doc: SloDocument,
-    ctx: SloRepairContext
-  ): Promise<SloRepairResult> {
+  private async repairDedup(doc: SloDocument, ctx: SloRepairContext): Promise<SloRepairResult> {
     if (doc.status.provisioning.backend !== 'prometheus') {
       // Non-prometheus backends fall through to the legacy path above — but
       // `isDedupSo` gates on `backend === 'prometheus'`, so this is
@@ -1261,8 +1259,7 @@ export class SloService {
     }
     const provisioning = doc.status.provisioning;
     const expectedGroups = deriveExpectedGroups(doc);
-    const namespace =
-      provisioning.rulerNamespace || sloRulerNamespaceFor(ctx.deploy.workspaceId);
+    const namespace = provisioning.rulerNamespace || sloRulerNamespaceFor(ctx.deploy.workspaceId);
 
     const pre = await ctx.health.check({
       workspaceId: ctx.deploy.workspaceId,
@@ -1290,11 +1287,7 @@ export class SloService {
     const recordingFingerprints = provisioning.recordingFingerprints ?? {};
     const uniqueFps = uniqueValues(recordingFingerprints);
     for (const fp of uniqueFps) {
-      const representative = pickRepresentativeForFingerprint(
-        doc.spec,
-        recordingFingerprints,
-        fp
-      );
+      const representative = pickRepresentativeForFingerprint(doc.spec, recordingFingerprints, fp);
       if (!representative) continue;
       const recGroup = generateRecordingGroupForFingerprint({
         fingerprint: fp,
@@ -1427,9 +1420,22 @@ export class SloService {
     const groups = await deploy.ruler.listRuleGroups(deploy.client, deploy.datasource, namespace);
     const match = findAdoptableAlertGroup(groups, input.sloId);
     if (!match) {
-      // No alert group carrying matching provenance. This is also the D2
-      // "legacy monolithic rule group" fallthrough — such groups have no
-      // `osd_slo_provenance` annotation and so never match.
+      // No alert group carrying matching provenance. Before surfacing
+      // "not found", check whether the caller's sloId matches a group
+      // whose provenance was rejected purely on schemaVersion — that's a
+      // distinct UX ("upgrade the plugin") from "no such SLO".
+      // `findAdoptableAlertGroup` runs `parseAlertProvenance`, which returns
+      // null on a schemaVersion mismatch; a loose JSON scan disambiguates.
+      const schemaMismatch = findAlertGroupWithUnsupportedSchema(groups, input.sloId);
+      if (schemaMismatch !== null) {
+        throw new SloAdoptionError(
+          'ORPHAN_UNSUPPORTED_SCHEMA',
+          `Provenance schemaVersion ${schemaMismatch} is not supported (expected ${PROVENANCE_SCHEMA_VERSION})`,
+          { sloId: input.sloId, schemaVersion: String(schemaMismatch) }
+        );
+      }
+      // Legacy "monolithic rule group" fallthrough lands here — such groups
+      // have no `osd_slo_provenance` annotation at all.
       throw new SloNotFoundError(input.sloId);
     }
 
@@ -2176,6 +2182,43 @@ function buildAlertGroupWithProvenance(
  */
 function provenanceFrom(annotationValue: string): AlertProvenance | null {
   return parseAlertProvenance(annotationValue);
+}
+
+/**
+ * Session B (Item 1) — disambiguate "schema version we can't parse" from
+ * "no matching group" in `recover()`. `findAdoptableAlertGroup` collapses
+ * both into `null` because `parseAlertProvenance` rejects everything whose
+ * `schemaVersion` isn't `PROVENANCE_SCHEMA_VERSION`; the route/UI needs to
+ * distinguish the two so operators see "upgrade plugin" instead of "SLO
+ * not found".
+ *
+ * Returns the mismatched schemaVersion when a group carrying a parseable
+ * `osd_slo_provenance` with matching `sloId` + unknown `schemaVersion` is
+ * found; `null` otherwise. Kept local because it's the only caller.
+ */
+function findAlertGroupWithUnsupportedSchema(
+  groups: GeneratedRuleGroup[],
+  sloId: string
+): number | null {
+  for (const group of groups) {
+    const firstRule = group.rules[0];
+    if (!firstRule || !firstRule.annotations) continue;
+    const raw = firstRule.annotations[ALERT_PROVENANCE_ANNOTATION_KEY];
+    if (typeof raw !== 'string' || raw.length === 0) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      continue;
+    }
+    if (!parsed || typeof parsed !== 'object') continue;
+    const obj = parsed as { sloId?: unknown; schemaVersion?: unknown };
+    if (obj.sloId !== sloId) continue;
+    if (typeof obj.schemaVersion !== 'number') continue;
+    if (obj.schemaVersion === PROVENANCE_SCHEMA_VERSION) continue;
+    return obj.schemaVersion;
+  }
+  return null;
 }
 
 /**

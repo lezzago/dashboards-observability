@@ -13,9 +13,9 @@
  *      `recover()` for each, assert SOs materialize, `getStatuses` resumes,
  *      and the ruler was NOT re-upserted (idempotent adoption).
  *   D. Tamper test: drop the expected recording group → `ORPHAN_SPEC_DRIFT`.
- *   E. Schema-forward: mutate provenance `schemaVersion` to 2 → schema error
- *      surfaces (either `ORPHAN_UNSUPPORTED_SCHEMA` or `SloNotFoundError`
- *      depending on which detection path runs first — documented below).
+ *   E. Schema-forward: mutate provenance `schemaVersion` to 2 → recover()
+ *      surfaces `ORPHAN_UNSUPPORTED_SCHEMA` so the UI can render an
+ *      "upgrade plugin" affordance rather than "SLO not found".
  *   F. Tombstone path: happy `delete` then `recover` surfaces
  *      `ORPHAN_TOMBSTONED`; `acknowledgeTombstone: true` clears it.
  *
@@ -27,7 +27,6 @@
 import {
   SloAdoptionError,
   SloDeployContext,
-  SloNotFoundError,
   SloRuleRefStoreLite,
   SloService,
   SloStatusAggregator,
@@ -422,7 +421,7 @@ describe('Phase 4 adoption integration (W4.10)', () => {
   // --------------------------------------------------------------------------
   // Scenario E — Schema-forward provenance (v2)
   // --------------------------------------------------------------------------
-  it('Scenario E: schemaVersion=2 provenance surfaces a schema error (SloAdoptionError or SloNotFoundError)', async () => {
+  it('Scenario E: schemaVersion=2 provenance surfaces ORPHAN_UNSUPPORTED_SCHEMA', async () => {
     const { ruler, svc, deployW1D1, datasourceD1 } = buildHarness();
 
     // Hand-build an alert + recording group carrying a v2 provenance
@@ -458,16 +457,11 @@ describe('Phase 4 adoption integration (W4.10)', () => {
       { workspaceId }
     );
     // Build a v1 provenance first, then mutate schemaVersion to 2 *after*
-    // JSON.stringify so the string carries schemaVersion: 2. parseAlertProvenance
-    // will reject it, so findAdoptableAlertGroup won't see the group as ours
-    // and the service ends up in the SloNotFoundError branch. The
-    // service.recover code path does have an explicit ORPHAN_UNSUPPORTED_SCHEMA
-    // arm, but today's route-level detector (verifyProvenance in
-    // slo_adoption_verify.ts) is the only caller that can tell the two apart.
-    // Follow-up cleanup: unify the schema-forward detection so the service's
-    // own recover() can surface ORPHAN_UNSUPPORTED_SCHEMA without needing
-    // `verifyProvenance`. This assertion accepts either outcome to stay honest
-    // about the current gap.
+    // JSON.stringify so the string carries schemaVersion: 2.
+    // parseAlertProvenance rejects the schemaVersion mismatch; Session B
+    // (Item 1) closed the gap so `svc.recover` still disambiguates this
+    // from "no such SLO" — a loose scan keyed on sloId + mismatched
+    // schemaVersion now promotes the failure to ORPHAN_UNSUPPORTED_SCHEMA.
     const v1Provenance = buildAlertProvenance({
       pluginVersion: '9.9.9',
       sloId,
@@ -514,10 +508,8 @@ describe('Phase 4 adoption integration (W4.10)', () => {
     const err = await svc
       .recover({ sloId, datasourceId: datasourceD1.id, workspaceId }, deployW1D1)
       .catch((e: unknown) => e);
-    expect(
-      (err instanceof SloAdoptionError && err.code === 'ORPHAN_UNSUPPORTED_SCHEMA') ||
-        err instanceof SloNotFoundError
-    ).toBe(true);
+    expect(err).toBeInstanceOf(SloAdoptionError);
+    expect((err as SloAdoptionError).code).toBe('ORPHAN_UNSUPPORTED_SCHEMA');
   });
 
   // --------------------------------------------------------------------------

@@ -373,6 +373,67 @@ describe('W4.6 GET /_orphans', () => {
     });
   });
 
+  it('surfaces unsupported-schema discriminator fields on unknowns so the UI can distinguish "upgrade plugin" from "legacy layout"', async () => {
+    const { router, reconciler } = await setupWiring({
+      ruleDedupEnabled: true,
+      ruleAdoptionEnabled: true,
+    });
+
+    reconciler.reconcileOnce.mockResolvedValueOnce({
+      startedAt: '2026-04-29T00:00:00Z',
+      finishedAt: '2026-04-29T00:00:01Z',
+      durationMs: 1000,
+      datasourceIds: ['ds-7'],
+      missingBySlo: [],
+      orphans: [],
+      adoptableOrphans: [],
+      unknownOrphans: [
+        {
+          datasourceId: 'ds-7',
+          namespace: 'slo-generated-ds-7',
+          groupName: 'slo:alerts:future-slo',
+          diagnostic: 'provenance schemaVersion 99 not supported (expected 1)',
+          sourceSloId: 'slo-from-future',
+          sourceWorkspaceId: 'ds-7',
+          schemaVersion: 99,
+          specIntegrity: 'unsupported_schema',
+        },
+        {
+          datasourceId: 'ds-7',
+          namespace: 'slo-generated-ds-7',
+          groupName: 'slo-legacy-monolithic',
+          diagnostic: 'pre-Phase-3 rule layout; not eligible for adoption',
+        },
+      ],
+      errors: [],
+      danglingRefs: [],
+      graceDeletions: [],
+    });
+
+    const handler = getHandler(router, 'get', (p) => p.endsWith('/_orphans'));
+    const res = makeRes();
+    await handler(makeCtx(), { query: {} }, res);
+
+    expect(res.ok).toHaveBeenCalled();
+    const body = (res.ok.mock.calls[0][0] as { body: unknown }).body as {
+      candidates: Array<Record<string, unknown>>;
+      unknowns: Array<Record<string, unknown>>;
+    };
+    expect(body.unknowns).toHaveLength(2);
+    expect(body.unknowns[0]).toMatchObject({
+      groupName: 'slo:alerts:future-slo',
+      sourceSloId: 'slo-from-future',
+      schemaVersion: 99,
+      specIntegrity: 'unsupported_schema',
+    });
+    expect(body.unknowns[1]).toMatchObject({
+      groupName: 'slo-legacy-monolithic',
+      diagnostic: expect.stringContaining('pre-Phase-3'),
+    });
+    expect(body.unknowns[1].sourceSloId).toBeUndefined();
+    expect(body.unknowns[1].specIntegrity).toBeUndefined();
+  });
+
   it('forwards a ?datasourceId= filter to reconcileOnce', async () => {
     const { router, reconciler } = await setupWiring({
       ruleDedupEnabled: true,

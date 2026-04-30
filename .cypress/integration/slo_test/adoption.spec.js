@@ -9,7 +9,7 @@
  * SLO rule-adoption Phase 4 W4.11 end-to-end.
  *
  * Run locally with:
- *   yarn cypress:run-without-security --spec \
+ *   yarn cypress:run --spec \
  *     .cypress/integration/slo_test/adoption.spec.js
  *
  * Requires the observability-stack dev cluster (Cortex-backed `prometheus`
@@ -20,19 +20,25 @@
  * `before` hook and skips every `it()` so CI stays green regardless of the
  * runtime config.
  *
- * Scenarios (per W4.11):
+ * Scenarios (Session B — Item 3 reconciliation with Batch 3 UI):
  *
  *   1. Lost-SO recovery — create an SLO, backdoor-delete the saved object
- *      so the rule group is "owner-less", open the Recover tab, click
+ *      so the rule group is "owner-less", open the Adoption page, click
  *      Recover, and assert the SLO reappears on the listing.
  *   2. Tamper — backdoor-delete the SO and then tamper with the recording
- *      group via the ruler admin API. The row renders with a drift badge
- *      and the Recover button is disabled.
- *   3. Cross-datasource clone — clone an orphan from datasource A into
- *      datasource B (single-OSD variant; the plan's dual-OSD phrasing is a
- *      stretch the service-side integration test in W4.10 already covers).
+ *      group via the ruler admin API. Detector reclassifies the orphan as
+ *      drift (`specIntegrity: 'mismatch'`) and it lands in the unknowns
+ *      accordion; Recover is never offered.
+ *   3. Unsupported-schema (Session B Item 1) — seed a group directly on the
+ *      ruler with a bumped provenance schemaVersion. The unknowns row
+ *      surfaces the schema-unknown copy so operators can distinguish
+ *      "upgrade plugin" from "legacy layout".
  *   4. No-external-vendor DOM assertion — explicit check that the external
- *      dashboards vendor is not named on either tab of the adoption page.
+ *      dashboards vendor is not named on the adoption page.
+ *
+ * Batch 3 shipped the Recover page only — there is no Clone tab. Cross-
+ * datasource clone is covered by the service-layer integration test
+ * (`phase4_adoption_integration.test.ts`) and doesn't need a Cypress arm.
  *
  * Backdoor-delete path: the plugin does not expose a test-only hook that
  * removes the SLO saved object without also tearing down the ruler-side
@@ -158,17 +164,90 @@ function backdoorDeleteSo(sloId) {
 }
 
 /**
- * Tamper with the recording group via the Cortex / Prometheus-compatible
- * ruler admin API. The endpoint lives at the unprefixed root per the plugin
- * CLAUDE.md. `provisioning` comes from the SLO create response.
+ * Tamper with the recording group by issuing a DELETE via the ruler admin
+ * API. The reconciler's detector notices the alert group still carries
+ * provenance but the fingerprint-matched recording group is missing — it
+ * classifies the orphan as `specIntegrity: 'mismatch'` and routes it to the
+ * unknowns accordion. The resulting row never exposes a Recover button.
+ *
+ * `provisioning.recordingFingerprints` carries one fingerprint per objective.
+ * We tamper with the first one — enough to flip integrity for this spec.
  */
-function tamperRulerGroup(provisioning) {
-  if (!provisioning || !provisioning.rulerNamespace || !provisioning.ruleGroupName) return;
+function tamperRecordingGroup(provisioning) {
+  if (
+    !provisioning ||
+    !provisioning.rulerNamespace ||
+    !provisioning.recordingFingerprints
+  ) {
+    return;
+  }
+  const fp = Object.values(provisioning.recordingFingerprints)[0];
+  if (!fp) return;
   cy.request({
     method: 'DELETE',
     url: `${RULER_ROOT}/api/v1/rules/${encodeURIComponent(
       provisioning.rulerNamespace
-    )}/${encodeURIComponent(provisioning.ruleGroupName)}`,
+    )}/${encodeURIComponent(`slo:rec:${fp}`)}`,
+    failOnStatusCode: false,
+  });
+}
+
+/**
+ * Seed a synthetic alert rule group on the ruler whose `osd_slo_provenance`
+ * annotation carries a schemaVersion this plugin doesn't recognize. Exercises
+ * the Session B Item 1 path — reconciler reports the orphan as
+ * `specIntegrity: 'unsupported_schema'` with `sourceSloId` + `schemaVersion`
+ * populated, and the unknowns table renders the "upgrade plugin" copy.
+ *
+ * The synthetic group carries a single always-firing-false alert rule with
+ * the annotation on it. That's enough for the provenance scanner — the spec
+ * hash doesn't need to verify (schemaVersion check short-circuits first).
+ */
+function seedUnsupportedSchemaOrphan(datasourceId, sloId) {
+  const namespace = `slo-generated-${datasourceId}`;
+  const groupName = `slo:alerts:${sloId}_future`;
+  const provenance = {
+    schemaVersion: 999,
+    pluginVersion: 'cypress-future-99.9.9',
+    sloId,
+    workspaceId: datasourceId,
+    datasourceId,
+    createdAt: '2099-01-01T00:00:00Z',
+    updatedAt: '2099-01-01T00:00:00Z',
+    specSha256: '0'.repeat(64),
+    spec: { note: 'unsupported-schema fixture' },
+  };
+  const groupYaml = [
+    `name: ${groupName}`,
+    `interval: 60s`,
+    `rules:`,
+    `  - alert: CypressFutureProvenanceSentinel`,
+    `    expr: vector(0) > 1`,
+    `    for: 5m`,
+    `    labels:`,
+    `      slo_id: ${sloId}`,
+    `      slo_alarm_type: sentinel`,
+    `    annotations:`,
+    `      osd_slo_provenance: '${JSON.stringify(provenance).replace(/'/g, "''")}'`,
+    `      summary: "future-schema provenance"`,
+  ].join('\n');
+  cy.request({
+    method: 'POST',
+    url: `${RULER_ROOT}/api/v1/rules/${encodeURIComponent(namespace)}`,
+    headers: { 'Content-Type': 'application/yaml' },
+    body: groupYaml,
+    failOnStatusCode: false,
+  });
+  return { namespace, groupName };
+}
+
+function removeRulerGroup(namespace, groupName) {
+  if (!namespace || !groupName) return;
+  cy.request({
+    method: 'DELETE',
+    url: `${RULER_ROOT}/api/v1/rules/${encodeURIComponent(namespace)}/${encodeURIComponent(
+      groupName
+    )}`,
     failOnStatusCode: false,
   });
 }
@@ -179,18 +258,13 @@ function tamperRulerGroup(provisioning) {
 
 describe('SLO rule adoption — Phase 4 W4.11', () => {
   const datasourceId = Cypress.env('sloDatasourceId') || 'prom_integ_test';
-  // Second datasource for the cross-datasource clone scenario. Defaults to a
-  // second prom backend the observability-stack init script seeds; override
-  // via `cypress.config.js` env if the local fixture uses a different name.
-  const datasourceIdB =
-    Cypress.env('sloDatasourceIdB') || Cypress.env('sloSecondDatasourceId') || 'prom_integ_test_b';
 
   // Per-it trackers so the after hook can mop up whatever each scenario
   // landed, regardless of where it bailed.
   let lostSloId = null;
   let tamperSloId = null;
-  let cloneSourceSloId = null;
-  let cloneTargetSloId = null;
+  let unsupportedSchemaSloId = null;
+  let unsupportedSchemaGroup = null;
   // Whether the server has the adoption feature flags on. Set in the before
   // hook; used by every it() to decide whether to skip.
   let adoptionEnabled = false;
@@ -215,9 +289,10 @@ describe('SLO rule adoption — Phase 4 W4.11', () => {
 
   after(() => {
     // Cleanup — best-effort. Each delete is idempotent and never fails the run.
-    [lostSloId, tamperSloId, cloneSourceSloId, cloneTargetSloId]
-      .filter(Boolean)
-      .forEach((id) => deleteSlo(id));
+    [lostSloId, tamperSloId].filter(Boolean).forEach((id) => deleteSlo(id));
+    if (unsupportedSchemaGroup) {
+      removeRulerGroup(unsupportedSchemaGroup.namespace, unsupportedSchemaGroup.groupName);
+    }
   });
 
   it('recovers a lost SLO via the adoption admin page', function () {
@@ -231,38 +306,34 @@ describe('SLO rule adoption — Phase 4 W4.11', () => {
       expect(id, 'SLO create returned an id').to.be.a('string');
       lostSloId = id;
 
-      // Sanity: the ruler side created the alert + recording groups. Only assert
-      // when the provisioning block is Prometheus-backed; other backends
-      // would simply skip the ruler step.
+      // Sanity: the ruler side created the alert + recording groups. Only
+      // assert when the provisioning block is Prometheus-backed; other
+      // backends would simply skip the ruler step.
       if (provisioning && provisioning.backend === 'prometheus') {
-        expect(provisioning.ruleGroupName, 'ruleGroupName').to.be.a('string');
         expect(provisioning.rulerNamespace, 'rulerNamespace').to.be.a('string');
       }
 
       // Backdoor-delete the SO so the rule group is orphaned.
       backdoorDeleteSo(id);
 
-      // Navigate to the adoption page. The Recover tab is the default
-      // landing tab per Batch 3's router; `#?tab=recover` is accepted too.
+      // Navigate to the adoption page. Batch 3 ships a single page shell
+      // that renders the Recover table directly; there's no tab router.
       cy.visit(`/app/${APP_ID}#/slos/adoption`);
+      cy.get('[data-test-subj="sloAdoption-page"]', { timeout: 30000 }).should('be.visible');
 
-      // Adoption page shell — data-test-subj assumed — verify against Batch 3 UI once landed.
-      cy.get('[data-test-subj="sloAdoptionPage"]', { timeout: 30000 }).should('be.visible');
+      // Adoptable row: each candidate carries a name-text cell keyed on
+      // sloId, and an integrity badge carrying the `ok` suffix. The recover
+      // button is the actionable anchor.
+      cy.get(`[data-test-subj="sloAdoption-recoverTab-name-${id}"]`, {
+        timeout: 30000,
+      }).should('be.visible');
+      cy.get(`[data-test-subj="sloAdoption-integrityBadge-ok-${id}"]`).should('be.visible');
 
-      // The orphan row is keyed on the SLO id. The `_orphans` endpoint is
-      // reconciler-backed, so the first GET will sweep live and surface the
-      // orphan synchronously.
-      cy.get(`[data-test-subj="sloAdoption-orphanRow-${id}"]`, { timeout: 30000 })
-        .should('be.visible')
-        // data-test-subj assumed — verify against Batch 3 UI once landed.
-        .within(() => {
-          cy.get('[data-test-subj="sloAdoption-orphanIntegrityBadge-ok"]').should('be.visible');
-          cy.get('[data-test-subj="sloAdoption-recoverButton"]')
-            .should('not.be.disabled')
-            .click();
-        });
+      cy.get(`[data-test-subj="sloAdoption-recoverTab-recoverButton-${id}"]`)
+        .should('not.be.disabled')
+        .click();
 
-      // EUI success toast — Batch 3's copy is "SLO recovered" per the plan.
+      // EUI success toast — Batch 3's copy is "SLO recovered".
       cy.get('.euiToast--success', { timeout: 20000 })
         .should('be.visible')
         .and('contain.text', 'SLO recovered');
@@ -277,7 +348,7 @@ describe('SLO rule adoption — Phase 4 W4.11', () => {
     });
   });
 
-  it('disables Recover and surfaces the drift callout when the recording rule is tampered', function () {
+  it('surfaces a tampered orphan in the unknowns accordion and never offers Recover', function () {
     if (!adoptionEnabled) {
       this.skip();
       return;
@@ -290,128 +361,79 @@ describe('SLO rule adoption — Phase 4 W4.11', () => {
 
       // Step 1 — orphan the saved object.
       backdoorDeleteSo(id);
-      // Step 2 — tamper with the ruler group so `specIntegrity !== 'ok'`.
-      // The reconciler treats an out-of-band edit/delete of the recording
-      // group as drift and the row surfaces "Spec drift detected".
-      tamperRulerGroup(provisioning);
+      // Step 2 — tamper with the recording group so the fingerprint-coverage
+      // check fails. Detector routes this as `specIntegrity: 'mismatch'`,
+      // which lands in the unknowns bucket (not the candidates table) — the
+      // Recover table only renders `specIntegrity === 'ok'` rows.
+      tamperRecordingGroup(provisioning);
 
       cy.visit(`/app/${APP_ID}#/slos/adoption`);
-      cy.get('[data-test-subj="sloAdoptionPage"]', { timeout: 30000 }).should('be.visible');
+      cy.get('[data-test-subj="sloAdoption-page"]', { timeout: 30000 }).should('be.visible');
 
-      // Row exists, but integrity flips to drift and recover is disabled.
-      // data-test-subj assumed — verify against Batch 3 UI once landed.
-      cy.get(`[data-test-subj="sloAdoption-orphanRow-${id}"]`, { timeout: 30000 })
+      // No Recover action for this sloId — drift is not adoptable.
+      cy.get(`[data-test-subj="sloAdoption-recoverTab-recoverButton-${id}"]`).should('not.exist');
+
+      // Unknowns accordion shows the row. The server-side detector populates
+      // a `diagnostic` mentioning the missing recording group; the table
+      // surfaces the diagnostic copy verbatim.
+      cy.get('[data-test-subj="sloAdoption-recoverTab-unknownsAccordion"]', {
+        timeout: 30000,
+      })
         .should('be.visible')
-        .within(() => {
-          cy.get('[data-test-subj="sloAdoption-orphanIntegrityBadge-drift"]')
-            .should('be.visible')
-            .and('contain.text', 'drift');
-          cy.get('[data-test-subj="sloAdoption-recoverButton"]').should(
-            'satisfy',
-            ($btn) =>
-              $btn.is(':disabled') ||
-              $btn.attr('aria-disabled') === 'true' ||
-              $btn.attr('disabled') !== undefined
-          );
-          // Expand the row for the drift-explainer callout.
-          cy.get('[data-test-subj="sloAdoption-orphanRowExpand"]').click();
-        });
+        .click();
 
-      // The callout copy mentions out-of-band / drift. Case-insensitive so
-      // whatever Batch 3 settled on is accepted.
-      cy.get('[data-test-subj="sloAdoption-driftCallout"]', { timeout: 10000 })
+      cy.get('[data-test-subj="sloAdoption-recoverTab-unknownsTable"]')
         .should('be.visible')
         .invoke('text')
         .then((text) => {
-          expect(text.toLowerCase()).to.match(/out[- ]of[- ]band|drift/);
+          expect(text.toLowerCase()).to.match(/missing recording group|drift|mismatch/);
         });
     });
   });
 
-  it('clones an SLO into another datasource', function () {
+  it('surfaces unsupported-schema orphans with the "upgrade plugin" copy (Session B Item 1)', function () {
     if (!adoptionEnabled) {
       this.skip();
       return;
     }
-    if (datasourceId === datasourceIdB) {
-      cy.log('No second datasource configured (sloSecondDatasourceId); skipping clone scenario');
-      this.skip();
-      return;
-    }
 
-    const sourceName = randomId('adoption-clone-source');
-    const targetName = randomId('adoption-clone-target');
-    createSlo(datasourceId, sourceName).then(({ id: sourceId }) => {
-      expect(sourceId, 'source SLO create returned an id').to.be.a('string');
-      cloneSourceSloId = sourceId;
+    const sloId = randomId('adoption-future-schema');
+    unsupportedSchemaSloId = sloId;
+    unsupportedSchemaGroup = null;
 
-      cy.visit(`/app/${APP_ID}#/slos/adoption?tab=clone`);
-      cy.get('[data-test-subj="sloAdoptionPage"]', { timeout: 30000 }).should('be.visible');
+    // Seed a synthetic alert group whose provenance schemaVersion is 999.
+    const { namespace, groupName } = {
+      namespace: `slo-generated-${datasourceId}`,
+      groupName: `slo:alerts:${sloId}_future`,
+    };
+    unsupportedSchemaGroup = { namespace, groupName };
+    seedUnsupportedSchemaOrphan(datasourceId, sloId);
 
-      // Clone tab — the tab button is stable across reloads, but the query
-      // param already selects it; click as a belt-and-braces guard.
-      // data-test-subj assumed — verify against Batch 3 UI once landed.
-      cy.get('[data-test-subj="sloAdoption-tab-clone"]').click();
+    cy.visit(`/app/${APP_ID}#/slos/adoption`);
+    cy.get('[data-test-subj="sloAdoption-page"]', { timeout: 30000 }).should('be.visible');
 
-      // Source datasource picker — select datasource A.
-      cy.get('[data-test-subj="sloAdoption-cloneSourceDatasource"]')
-        .click()
-        .get(`[data-test-subj="sloAdoption-cloneSourceDatasource-option-${datasourceId}"]`)
-        .click();
+    // Unsupported-schema never surfaces a Recover button.
+    cy.get(`[data-test-subj="sloAdoption-recoverTab-recoverButton-${sloId}"]`).should(
+      'not.exist'
+    );
 
-      // Adoptable rows for datasource A should include the one we just seeded.
-      // data-test-subj assumed — verify against Batch 3 UI once landed.
-      cy.get(`[data-test-subj="sloAdoption-cloneRow-${sourceId}"]`, { timeout: 30000 })
-        .should('be.visible')
-        .find('[data-test-subj="sloAdoption-cloneRowCheckbox"]')
-        .click();
+    cy.get('[data-test-subj="sloAdoption-recoverTab-unknownsAccordion"]', {
+      timeout: 30000,
+    })
+      .should('be.visible')
+      .click();
 
-      // Target datasource picker — select datasource B.
-      cy.get('[data-test-subj="sloAdoption-cloneTargetDatasource"]')
-        .click()
-        .get(`[data-test-subj="sloAdoption-cloneTargetDatasource-option-${datasourceIdB}"]`)
-        .click();
-
-      // Optional override name so the cloned SLO is easy to identify + clean up.
-      cy.get('[data-test-subj="sloAdoption-cloneOverrideName"]').clear().type(targetName);
-
-      cy.get('[data-test-subj="sloAdoption-cloneSubmit"]').click();
-
-      // Success toast + id for cleanup. The clone response body carries the
-      // new SLO id in a `data-test-clone-id` attribute per Batch 3.
-      cy.get('.euiToast--success', { timeout: 30000 })
-        .should('be.visible')
-        .and('contain.text', 'cloned');
-
-      // Verify via the plugin API that the target SLO landed on datasource B.
-      cy.request({
-        method: 'GET',
-        url: SLO_BASE,
-        headers: { 'osd-xsrf': 'true' },
-        qs: { datasourceId: datasourceIdB },
-        failOnStatusCode: false,
-      }).then((resp) => {
-        expect(resp.status).to.eq(200);
-        const items = (resp.body && resp.body.items) || [];
-        const cloned = items.find((s) => s.name === targetName);
-        expect(cloned, `clone ${targetName} present on ${datasourceIdB}`).to.not.be.undefined;
-        cloneTargetSloId = cloned.id;
+    // Dedicated "upgrade plugin" cell keyed on sloId. Session B Item 1
+    // extended the unknowns envelope with `sourceSloId` + `schemaVersion`,
+    // which the UI renders as a danger-colored message.
+    cy.get(`[data-test-subj="sloAdoption-recoverTab-unknownsUnsupportedSchema-${sloId}"]`, {
+      timeout: 30000,
+    })
+      .should('be.visible')
+      .invoke('text')
+      .then((text) => {
+        expect(text.toLowerCase()).to.contain('unsupported provenance schemaversion');
       });
-
-      // The source SLO is still listed on datasource A (clone does not move).
-      cy.request({
-        method: 'GET',
-        url: SLO_BASE,
-        headers: { 'osd-xsrf': 'true' },
-        qs: { datasourceId },
-        failOnStatusCode: false,
-      }).then((resp) => {
-        expect(resp.status).to.eq(200);
-        const items = (resp.body && resp.body.items) || [];
-        const source = items.find((s) => s.id === sourceId);
-        expect(source, 'source SLO still present on datasource A').to.not.be.undefined;
-      });
-    });
   });
 
   it('does not mention the external dashboards vendor by name anywhere on the adoption page', function () {
@@ -420,17 +442,9 @@ describe('SLO rule adoption — Phase 4 W4.11', () => {
       return;
     }
 
-    // Recover tab first.
     cy.visit(`/app/${APP_ID}#/slos/adoption`);
-    cy.get('[data-test-subj="sloAdoptionPage"]', { timeout: 30000 }).should('be.visible');
-    // Any of: Recover-tab list, empty-prompt, or server-error callout — we
-    // only require that the page chrome rendered before we assert absence.
+    cy.get('[data-test-subj="sloAdoption-page"]', { timeout: 30000 }).should('be.visible');
     // Plan constraint: no external dashboards vendor named in the DOM.
-    cy.contains(/grafana/i).should('not.exist');
-
-    // Clone tab.
-    // data-test-subj assumed — verify against Batch 3 UI once landed.
-    cy.get('[data-test-subj="sloAdoption-tab-clone"]').click();
     cy.contains(/grafana/i).should('not.exist');
   });
 });

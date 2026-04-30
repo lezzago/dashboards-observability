@@ -440,6 +440,15 @@ export interface SloReconcilerLite {
       namespace: string;
       groupName: string;
       diagnostic?: string;
+      // Carried through when the detector identified the orphan as an SLO
+      // whose provenance schemaVersion we don't recognize. The UI renders an
+      // "upgrade plugin" affordance on rows where `specIntegrity` is
+      // `'unsupported_schema'` — without these the unknown bucket is
+      // indistinguishable from a legacy rule-layout group.
+      sourceSloId?: string;
+      sourceWorkspaceId?: string;
+      schemaVersion?: number;
+      specIntegrity?: 'ok' | 'mismatch' | 'unsupported_schema';
     }>;
   }>;
 }
@@ -491,11 +500,21 @@ export async function handleListOrphans(
       tombstoneCreatedAt: o.tombstoneCreatedAt,
     }));
 
+    // Surface the unsupported-schema discriminator on the unknown bucket. The
+    // detector (`detectOrphanDiff`) already populates `specIntegrity`,
+    // `sourceSloId`, and `schemaVersion` for orphans whose alert-provenance
+    // was parseable but used a schemaVersion this plugin doesn't recognize;
+    // the UI renders a distinct "upgrade plugin" row for those so operators
+    // don't confuse them with pre-Phase-3 legacy groups.
     const unknowns = result.unknownOrphans.map((o) => ({
       datasourceId: o.datasourceId,
       namespace: o.namespace,
       groupName: o.groupName,
       diagnostic: o.diagnostic,
+      sourceSloId: o.sourceSloId,
+      sourceWorkspaceId: o.sourceWorkspaceId,
+      schemaVersion: o.schemaVersion,
+      specIntegrity: o.specIntegrity,
     }));
 
     return { status: 200, body: { candidates, unknowns } };
