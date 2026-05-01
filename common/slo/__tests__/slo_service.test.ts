@@ -349,3 +349,66 @@ describe('SloService dedup flag (Phase 3 W3.6)', () => {
     expect(svc.isDedupEnabled()).toBe(true);
   });
 });
+
+// ============================================================================
+// Listing datasource filter — normalize ds-N id or name to canonical name
+// (Bug A: URL param sends `ds-4` but spec.datasourceId is persisted as the
+// user-facing name, so naive equality filter never matches.)
+// ============================================================================
+
+describe('SloService.list — datasource filter normalization', () => {
+  function mkCtxWithResolver(byInput: Record<string, Datasource>): SloStatusAggregationContext {
+    return {
+      client: ({} as unknown) as AlertingOSClient,
+      workspaceId: 'default',
+      resolveDatasource: async (input) => byInput[input],
+    };
+  }
+
+  const DS: Datasource = {
+    id: 'ds-4',
+    name: 'ObservabilityStack_Prometheus',
+    type: 'prometheus',
+    url: 'http://prometheus:9090',
+    enabled: true,
+  };
+
+  async function seedThreeSLOs(svc: SloService) {
+    await svc.create({ spec: validSpec({ datasourceId: 'ObservabilityStack_Prometheus' }) });
+    await svc.create({ spec: validSpec({ datasourceId: 'ObservabilityStack_Prometheus' }) });
+    await svc.create({ spec: validSpec({ datasourceId: 'OtherDatasource' }) });
+  }
+
+  it('matches stored spec.datasourceId when URL param is the internal ds-N id', async () => {
+    const svc = new SloService(noopLogger());
+    await seedThreeSLOs(svc);
+    const ctx = mkCtxWithResolver({ 'ds-4': DS });
+    const out = await svc.list({ datasourceId: ['ds-4'] }, ctx);
+    expect(out).toHaveLength(2);
+    expect(out.every((s) => s.datasourceId === 'ObservabilityStack_Prometheus')).toBe(true);
+  });
+
+  it('matches stored spec.datasourceId when URL param is the datasource name', async () => {
+    const svc = new SloService(noopLogger());
+    await seedThreeSLOs(svc);
+    const ctx = mkCtxWithResolver({ ObservabilityStack_Prometheus: DS });
+    const out = await svc.list({ datasourceId: ['ObservabilityStack_Prometheus'] }, ctx);
+    expect(out).toHaveLength(2);
+  });
+
+  it('drops unresolved datasource ids (does not silently broaden the filter)', async () => {
+    const svc = new SloService(noopLogger());
+    await seedThreeSLOs(svc);
+    const ctx = mkCtxWithResolver({}); // resolver returns undefined for everything
+    const out = await svc.list({ datasourceId: ['ds-does-not-exist'] }, ctx);
+    expect(out).toHaveLength(0);
+  });
+
+  it('passes through unchanged when no resolver is available (offline dev / tests)', async () => {
+    const svc = new SloService(noopLogger());
+    await seedThreeSLOs(svc);
+    // No ctx — falls back to raw input. Callers that pass names still match.
+    const out = await svc.list({ datasourceId: ['ObservabilityStack_Prometheus'] });
+    expect(out).toHaveLength(2);
+  });
+});

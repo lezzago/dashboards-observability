@@ -1755,13 +1755,23 @@ export class SloService {
   // ---------- listing ----------
 
   async list(filters?: SloListFilters, ctx?: SloStatusAggregationContext): Promise<SloSummary[]> {
-    const all = await this.store.list(filters?.datasourceId);
-    // `store.list` already OR-filtered by `filters.datasourceId` — if for any
-    // reason the store ignored it (test doubles, future backends), belt-and-
-    // braces filter again in memory so the contract stays consistent.
+    // Filter input arrives as either the internal ds-N id (from URL params)
+    // or the user-facing datasource name (from some legacy chip-paste paths).
+    // `spec.datasourceId` is persisted as the name, so resolve ids → names
+    // through `ctx.resolveDatasource` before hitting the store.
+    const normalizedDsIds = await this.normalizeDatasourceFilter(filters?.datasourceId, ctx);
+    // If the caller asked for specific datasources but none resolved, short-
+    // circuit — an empty array at the store layer is read as "no filter".
+    if (filters?.datasourceId && filters.datasourceId.length > 0 && normalizedDsIds?.length === 0) {
+      return [];
+    }
+    const all = await this.store.list(normalizedDsIds);
+    // `store.list` already OR-filtered by normalizedDsIds — if for any reason
+    // the store ignored it (test doubles, future backends), belt-and-braces
+    // filter again in memory so the contract stays consistent.
     const dsFiltered =
-      filters?.datasourceId && filters.datasourceId.length > 0
-        ? all.filter((d) => filters.datasourceId!.includes(d.spec.datasourceId))
+      normalizedDsIds && normalizedDsIds.length > 0
+        ? all.filter((d) => normalizedDsIds.includes(d.spec.datasourceId))
         : all;
 
     let filtered = dsFiltered;
@@ -1964,6 +1974,29 @@ export class SloService {
   }
 
   // ---------- helpers ----------
+
+  /**
+   * Resolve the caller's datasource filter list (mixed ds-N ids and names) to
+   * the canonical `name` form that `spec.datasourceId` is persisted as.
+   *
+   * Missing resolver (offline dev, tests without a ctx) — pass the input
+   * through; store-level filtering may still match if the caller already gave
+   * names. Missing datasource — drop that entry; the fallback alternative
+   * would silently broaden the filter to all datasources.
+   */
+  private async normalizeDatasourceFilter(
+    datasourceIds: string[] | undefined,
+    ctx?: SloStatusAggregationContext
+  ): Promise<string[] | undefined> {
+    if (!datasourceIds || datasourceIds.length === 0) return datasourceIds;
+    if (!ctx?.resolveDatasource) return datasourceIds;
+    const out: string[] = [];
+    for (const raw of datasourceIds) {
+      const ds = await ctx.resolveDatasource(raw);
+      if (ds?.name) out.push(ds.name);
+    }
+    return out;
+  }
 
   private async assertNameUnique(
     datasourceId: string,
