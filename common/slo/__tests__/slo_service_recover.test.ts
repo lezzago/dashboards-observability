@@ -836,4 +836,74 @@ describe('SloService.recover (W4.4)', () => {
     expect(err.message).toBe('bad');
     expect(err.context).toEqual({ sloId: 'x' });
   });
+
+  // ==========================================================================
+  // Bug E (S17.1) regression: id-or-name equivalence
+  // ==========================================================================
+  //
+  // Provenance annotations written before the name-canonicalization clean-up
+  // carry `datasourceId: "ds-N"` while the current UI calls the recover route
+  // with the user-facing name. `deploy.datasource` resolves to the same
+  // record either way, so recover accepts either form.
+
+  it('accepts the datasource NAME in input even though provenance records the ds-N id', async () => {
+    const { svc, ruler, deploy } = makeHarness();
+    const spec = validSpec();
+    seedRuler(ruler, {
+      spec,
+      sloId: 'slo-name-input',
+      workspaceId: 'ws-001',
+      datasourceId: 'prom-ds-001', // provenance gets the internal id
+    });
+    // Caller passes the user-facing NAME — no longer rejects as workspace mismatch.
+    const result = await svc.recover(
+      { sloId: 'slo-name-input', datasourceId: 'prom', workspaceId: 'ws-001' },
+      deploy
+    );
+    expect(result.slo.id).toBe('slo-name-input');
+  });
+
+  it('falls back to deploy.workspaceId when input.workspaceId is omitted', async () => {
+    const { svc, ruler, deploy } = makeHarness();
+    const spec = validSpec();
+    seedRuler(ruler, {
+      spec,
+      sloId: 'slo-no-ws',
+      workspaceId: 'ws-001',
+      datasourceId: 'prom-ds-001',
+    });
+    // Route-adapter type lets workspaceId be omitted — the Lite interface
+    // declares it optional while the service declares it required. Cast so
+    // the test exercises the service path that previously produced a
+    // namespace of `slo-generated-undefined`.
+    const result = await svc.recover(
+      ({ sloId: 'slo-no-ws', datasourceId: 'prom-ds-001' } as unknown) as Parameters<
+        typeof svc.recover
+      >[0],
+      deploy
+    );
+    expect(result.slo.id).toBe('slo-no-ws');
+  });
+
+  it('rejects with WORKSPACE_MISMATCH when input names a completely different datasource', async () => {
+    const { svc, ruler, deploy } = makeHarness();
+    const spec = validSpec();
+    seedRuler(ruler, {
+      spec,
+      sloId: 'slo-wrong-ds',
+      workspaceId: 'ws-001',
+      datasourceId: 'prom-ds-001',
+    });
+    // Deploy context's datasource is {id: prom-ds-001, name: prom}; input
+    // names neither. Should still be rejected rather than accepted.
+    await expect(
+      svc.recover(
+        { sloId: 'slo-wrong-ds', datasourceId: 'other-ds-999', workspaceId: 'ws-001' },
+        deploy
+      )
+    ).rejects.toMatchObject({
+      name: 'SloAdoptionError',
+      code: 'ORPHAN_WORKSPACE_MISMATCH',
+    });
+  });
 });

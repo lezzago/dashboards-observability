@@ -1396,7 +1396,12 @@ export class SloService {
         { sloId: input.sloId }
       );
     }
-    const namespace = sloRulerNamespaceFor(input.workspaceId);
+    // `input.workspaceId` is optional from the route adapter (it's declared
+    // required at the service contract, but Lite-typed callers routinely
+    // omit it). Fall back to the deploy context's workspace — that's what
+    // every other route does for namespace resolution.
+    const workspaceId = input.workspaceId || deploy.workspaceId;
+    const namespace = sloRulerNamespaceFor(workspaceId);
     const groups = await deploy.ruler.listRuleGroups(deploy.client, deploy.datasource, namespace);
     const match = findAdoptableAlertGroup(groups, input.sloId);
     if (!match) {
@@ -1441,8 +1446,16 @@ export class SloService {
       );
     }
 
-    // Steps 5-6: datasource + workspace match.
-    if (provenance.datasourceId !== input.datasourceId) {
+    // Steps 5-6: datasource + workspace match. Both sides may carry either
+    // the internal `ds-N` id or the user-facing datasource name (history:
+    // provenance annotations written before the name-canonicalization fix
+    // carry `datasourceId: "ds-N"`; routes today pass the name from the
+    // UI). Accept a match against either form by consulting the deploy
+    // context's resolved datasource.
+    const deployDsIds = new Set([deploy.datasource.id, deploy.datasource.name].filter(Boolean));
+    const provenanceMatchesDeploy = deployDsIds.has(provenance.datasourceId);
+    const inputMatchesDeploy = deployDsIds.has(input.datasourceId);
+    if (!provenanceMatchesDeploy || !inputMatchesDeploy) {
       throw new SloAdoptionError(
         'ORPHAN_WORKSPACE_MISMATCH',
         `Orphan belongs to datasource ${provenance.datasourceId}, not ${input.datasourceId}`,
@@ -1453,14 +1466,14 @@ export class SloService {
         }
       );
     }
-    if (provenance.workspaceId !== input.workspaceId) {
+    if (provenance.workspaceId !== workspaceId) {
       throw new SloAdoptionError(
         'ORPHAN_WORKSPACE_MISMATCH',
-        `Orphan belongs to workspace ${provenance.workspaceId}, not ${input.workspaceId}`,
+        `Orphan belongs to workspace ${provenance.workspaceId}, not ${workspaceId}`,
         {
           sloId: input.sloId,
           expectedWorkspaceId: provenance.workspaceId,
-          receivedWorkspaceId: input.workspaceId,
+          receivedWorkspaceId: workspaceId,
         }
       );
     }
@@ -1530,13 +1543,21 @@ export class SloService {
     const refcountChanges: RecoverRefcountChange[] = [];
     const incrementedFps: string[] = [];
 
+    // Match the create-path convention: refstore is keyed on
+    // `deploy.datasource.id` (the internal `ds-N`) + `deploy.workspaceId`
+    // (the canonical namespace tenant, = datasource name). The raw
+    // `input.*` values are what the UI sent; they don't appear in the
+    // create path so don't appear here either.
+    const refWorkspaceId = deploy.workspaceId;
+    const refDatasourceId = deploy.datasource.id;
+
     const rollbackRefs = async (): Promise<void> => {
       for (const fp of incrementedFps) {
         if (!this.refStore) continue;
         try {
           await this.refStore.decrementRef({
-            workspaceId: input.workspaceId,
-            datasourceId: input.datasourceId,
+            workspaceId: refWorkspaceId,
+            datasourceId: refDatasourceId,
             fingerprint: fp,
           });
         } catch (err) {
@@ -1558,7 +1579,7 @@ export class SloService {
       }
       let before = 0;
       try {
-        const existingRef = await this.refStore.get(input.workspaceId, input.datasourceId, fp);
+        const existingRef = await this.refStore.get(refWorkspaceId, refDatasourceId, fp);
         before = existingRef?.attributes.refcount ?? 0;
       } catch (err) {
         // Treat read failures as zero; the increment below will surface the
@@ -1571,8 +1592,8 @@ export class SloService {
       }
       try {
         await this.refStore.incrementRef({
-          workspaceId: input.workspaceId,
-          datasourceId: input.datasourceId,
+          workspaceId: refWorkspaceId,
+          datasourceId: refDatasourceId,
           fingerprint: fp,
           fingerprintVersion: FINGERPRINT_VERSION,
           groupName: `slo:rec:${fp}`,
