@@ -429,6 +429,53 @@ describe('SloReconciler — reconcileOnce', () => {
     expect(mocks.ruler.listRuleGroups.mock.calls[0][1].id).toBe('ds-a');
   });
 
+  it('reconcileOnce accepts the datasource NAME as filter input (id-or-name normalization)', async () => {
+    // Regression for Bug D (S16.1): admin calls _reconcile with either the
+    // internal ds-N id or the datasource name; `spec.datasourceId` is
+    // persisted as the name in prod. Previously a name-form filter produced
+    // an empty byDatasource map — docs were grouped under "ds-N" but the
+    // filter set was {"prom-name"}, so nothing matched.
+    const mocks = buildMocks();
+    const docA = mockDoc({
+      id: 'slo-a',
+      datasourceId: 'my-cortex', // persisted name, not the ds-N id
+      alertGroupName: 'grpA',
+    });
+    mocks.store.list.mockResolvedValue([docA]);
+    mocks.datasourceService.get.mockImplementation(async (raw: string) => {
+      // id-or-name fallback: resolve either form to the same record
+      if (raw === 'ds-a' || raw === 'my-cortex') {
+        return mockDatasource({ id: 'ds-a', name: 'my-cortex' });
+      }
+      return null;
+    });
+    mocks.ruler.listRuleGroups.mockResolvedValue([mockGroup('grpA')]);
+
+    const reconciler = makeReconciler(mocks);
+    const byName = await reconciler.reconcileOnce({ datasourceIds: ['my-cortex'] });
+    const byId = await reconciler.reconcileOnce({ datasourceIds: ['ds-a'] });
+
+    // Both forms produce the same sweep shape — one datasource visited, doc
+    // picked up, errors empty.
+    expect(byName.errors).toEqual([]);
+    expect(byName.datasourceIds).toEqual(['my-cortex']);
+    expect(byId.errors).toEqual([]);
+    expect(byId.datasourceIds).toEqual(['my-cortex']);
+  });
+
+  it('reconcileOnce surfaces an error for an unresolvable filter input (does not silently drop)', async () => {
+    const mocks = buildMocks();
+    mocks.store.list.mockResolvedValue([]);
+    mocks.datasourceService.get.mockResolvedValue(null); // every lookup misses
+
+    const reconciler = makeReconciler(mocks);
+    const result = await reconciler.reconcileOnce({ datasourceIds: ['bogus-ds'] });
+
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0].datasourceId).toBe('bogus-ds');
+    expect(result.errors[0].message).toMatch(/not registered/);
+  });
+
   it('empty state: no SLOs → zero-length arrays, still calls incSweeps', async () => {
     const mocks = buildMocks();
     mocks.store.list.mockResolvedValue([]);

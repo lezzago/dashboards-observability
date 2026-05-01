@@ -209,13 +209,59 @@ export function createSloReconciler(deps: SloReconcilerDeps): SloReconciler {
 
     const all = await deps.store.list();
 
-    // Group SLOs by datasourceId. The optional caller-supplied filter applies
-    // *before* the per-datasource loop so the admin endpoint can sweep a
-    // single datasource without touching the others.
-    const filter =
-      opts?.datasourceIds && opts.datasourceIds.length > 0
-        ? new Set(opts.datasourceIds)
-        : undefined;
+    // Normalize the caller-supplied filter. Admin endpoints accept either
+    // the internal `ds-N` id or the datasource display name — both hit this
+    // route. `doc.spec.datasourceId` is persisted as whatever the wizard
+    // sent (live prod: the name; some tests: the id). We resolve each raw
+    // input through `datasourceService.get()` (id-or-name fallback) and
+    // expand the filter set to include BOTH id and name so
+    // byDatasource-grouping matches either persistence shape. When we add
+    // the empty-bucket entries below (for "sweep a datasource with no
+    // SLOs"), we prefer the name — that's the canonical byDatasource key
+    // in production. Unresolvable entries surface as reconcile errors.
+    const rawFilter =
+      opts?.datasourceIds && opts.datasourceIds.length > 0 ? opts.datasourceIds : undefined;
+    const filterResolutionErrors: ReconcileErrorEntry[] = [];
+    let filter: Set<string> | undefined;
+    // For each raw filter input, remember which forms ({id, name}) we'll
+    // accept as matches so we can add a single empty bucket on the canonical
+    // name (prod) or id (legacy tests) only when no doc matched either form.
+    const resolvedInputs: Array<{ forms: string[] }> = [];
+    if (rawFilter) {
+      filter = new Set<string>();
+      for (const raw of rawFilter) {
+        let ds: Datasource | null;
+        try {
+          ds = await deps.datasourceService.get(raw);
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          filterResolutionErrors.push({
+            datasourceId: raw,
+            namespace: sloRulerNamespaceFor(workspaceIdFor(raw)),
+            message,
+          });
+          continue;
+        }
+        if (!ds) {
+          filterResolutionErrors.push({
+            datasourceId: raw,
+            namespace: sloRulerNamespaceFor(workspaceIdFor(raw)),
+            message: `Datasource "${raw}" is not registered`,
+          });
+          continue;
+        }
+        const forms: string[] = [];
+        if (ds.id) {
+          filter.add(ds.id);
+          forms.push(ds.id);
+        }
+        if (ds.name && ds.name !== ds.id) {
+          filter.add(ds.name);
+          forms.push(ds.name);
+        }
+        resolvedInputs.push({ forms });
+      }
+    }
 
     const byDatasource = new Map<string, SloDocument[]>();
     for (const doc of all) {
@@ -226,15 +272,24 @@ export function createSloReconciler(deps: SloReconcilerDeps): SloReconciler {
       else byDatasource.set(dsId, [doc]);
     }
 
-    // If the caller filtered to datasources that have no SLOs (e.g. the
-    // "sweep this datasource so we surface its orphans" path), we still want
-    // the sweep to visit them — add every filtered datasource to the map
-    // with an empty SLO list so the loop below sees it.
+    // Empty-bucket fallback: for each resolved filter input that didn't
+    // match any persisted doc, add empty entries so the sweep still visits
+    // the datasource (prod orphan-only path, or refStore grace-deletion
+    // path after every SO has been deleted). We add an entry for EACH form
+    // (id and name): refStore-keyed sweeps may have been written under the
+    // id (pre-Phase-4 tests) while ruler namespaces + provenance follow
+    // the name (Phase 4 prod). When docs for a form already exist, we skip
+    // adding a duplicate so the sweep count matches what callers assert.
     if (filter) {
-      for (const id of filter) {
-        if (!byDatasource.has(id)) byDatasource.set(id, []);
+      for (const entry of resolvedInputs) {
+        if (entry.forms.some((f) => byDatasource.has(f))) continue;
+        for (const form of entry.forms) {
+          if (!byDatasource.has(form)) byDatasource.set(form, []);
+        }
       }
-    } else {
+    }
+
+    if (!filter) {
       // No filter — sweep every enabled Prometheus datasource, not just those
       // with live SOs. Without this, a datasource whose SOs were all lost
       // out-of-band would never surface its orphan rule groups via the
@@ -261,7 +316,7 @@ export function createSloReconciler(deps: SloReconcilerDeps): SloReconciler {
     const orphans: ReconcileOrphanEntry[] = [];
     const adoptableOrphans: ReconcileOrphanEntry[] = [];
     const unknownOrphans: ReconcileOrphanEntry[] = [];
-    const errors: ReconcileErrorEntry[] = [];
+    const errors: ReconcileErrorEntry[] = [...filterResolutionErrors];
     const sweptDatasources: string[] = [];
     const danglingRefs: ReconcileDanglingRefEntry[] = [];
     const graceDeletions: ReconcileGraceDeletionEntry[] = [];
