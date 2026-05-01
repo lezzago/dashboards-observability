@@ -186,7 +186,7 @@ export function registerSloAdoptionRoutes(options: RegisterSloAdoptionRoutesOpti
         }),
       },
     },
-    async (_ctx, req, res) => {
+    async (ctx, req, res) => {
       const precondition = buildPreconditionFailure(ruleDedupEnabled, ruleAdoptionEnabled);
       if (precondition) {
         return res.customError({
@@ -196,6 +196,14 @@ export function registerSloAdoptionRoutes(options: RegisterSloAdoptionRoutesOpti
             attributes: precondition,
           },
         });
+      }
+      // Prime the datasource registry on a cold boot — same reason
+      // `_reconcile` does it. `_recover` already gets this through
+      // `buildAdoptionDeployContext`, but `_orphans` skips that path
+      // (it delegates straight to the reconciler), so it needs its own
+      // call before the reconciler reads the registry.
+      if (discoveryService) {
+        await discoveryService.ensure(ctx as SloHandlerContext);
       }
       const result = await handleListOrphans(
         reconciler as SloReconcilerLite | undefined,

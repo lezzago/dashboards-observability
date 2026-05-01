@@ -12,7 +12,7 @@
  * exercised in Phase 2's integration suite (W2.7).
  */
 
-import { handleReconcile } from '../reconcile_route';
+import { handleReconcile, registerSloReconcileRoute } from '../reconcile_route';
 import type { Logger } from '../../../../common/types/alerting/types';
 
 function noopLogger(): Logger {
@@ -150,5 +150,109 @@ describe('handleReconcile', () => {
     expect(result.body).toMatchObject({
       error: expect.stringContaining('validation'),
     });
+  });
+});
+
+/**
+ * Route-adapter regression guard for follow-up #3: the reconcile route must
+ * call `discoveryService.ensure(ctx)` BEFORE the reconciler reads the
+ * in-memory datasource registry. Prior to the fix, a fresh-booted OSD whose
+ * first external call was `POST /_reconcile` hit an empty registry and the
+ * reconciler's per-datasource lookup rejected every caller as "Datasource
+ * not registered".
+ */
+describe('registerSloReconcileRoute — discovery priming', () => {
+  interface RouteConfig {
+    path: string;
+  }
+  type RouteHandler = (...args: unknown[]) => Promise<unknown>;
+
+  function makeRouter() {
+    return {
+      get: jest.fn(),
+      post: jest.fn(),
+      put: jest.fn(),
+      delete: jest.fn(),
+    };
+  }
+
+  function makeRes() {
+    const ok = jest.fn((body: unknown) => ({ status: 200, body }));
+    const customError = jest.fn((body: { statusCode: number; body: unknown }) => ({
+      status: body.statusCode,
+      body: body.body,
+    }));
+    return { ok, customError };
+  }
+
+  function getReconcileHandler(router: ReturnType<typeof makeRouter>): RouteHandler {
+    const call = router.post.mock.calls.find(([cfg]: [RouteConfig]) =>
+      /\/api\/observability\/v1\/slos\/_reconcile$/.test(cfg.path)
+    );
+    if (!call) throw new Error('POST _reconcile route not registered');
+    return call[1] as RouteHandler;
+  }
+
+  it('calls discoveryService.ensure(ctx) before reconciler.reconcileOnce on a cold registry', async () => {
+    const callOrder: string[] = [];
+    const ensure = jest.fn(async () => {
+      callOrder.push('ensure');
+    });
+    const reconcileOnce = jest.fn(async () => {
+      callOrder.push('reconcileOnce');
+      return {
+        sweepId: 'sweep-cold-1',
+        datasourceIds: [],
+        orphans: 0,
+        missingRuleGroups: 0,
+        errors: 0,
+      };
+    });
+
+    const router = makeRouter();
+    const reconciler = ({ reconcileOnce } as unknown) as Parameters<
+      typeof registerSloReconcileRoute
+    >[1];
+    const discoveryService = ({ ensure } as unknown) as Parameters<
+      typeof registerSloReconcileRoute
+    >[2];
+
+    registerSloReconcileRoute(router as never, reconciler, discoveryService, noopLogger());
+
+    const ctx = { core: { savedObjects: { client: {} } } };
+    const res = makeRes();
+    await getReconcileHandler(router)(ctx, { query: {} }, res);
+
+    expect(ensure).toHaveBeenCalledTimes(1);
+    expect(ensure).toHaveBeenCalledWith(ctx);
+    expect(reconcileOnce).toHaveBeenCalledTimes(1);
+    expect(callOrder).toEqual(['ensure', 'reconcileOnce']);
+    expect(res.ok).toHaveBeenCalled();
+  });
+
+  it('tolerates an undefined discoveryService (legacy wiring) without breaking the handler', async () => {
+    // Defensive branch — `discoveryService` is optional so offline-dev and
+    // partial-wiring tests keep working. When undefined, the handler must
+    // still dispatch to the reconciler.
+    const reconcileOnce = jest.fn(async () => ({
+      sweepId: 'sweep-no-discovery',
+      datasourceIds: [],
+      orphans: 0,
+      missingRuleGroups: 0,
+      errors: 0,
+    }));
+    const router = makeRouter();
+    const reconciler = ({ reconcileOnce } as unknown) as Parameters<
+      typeof registerSloReconcileRoute
+    >[1];
+
+    registerSloReconcileRoute(router as never, reconciler, undefined, noopLogger());
+
+    const ctx = { core: { savedObjects: { client: {} } } };
+    const res = makeRes();
+    await getReconcileHandler(router)(ctx, { query: {} }, res);
+
+    expect(reconcileOnce).toHaveBeenCalledTimes(1);
+    expect(res.ok).toHaveBeenCalled();
   });
 });

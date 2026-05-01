@@ -24,6 +24,7 @@ import type { IRouter, Logger } from '../../../../../src/core/server';
 import { OBSERVABILITY_BASE } from '../../../common/constants/shared';
 import type { HandlerResult } from '../alerting/route_utils';
 import { toHandlerResult } from '../alerting/route_utils';
+import type { DatasourceDiscoveryService } from '../../services/alerting/datasource_discovery';
 // NB: `reconciler.ts` is authored by the W2.1 parallel agent in this same
 // batch. We pull only types here — no runtime binding — so the route file
 // stays safe to import even while the peer lands, and `babel-jest` strips
@@ -83,6 +84,7 @@ export async function handleReconcile(
 export function registerSloReconcileRoute(
   router: IRouter,
   reconciler: SloReconciler | undefined,
+  discoveryService: DatasourceDiscoveryService | undefined,
   logger: Logger
 ): void {
   router.post(
@@ -94,12 +96,23 @@ export function registerSloReconcileRoute(
         }),
       },
     },
-    async (_ctx, req, res) => {
+    async (ctx, req, res) => {
       // Access to this endpoint is intentionally open to any authenticated
       // caller in the workspace. SLOs are pre-GA and the feature flag
       // (observability.slo.ruleDedup.enabled) is the only gate today. A
       // runtime admin-role check may be added later once a real multi-user
       // threat model exists; until then, don't introduce one.
+      //
+      // Prime the datasource registry before the reconciler reads it. On a
+      // fresh-booted OSD whose first external call is `_reconcile`, the
+      // in-memory registry is empty until discovery runs once — causing the
+      // reconciler's per-datasource lookup to fail with "Datasource not
+      // registered". `ensure` is TTL-gated + shares in-flight promises, so
+      // the steady-state cost is near-zero; every other SLO route already
+      // calls it before touching the registry.
+      if (discoveryService) {
+        await discoveryService.ensure(ctx);
+      }
       const raw = req.query.datasourceId;
       const datasourceIds = raw
         ? raw

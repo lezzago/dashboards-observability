@@ -895,7 +895,7 @@ export function registerSloRoutes(options: RegisterSloRoutesOptions) {
   // returns 501 via `handleReconcile` so tests / smoke probes can always
   // hit the path.
   // --------------------------------------------------------------------------
-  registerSloReconcileRoute(router, reconciler, logger);
+  registerSloReconcileRoute(router, reconciler, discoveryService, logger);
 
   // --------------------------------------------------------------------------
   // W4.6 — adoption endpoints (`_orphans`, `_recover`, `_clone`).
