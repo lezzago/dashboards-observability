@@ -619,18 +619,19 @@ export class DirectQueryPrometheusBackend implements PrometheusBackend, Promethe
     query: string,
     time?: number
   ): Promise<PromTimeSeriesPoint[]> {
+    const dqName = this.resolveDqName(ds);
+    const path = `/_plugins/_directquery/_query/${encodeURIComponent(dqName)}`;
+
+    this.logger.debug(`DirectQuery instant query: ${query.substring(0, 80)}...`);
+
+    const options: Record<string, string> = { queryType: 'instant' };
+    if (time !== undefined) {
+      options.time = time.toString();
+    }
+
+    let resp;
     try {
-      const dqName = this.resolveDqName(ds);
-      const path = `/_plugins/_directquery/_query/${encodeURIComponent(dqName)}`;
-
-      this.logger.debug(`DirectQuery instant query: ${query.substring(0, 80)}...`);
-
-      const options: Record<string, string> = { queryType: 'instant' };
-      if (time !== undefined) {
-        options.time = time.toString();
-      }
-
-      const resp = await client.transport.request({
+      resp = await client.transport.request({
         method: 'POST',
         path,
         body: {
@@ -640,12 +641,47 @@ export class DirectQueryPrometheusBackend implements PrometheusBackend, Promethe
           options,
         },
       });
-
-      return this.parseInstantQueryResponse(resp.body as Record<string, unknown>);
     } catch (err) {
+      // Transport-level errors carry a body (HTTP 4xx/5xx from DirectQuery or
+      // Cortex passthrough). If the remote reported a structured Cortex/Prom
+      // error envelope, throw the remote message so callers (probe-sli) can
+      // surface "parse error: ..." to the user instead of silently returning
+      // an empty vector. For anything we can't classify, keep the original
+      // error — callers get a clear "Failed to execute ..." message.
+      const remote = extractRemotePromError(err);
+      if (remote) {
+        this.logger.warn(`DirectQuery instant query rejected: ${remote}`);
+        throw new Error(remote);
+      }
       this.logger.warn(`Failed to execute DirectQuery instant query: ${err}`);
-      return [];
+      throw err;
     }
+
+    // The SQL plugin flattens Cortex rejections in two ways. Either is a
+    // query-level rejection that probe-sli needs to surface to the user.
+    //
+    // (1) Successful response body carrying a Prom error envelope
+    //     (`{"status":"error","errorType":"bad_data","error":"..."}`) — rare;
+    //     only when the SQL plugin passes the body through verbatim.
+    // (2) Successful response where `results.{ds}` is an empty object with no
+    //     `resultType` — this is what the `observability-stack` SQL plugin
+    //     returns today when Cortex rejects the PromQL (parse error, range
+    //     limit, etc.). A legitimate "no matching series" response still
+    //     carries `resultType: "vector", result: []`, so the absence of
+    //     `resultType` is a reliable rejection signal.
+    const body = resp.body as Record<string, unknown> | undefined;
+    const bodyError = extractPromErrorFromBody(body);
+    if (bodyError) {
+      this.logger.warn(`DirectQuery instant query returned error envelope: ${bodyError}`);
+      throw new Error(bodyError);
+    }
+    if (isEmptyResultsRejection(body)) {
+      const msg = `Invalid PromQL or unsupported query for datasource "${ds.name}"`;
+      this.logger.warn(`DirectQuery instant query rejected without structured error: ${query}`);
+      throw new Error(msg);
+    }
+
+    return this.parseInstantQueryResponse(body as Record<string, unknown>);
   }
 
   /**
@@ -772,4 +808,69 @@ export class DirectQueryPrometheusBackend implements PrometheusBackend, Promethe
       value: a.value != null ? String(a.value) : '',
     };
   }
+}
+
+// ============================================================================
+// Error-envelope helpers (shared with the probe-sli diagnostic path)
+// ============================================================================
+
+/**
+ * Pull a human-readable Prom/Cortex error message out of a transport-level
+ * rejection. OSD's `@opensearch-project/opensearch` client throws an error
+ * whose `.meta.body` or `.body` contains the remote response body — when the
+ * SQL plugin hit a Cortex parse failure, that body is
+ * `{ status: "error", errorType: "bad_data", error: "..." }`. Returns the
+ * human message, or `undefined` when the error is structurally something
+ * else (connection refused, timeout, OSD-side 401).
+ */
+function extractRemotePromError(err: unknown): string | undefined {
+  if (!err || typeof err !== 'object') return undefined;
+  const e = err as { meta?: { body?: unknown }; body?: unknown };
+  const body = (e.meta?.body ?? e.body) as Record<string, unknown> | undefined;
+  return extractPromErrorFromBody(body);
+}
+
+/**
+ * Inspect a response body for a Prometheus/Cortex error envelope. The SQL
+ * plugin sometimes surfaces the envelope inside a `data` wrapper, so peek
+ * one level deep before giving up.
+ */
+function extractPromErrorFromBody(body: unknown): string | undefined {
+  if (!body || typeof body !== 'object') return undefined;
+  const b = body as Record<string, unknown>;
+  if (b.status === 'error' && typeof b.error === 'string') return b.error;
+  if (b.data && typeof b.data === 'object') {
+    const inner = b.data as Record<string, unknown>;
+    if (inner.status === 'error' && typeof inner.error === 'string') return inner.error;
+  }
+  return undefined;
+}
+
+/**
+ * Detect the SQL plugin's "silent Cortex rejection" shape. A successful
+ * PromQL query ALWAYS produces `results.{ds}.resultType` (vector / matrix /
+ * scalar / string) — including empty result sets, which carry
+ * `resultType: "vector", result: []`. A Cortex parse/validation failure
+ * passes through the SQL plugin as an empty object `results.{ds}: {}` with
+ * no `resultType` field at all. `{status: "success"}`-style pass-through
+ * (no `results` key) shouldn't register as a rejection either — only the
+ * explicit "results wrapper present but missing resultType" case does.
+ */
+function isEmptyResultsRejection(body: unknown): boolean {
+  if (!body || typeof body !== 'object') return false;
+  const b = body as Record<string, unknown>;
+  const results = b.results as Record<string, unknown> | undefined;
+  if (!results || typeof results !== 'object') return false;
+  const entries = Object.values(results);
+  if (entries.length === 0) return false;
+  for (const entry of entries) {
+    if (entry && typeof entry === 'object') {
+      const ds = entry as Record<string, unknown>;
+      // Any datasource entry that reports a resultType is a real response —
+      // treat the whole body as "not a rejection" so we don't false-trip on
+      // mixed-datasource responses.
+      if (ds.resultType || ds.result) return false;
+    }
+  }
+  return true;
 }

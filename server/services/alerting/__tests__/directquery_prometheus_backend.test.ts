@@ -142,4 +142,67 @@ describe('DirectQueryPrometheusBackend', () => {
       /directQueryName/
     );
   });
+
+  // ---- queryInstant error surfacing ----
+  // Probe-SLI relies on DirectQuery parse errors reaching the route as thrown
+  // exceptions so it can populate `errors.{good,total}`. Previously every
+  // error path returned `[]`, which made invalid PromQL indistinguishable
+  // from "no samples".
+  it('queryInstant surfaces Cortex parse errors from transport rejection', async () => {
+    // Simulate an OSD transport rejection carrying the Cortex error body.
+    const transportErr = Object.assign(new Error('Response Error'), {
+      meta: {
+        body: {
+          status: 'error',
+          errorType: 'bad_data',
+          error: 'parse error at char 42: unclosed left parenthesis',
+        },
+      },
+    });
+    mockClient.transport.request.mockRejectedValueOnce(transportErr);
+    await expect(backend.queryInstant(mockClient as never, ds, 'bad(')).rejects.toThrow(
+      /parse error at char 42/
+    );
+  });
+
+  it('queryInstant surfaces Cortex parse errors from successful response envelope', async () => {
+    // Some envelopes come back as 200 OK with a Prometheus-style error body.
+    mockClient.transport.request.mockResolvedValueOnce({
+      body: { status: 'error', errorType: 'bad_data', error: 'invalid parameter "query"' },
+    });
+    await expect(backend.queryInstant(mockClient as never, ds, 'bad(')).rejects.toThrow(
+      /invalid parameter/
+    );
+  });
+
+  it('queryInstant rethrows non-Cortex transport errors verbatim', async () => {
+    // Timeouts / connection refused / OSD 401 don't carry the Prom envelope.
+    mockClient.transport.request.mockRejectedValueOnce(new Error('connect ECONNREFUSED'));
+    await expect(backend.queryInstant(mockClient as never, ds, 'up')).rejects.toThrow(
+      /ECONNREFUSED/
+    );
+  });
+
+  it('queryInstant throws on SQL-plugin silent-rejection shape (results wrapper with no resultType)', async () => {
+    // The SQL plugin shipped in observability-stack swallows Cortex parse
+    // errors and returns a 200 OK whose `results.{ds}` is an empty object.
+    // That's indistinguishable from "no samples" unless we treat missing
+    // resultType as a rejection.
+    mockClient.transport.request.mockResolvedValueOnce({
+      body: { results: { 'my-prom': {} }, queryId: 'x', sessionId: 'y' },
+    });
+    await expect(backend.queryInstant(mockClient as never, ds, 'bad(')).rejects.toThrow(
+      /Invalid PromQL|unsupported query/
+    );
+  });
+
+  it('queryInstant does NOT throw on a genuine empty-vector response', async () => {
+    // Legitimate "no matching series" — Prometheus returns vector with empty
+    // result array. Must NOT trip the rejection detector.
+    mockClient.transport.request.mockResolvedValueOnce({
+      body: { results: { 'my-prom': { resultType: 'vector', result: [] } } },
+    });
+    const points = await backend.queryInstant(mockClient as never, ds, 'up{nope="x"}');
+    expect(points).toEqual([]);
+  });
 });
