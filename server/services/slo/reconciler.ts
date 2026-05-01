@@ -46,6 +46,7 @@ import type { ISloStore, SloDocument } from '../../../common/slo/slo_types';
 import { deriveExpectedGroups, sloRulerNamespaceFor } from '../../../common/slo/slo_service';
 import { dedupRecordingGroupName } from '../../../common/slo/slo_promql_generator';
 import { SloRulerError } from '../../../common/slo/slo_errors';
+import { resolveDatasourceRef } from '../../../common/slo/slo_datasource_ref';
 import type { InMemoryDatasourceService } from '../alerting/datasource_service';
 import type { RulerClient } from './ruler_client';
 import type { RuleHealthChecker } from './rule_health_checker';
@@ -210,29 +211,28 @@ export function createSloReconciler(deps: SloReconcilerDeps): SloReconciler {
     const all = await deps.store.list();
 
     // Normalize the caller-supplied filter. Admin endpoints accept either
-    // the internal `ds-N` id or the datasource display name — both hit this
-    // route. `doc.spec.datasourceId` is persisted as whatever the wizard
-    // sent (live prod: the name; some tests: the id). We resolve each raw
-    // input through `datasourceService.get()` (id-or-name fallback) and
-    // expand the filter set to include BOTH id and name so
-    // byDatasource-grouping matches either persistence shape. When we add
-    // the empty-bucket entries below (for "sweep a datasource with no
-    // SLOs"), we prefer the name — that's the canonical byDatasource key
-    // in production. Unresolvable entries surface as reconcile errors.
+    // the internal `ds-N` id, SQL-plugin connectionId, or the datasource
+    // display name — all hit this route. `doc.spec.datasourceId` is
+    // persisted as whatever the wizard sent (live prod: the name; some
+    // tests: the id). Resolve via the shared `DatasourceRef` helper, which
+    // unwraps every accepted form into a single envelope. The filter set
+    // accepts every form so byDatasource-grouping matches either
+    // persistence shape; unresolvable entries surface as reconcile errors
+    // (not silently dropped).
     const rawFilter =
       opts?.datasourceIds && opts.datasourceIds.length > 0 ? opts.datasourceIds : undefined;
     const filterResolutionErrors: ReconcileErrorEntry[] = [];
     let filter: Set<string> | undefined;
-    // For each raw filter input, remember which forms ({id, name}) we'll
-    // accept as matches so we can add a single empty bucket on the canonical
-    // name (prod) or id (legacy tests) only when no doc matched either form.
+    // For each raw filter input, remember the forms we'll accept as matches
+    // so we can add a single empty bucket on the canonical name (prod) or
+    // id (legacy tests) only when no doc matched any form.
     const resolvedInputs: Array<{ forms: string[] }> = [];
     if (rawFilter) {
       filter = new Set<string>();
       for (const raw of rawFilter) {
-        let ds: Datasource | null;
+        let ref;
         try {
-          ds = await deps.datasourceService.get(raw);
+          ref = await resolveDatasourceRef(raw, (id) => deps.datasourceService.get(id));
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
           filterResolutionErrors.push({
@@ -242,7 +242,7 @@ export function createSloReconciler(deps: SloReconcilerDeps): SloReconciler {
           });
           continue;
         }
-        if (!ds) {
+        if (!ref) {
           filterResolutionErrors.push({
             datasourceId: raw,
             namespace: sloRulerNamespaceFor(workspaceIdFor(raw)),
@@ -250,15 +250,12 @@ export function createSloReconciler(deps: SloReconcilerDeps): SloReconciler {
           });
           continue;
         }
-        const forms: string[] = [];
-        if (ds.id) {
-          filter.add(ds.id);
-          forms.push(ds.id);
-        }
-        if (ds.name && ds.name !== ds.id) {
-          filter.add(ds.name);
-          forms.push(ds.name);
-        }
+        // The reconciler's byDatasource map only needs to distinguish id vs
+        // name (the two persistence shapes `spec.datasourceId` takes); the
+        // connectionId never lands in a spec. Trim accordingly so the
+        // empty-bucket fallback below adds at most one entry per shape.
+        const forms = ref.forms.filter((f) => f === ref!.id || f === ref!.name);
+        for (const form of forms) filter.add(form);
         resolvedInputs.push({ forms });
       }
     }

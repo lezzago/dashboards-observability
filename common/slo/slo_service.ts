@@ -71,6 +71,7 @@ import {
   findAdoptableAlertGroup,
 } from './slo_adoption_verify';
 import type { RecoverInput, RecoverRefcountChange, RecoverResult } from './slo_adoption_types';
+import { refFromDatasource, resolveDatasourceRefs } from './slo_datasource_ref';
 
 /**
  * Status cache TTL. Rationale (design §12.12 was open):
@@ -1447,14 +1448,15 @@ export class SloService {
     }
 
     // Steps 5-6: datasource + workspace match. Both sides may carry either
-    // the internal `ds-N` id or the user-facing datasource name (history:
-    // provenance annotations written before the name-canonicalization fix
-    // carry `datasourceId: "ds-N"`; routes today pass the name from the
-    // UI). Accept a match against either form by consulting the deploy
-    // context's resolved datasource.
-    const deployDsIds = new Set([deploy.datasource.id, deploy.datasource.name].filter(Boolean));
-    const provenanceMatchesDeploy = deployDsIds.has(provenance.datasourceId);
-    const inputMatchesDeploy = deployDsIds.has(input.datasourceId);
+    // the internal `ds-N` id, the SQL-plugin connectionId, or the user-facing
+    // datasource name (history: provenance annotations written before the
+    // name-canonicalization fix carry `datasourceId: "ds-N"`; routes today
+    // pass the name from the UI). Accept a match against any form by
+    // consulting the deploy context's resolved datasource via the shared
+    // `DatasourceRef` helper.
+    const deployFormsSet = new Set(refFromDatasource(deploy.datasource).forms);
+    const provenanceMatchesDeploy = deployFormsSet.has(provenance.datasourceId);
+    const inputMatchesDeploy = deployFormsSet.has(input.datasourceId);
     if (!provenanceMatchesDeploy || !inputMatchesDeploy) {
       throw new SloAdoptionError(
         'ORPHAN_WORKSPACE_MISMATCH',
@@ -1779,7 +1781,8 @@ export class SloService {
     // Filter input arrives as either the internal ds-N id (from URL params)
     // or the user-facing datasource name (from some legacy chip-paste paths).
     // `spec.datasourceId` is persisted as the name, so resolve ids → names
-    // through `ctx.resolveDatasource` before hitting the store.
+    // through `ctx.resolveDatasource` before hitting the store. See
+    // `common/slo/slo_datasource_ref.ts` for the shared resolution contract.
     const normalizedDsIds = await this.normalizeDatasourceFilter(filters?.datasourceId, ctx);
     // If the caller asked for specific datasources but none resolved, short-
     // circuit — an empty array at the store layer is read as "no filter".
@@ -2011,12 +2014,8 @@ export class SloService {
   ): Promise<string[] | undefined> {
     if (!datasourceIds || datasourceIds.length === 0) return datasourceIds;
     if (!ctx?.resolveDatasource) return datasourceIds;
-    const out: string[] = [];
-    for (const raw of datasourceIds) {
-      const ds = await ctx.resolveDatasource(raw);
-      if (ds?.name) out.push(ds.name);
-    }
-    return out;
+    const refs = await resolveDatasourceRefs(datasourceIds, ctx.resolveDatasource);
+    return refs.map((ref) => ref.name);
   }
 
   private async assertNameUnique(
