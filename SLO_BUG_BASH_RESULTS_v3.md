@@ -583,7 +583,7 @@ bug-fix session that are not themselves regressions fixed in that session.
    `server/routes/slo/adoption_route.ts`, `server/routes/slo/index.ts`.
 
 6. **Provenance annotation persists `datasourceId: "ds-N"`, not the
-   canonical name**. ✅ DONE. The three `buildAlertGroupWithProvenance`
+   canonical name**. ✅ DONE (commit `5866fe0e`). The three `buildAlertGroupWithProvenance`
    call sites in `common/slo/slo_service.ts` (create / update / redeploy
    paths) now pass `deploy.datasource.name` in place of
    `deploy.datasource.id`, so new alert groups record the canonical name
