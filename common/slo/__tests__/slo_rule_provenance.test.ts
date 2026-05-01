@@ -129,6 +129,29 @@ describe('slo_rule_provenance', () => {
       delete missingSpec.spec;
       expect(parseAlertProvenance(JSON.stringify(missingSpec))).toBeNull();
     });
+
+    // Follow-up #4: the builder records whatever the caller passes as
+    // `datasourceId` — the write-side is responsible for picking the
+    // canonical name form. Callers in slo_service.ts now pass
+    // `deploy.datasource.name` (e.g. `"ObservabilityStack_Prometheus"`),
+    // not the internal `ds-N` id. Pin the passthrough so a regression that
+    // reintroduces id-form writes shows up at this layer.
+    it('records the datasourceId the caller passes verbatim (canonical-name contract)', () => {
+      const canonical = buildAlertProvenance({
+        pluginVersion: '3.7.0',
+        sloId: 'slo-abc',
+        workspaceId: 'ObservabilityStack_Prometheus',
+        datasourceId: 'ObservabilityStack_Prometheus',
+        createdAt: '2026-05-01T00:00:00.000Z',
+        updatedAt: '2026-05-01T00:00:00.000Z',
+        spec,
+      });
+      expect(canonical.datasourceId).toBe('ObservabilityStack_Prometheus');
+      expect(canonical.datasourceId).not.toMatch(/^ds-\d+$/);
+      // Round-trip survives the name form.
+      const reparsed = parseAlertProvenance(JSON.stringify(canonical));
+      expect(reparsed!.datasourceId).toBe('ObservabilityStack_Prometheus');
+    });
   });
 
   describe('annotateAlertGroup', () => {

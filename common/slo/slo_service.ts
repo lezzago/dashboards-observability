@@ -699,7 +699,7 @@ export class SloService {
       doc,
       recordingFingerprints,
       deploy.workspaceId,
-      deploy.datasource.id,
+      deploy.datasource.name,
       this.pluginVersion,
       now
     );
@@ -949,7 +949,7 @@ export class SloService {
       updated,
       newFingerprints,
       deploy.workspaceId,
-      deploy.datasource.id,
+      deploy.datasource.name,
       this.pluginVersion,
       existing.status.createdAt,
       now
@@ -1294,7 +1294,7 @@ export class SloService {
       doc,
       recordingFingerprints,
       ctx.deploy.workspaceId,
-      ctx.deploy.datasource.id,
+      ctx.deploy.datasource.name,
       this.pluginVersion,
       doc.status.createdAt,
       now
@@ -1454,6 +1454,12 @@ export class SloService {
     // pass the name from the UI). Accept a match against any form by
     // consulting the deploy context's resolved datasource via the shared
     // `DatasourceRef` helper.
+    //
+    // Load-bearing for pre-follow-up-4 alert groups: new writes canonicalize
+    // provenance.datasourceId to the datasource name (matching input), but
+    // pre-existing Cortex groups still carry `ds-N`. Keep accepting both
+    // until those groups age out / get re-upserted — don't remove this
+    // fallback without a migration story.
     const deployFormsSet = new Set(refFromDatasource(deploy.datasource).forms);
     const provenanceMatchesDeploy = deployFormsSet.has(provenance.datasourceId);
     const inputMatchesDeploy = deployFormsSet.has(input.datasourceId);

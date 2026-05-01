@@ -583,10 +583,17 @@ bug-fix session that are not themselves regressions fixed in that session.
    `server/routes/slo/adoption_route.ts`, `server/routes/slo/index.ts`.
 
 6. **Provenance annotation persists `datasourceId: "ds-N"`, not the
-   canonical name**. Bug E accepted both forms in the comparison, but
-   the underlying inconsistency remains: alert-group provenance JSON
-   records whatever `deploy.datasource.id` was at create time. A future
-   create-path cleanup should canonicalize to the name (matching
-   `spec.datasourceId`) so the adoption + diff paths don't have to keep
-   straddling both forms. Candidate file:
-   `common/slo/slo_rule_provenance.ts`.
+   canonical name**. ✅ DONE. The three `buildAlertGroupWithProvenance`
+   call sites in `common/slo/slo_service.ts` (create / update / redeploy
+   paths) now pass `deploy.datasource.name` in place of
+   `deploy.datasource.id`, so new alert groups record the canonical name
+   that already appears in `spec.datasourceId` and `workspaceId`. Bug
+   E's id-or-name equivalence fallback in `findAdoptableAlertGroup` is
+   retained and annotated as load-bearing for any pre-existing Cortex
+   groups. `PROVENANCE_SCHEMA_VERSION` deliberately NOT bumped — both
+   forms remain valid value-space for v1. New pins: canonical-name
+   builder contract (`slo_rule_provenance.test.ts`), create + update
+   provenance shape (`slo_dedup_integration.test.ts`), and ds-N legacy
+   recovery (`slo_service_recover.test.ts`). refStore keying
+   (`slo-rule-ref` SOs) deliberately left on `ds-N`; session-private
+   and no cross-session reads exist that would require migration.

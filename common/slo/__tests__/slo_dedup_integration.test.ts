@@ -29,6 +29,7 @@ import { SloDeployContext, SloRuleRefStoreLite, SloService } from '../slo_servic
 import { InMemorySloStore } from '../slo_store';
 import { DEFAULT_MWMBR_TIERS, dedupRecordingGroupName } from '../slo_promql_generator';
 import { computeSliFingerprint } from '../slo_sli_fingerprint';
+import { ALERT_PROVENANCE_ANNOTATION_KEY, parseAlertProvenance } from '../slo_rule_provenance';
 import { FakeRulerClient } from './fake_ruler_client';
 import { createSloReconciler } from '../../../server/services/slo/reconciler';
 import { createReconcilerMetrics } from '../../../server/services/slo/reconciler_metrics';
@@ -415,6 +416,63 @@ describe('SloService dedup integration (W3.15)', () => {
     expect(result.graceDeletions[0].fingerprint).toBe(fp);
     expect(ruler.hasGroup(namespace, recGroupName)).toBe(false);
     expect(refStore.has(ds.id, ds.id, fp)).toBe(false);
+  });
+
+  // ==========================================================================
+  // Follow-up #4 — provenance.datasourceId canonicalizes to the datasource
+  // name (matches spec.datasourceId). Previously the write-side recorded
+  // `deploy.datasource.id` (the internal `ds-N`), forcing every consumer to
+  // straddle both forms. These pins guard the new contract on create + update.
+  // ==========================================================================
+
+  it('create writes provenance.datasourceId as the datasource NAME (not ds-N)', async () => {
+    const { svc, ruler, deploy, ds } = await makeHarness();
+    const spec = validSpec({ name: 'canon-create', datasourceId: ds.id });
+    const doc = await svc.create({ spec }, 'alice', deploy);
+
+    const namespace = `slo-generated-${ds.id}`;
+    const alertGroupName =
+      doc.status.provisioning.backend === 'prometheus'
+        ? doc.status.provisioning.alertGroupName!
+        : '';
+    const alertGroup = ruler.getGroup(namespace, alertGroupName);
+    expect(alertGroup).toBeDefined();
+    const raw = alertGroup!.rules[0].annotations?.[ALERT_PROVENANCE_ANNOTATION_KEY];
+    expect(typeof raw).toBe('string');
+    const parsed = parseAlertProvenance(raw!);
+    expect(parsed).not.toBeNull();
+    // Canonical: provenance datasourceId is the name. The raw `ds-N` internal
+    // id must not leak. (This harness decouples workspaceId from ds.name — in
+    // prod they're both the datasource name, but the assertion we care about
+    // here is just the datasourceId shape.)
+    expect(parsed!.datasourceId).toBe(ds.name);
+    expect(parsed!.datasourceId).not.toBe(ds.id);
+  });
+
+  it('update re-writes provenance.datasourceId as the datasource NAME', async () => {
+    const { svc, ruler, deploy, ds } = await makeHarness();
+    const doc = await svc.create(
+      { spec: validSpec({ name: 'canon-update', datasourceId: ds.id }) },
+      'alice',
+      deploy
+    );
+    await svc.update(
+      doc.id,
+      { spec: { service: 'api-v2' }, version: doc.status.version },
+      'alice',
+      deploy
+    );
+    const namespace = `slo-generated-${ds.id}`;
+    // Take the most recent upsert for the alert group — `update` re-upserts.
+    const alertUpserts = ruler.upserts.filter(
+      (u) => u.namespace === namespace && u.group.groupName.startsWith('slo:alerts:')
+    );
+    const latest = alertUpserts[alertUpserts.length - 1];
+    const raw = latest.group.rules[0].annotations?.[ALERT_PROVENANCE_ANNOTATION_KEY];
+    const parsed = parseAlertProvenance(raw!);
+    expect(parsed).not.toBeNull();
+    expect(parsed!.datasourceId).toBe(ds.name);
+    expect(parsed!.datasourceId).not.toBe(ds.id);
   });
 
   it('resurrection inside grace: recreate an SLO with the same SLI → refcount flips 0→1, zeroSinceAt cleared', async () => {

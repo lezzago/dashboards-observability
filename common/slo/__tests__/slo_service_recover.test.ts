@@ -863,6 +863,43 @@ describe('SloService.recover (W4.4)', () => {
     expect(result.slo.id).toBe('slo-name-input');
   });
 
+  // Follow-up #4 backward-compat pin: new plugin writes canonicalize the
+  // provenance datasourceId to the datasource NAME, but Cortex still holds
+  // alert groups written before the canonicalization landed — those carry
+  // `datasourceId: "ds-N"`. `recover()` must keep parsing them via the
+  // id-or-name equivalence fallback in `SloService.findAdoptableAlertGroup`.
+  // If this test starts failing, that fallback was removed prematurely.
+  it('still adopts pre-follow-up-4 alert groups whose provenance carries ds-N (id form)', async () => {
+    const { svc, ruler, deploy, store } = makeHarness();
+    const spec = validSpec();
+    // Seed with the legacy id form in provenance — this is what Cortex
+    // already has on disk from any plugin version older than follow-up #4.
+    const seeded = seedRuler(ruler, {
+      spec,
+      sloId: 'slo-legacy-id-provenance',
+      workspaceId: 'ws-001',
+      datasourceId: 'prom-ds-001', // deploy.datasource.id
+    });
+    // Caller passes the canonical NAME (what the UI sends today).
+    const result = await svc.recover(
+      {
+        sloId: 'slo-legacy-id-provenance',
+        datasourceId: 'prom', // deploy.datasource.name
+        workspaceId: 'ws-001',
+      },
+      deploy
+    );
+    expect(result.slo.id).toBe('slo-legacy-id-provenance');
+    // SO materialized from the embedded spec; alert group was already on
+    // the ruler, so no re-upsert. The alert group name came from seed.
+    const persisted = await store.get('slo-legacy-id-provenance');
+    expect(persisted).not.toBeNull();
+    const prov = persisted!.status.provisioning;
+    const alertGroupName = prov.backend === 'prometheus' ? prov.alertGroupName : undefined;
+    expect(prov.backend).toBe('prometheus');
+    expect(alertGroupName).toBe(seeded.alertGroupName);
+  });
+
   it('falls back to deploy.workspaceId when input.workspaceId is omitted', async () => {
     const { svc, ruler, deploy } = makeHarness();
     const spec = validSpec();
