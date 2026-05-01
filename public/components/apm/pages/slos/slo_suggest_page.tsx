@@ -51,7 +51,7 @@ import {
   EuiText,
   EuiToolTip,
 } from '@elastic/eui';
-import { useHistory } from 'react-router-dom';
+import { useHistory, useLocation } from 'react-router-dom';
 import { ChromeStart, HttpStart, NotificationsStart } from '../../../../../../../src/core/public';
 import { toMountPoint } from '../../../../../../../src/plugins/opensearch_dashboards_react/public';
 import { HeaderControlledComponentsWrapper } from '../../../../plugin_helpers/plugin_headerControl';
@@ -75,6 +75,7 @@ import {
   SuggestionKind,
   generateSuggestionsForServices,
 } from './suggest_engine';
+import { parseSuggestScopeFromSearch } from './slo_suggest_scope';
 
 export interface SloSuggestPageProps {
   apiClient: SloApiClient;
@@ -96,6 +97,8 @@ export const SloSuggestPage: React.FC<SloSuggestPageProps> = ({
   parentBreadcrumb,
 }) => {
   const history = useHistory();
+  const location = useLocation();
+  const scope = useMemo(() => parseSuggestScopeFromSearch(location.search), [location.search]);
   const { config, loading: configLoading } = useApmConfig();
   const [selected, setSelected] = useState<Set<string>>(new Set());
   /** Per-suggestion overrides users type into the card. */
@@ -126,12 +129,32 @@ export const SloSuggestPage: React.FC<SloSuggestPageProps> = ({
   const timeRange = useMemo(() => ({ from: 'now-15m', to: 'now' }), []);
   const parsedTimeRange = useMemo(() => parseTimeRange(timeRange), [timeRange]);
 
-  const { data: services, isLoading: servicesLoading, error: servicesError, refetch } = useServices(
-    {
-      startTime: parsedTimeRange.startTime,
-      endTime: parsedTimeRange.endTime,
-    }
-  );
+  const {
+    data: allDiscoveredServices,
+    isLoading: servicesLoading,
+    error: servicesError,
+    refetch,
+  } = useServices({
+    startTime: parsedTimeRange.startTime,
+    endTime: parsedTimeRange.endTime,
+  });
+
+  // Apply URL scope before the `services.length === 0` guard in `suggestions`.
+  // A stale deep link (scope names nothing discovery sees) falls back to the
+  // full list so the page stays usable; the UI still surfaces the miss.
+  const scopedServices = useMemo(() => {
+    if (!scope.services) return allDiscoveredServices;
+    const allow = new Set(scope.services);
+    const filtered = allDiscoveredServices.filter((s) => allow.has(s.serviceName));
+    return filtered.length > 0 ? filtered : allDiscoveredServices;
+  }, [allDiscoveredServices, scope.services]);
+
+  const scopeFellThrough =
+    scope.services !== undefined &&
+    allDiscoveredServices.length > 0 &&
+    allDiscoveredServices.every((s) => !scope.services!.includes(s.serviceName));
+
+  const services = scopedServices;
 
   // Prometheus metric universe + label values. Used to decide which OTel
   // detectors fire and to scope each OTel draft to the right label selector.
@@ -528,6 +551,58 @@ export const SloSuggestPage: React.FC<SloSuggestPageProps> = ({
               Drafts availability + latency SLOs per service from span-derived RED metrics, plus
               OTel semconv add-ons where present.
             </EuiText>
+            {scope.services && !scopeFellThrough && (
+              <>
+                <EuiSpacer size="xs" />
+                <EuiFlexGroup
+                  alignItems="center"
+                  gutterSize="s"
+                  responsive={false}
+                  data-test-subj="sloSuggestScopeSubline"
+                >
+                  <EuiFlexItem grow={false}>
+                    <EuiText size="xs" color="subdued">
+                      Scoped to {scope.services.length} service
+                      {scope.services.length === 1 ? '' : 's'}: {scope.services.join(', ')}
+                    </EuiText>
+                  </EuiFlexItem>
+                  <EuiFlexItem grow={false}>
+                    <EuiButtonEmpty
+                      size="xs"
+                      onClick={() => history.push('#/slos/suggest')}
+                      data-test-subj="sloSuggestClearScope"
+                    >
+                      Clear scope
+                    </EuiButtonEmpty>
+                  </EuiFlexItem>
+                </EuiFlexGroup>
+              </>
+            )}
+            {scopeFellThrough && (
+              <>
+                <EuiSpacer size="s" />
+                <EuiCallOut
+                  size="s"
+                  iconType="iInCircle"
+                  color="warning"
+                  title="Scoped services not found"
+                  data-test-subj="sloSuggestScopeFellThrough"
+                >
+                  <EuiText size="s">
+                    These services aren&apos;t in the current APM discovery result. Showing all
+                    discovered services instead.
+                  </EuiText>
+                  <EuiSpacer size="xs" />
+                  <EuiButtonEmpty
+                    size="xs"
+                    onClick={() => history.push('#/slos/suggest')}
+                    data-test-subj="sloSuggestClearScope"
+                  >
+                    Clear scope
+                  </EuiButtonEmpty>
+                </EuiCallOut>
+              </>
+            )}
             <EuiSpacer size="m" />
 
             {servicesError && (
