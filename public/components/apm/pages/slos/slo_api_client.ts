@@ -16,6 +16,7 @@ import type {
   GeneratedRuleGroup,
   ProbeSliRequest,
   ProbeSliResponse,
+  SloAggregateResponse,
   SloCreateInput,
   SloDocument,
   SloLiveStatus,
@@ -245,6 +246,21 @@ export class SloApiClient {
 
   list(filters: SloListFilters = {}): Promise<PaginatedResponse<SloSummary>> {
     return this.http.get(SLO_BASE, { query: serializeFilters(filters) });
+  }
+
+  /**
+   * Server-side per-service SLO health rollup. Preferred over fanning out
+   * `list(...)` on the client — one round-trip, one JSON parse, regardless
+   * of service count. Server caps `services` at 200; callers should truncate
+   * before calling.
+   */
+  aggregate(params: { services: string[]; datasourceId: string }): Promise<SloAggregateResponse> {
+    return this.http.get(`${SLO_BASE}/_aggregate`, {
+      query: {
+        services: params.services.join(','),
+        datasourceId: params.datasourceId,
+      },
+    });
   }
 
   get(

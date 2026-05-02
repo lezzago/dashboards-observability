@@ -11,40 +11,27 @@
  * tab. State is read point-in-time from server SLO summaries; each SLO
  * evaluates against its own rolling window, so the hook deliberately ignores
  * the caller's time range.
+ *
+ * The classification + rollup logic lives in `common/slo/classifier.ts` so
+ * the server-side aggregate route and the client-side fallback share one
+ * implementation. This module re-exports the common types for backward
+ * compatibility with existing callers.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { SloApiClient } from './slo_api_client';
+import { classifySloKind, rollupSloHealth } from '../../../../../common/slo/classifier';
+import type { CanonicalKind, SloHealthBucket } from '../../../../../common/slo/classifier';
 import type {
-  SloHealthState,
+  SloAggregateResponse,
   SloListFilters,
   SloSummary,
-  SuggestionKind,
 } from '../../../../../common/slo/slo_types';
 
-/**
- * The classifier returns the full `SuggestionKind` union so downstream
- * surfaces can distinguish http/rpc/db/etc. when the SLO was created from a
- * suggestion. `hasAvailability` / `hasLatency` roll-ups treat every kind
- * ending in `-availability` / `-latency` as the respective side, so an HTTP
- * availability SLO still counts toward the canonical pair for its service.
- */
-export type CanonicalKind = SuggestionKind;
-
-export interface SloHealthBucket {
-  total: number;
-  ok: number;
-  warning: number;
-  breached: number;
-  noData: number;
-  stale: number;
-  disabled: number;
-  rulesMissing: number;
-  hasAvailability: boolean;
-  hasLatency: boolean;
-  missingCanonicalPair: boolean;
-  slos: SloSummary[];
-}
+// Re-export so existing callers (ChipRow, ServiceSloTab, tests) keep working
+// against the hook's module without reaching into `common/slo/`.
+export { classifySloKind, rollupSloHealth };
+export type { CanonicalKind, SloHealthBucket };
 
 export interface UseServiceSloHealthResult {
   bySvc: Map<string, SloHealthBucket>;
@@ -79,27 +66,94 @@ export interface UseServiceSloHealthParams {
   apiClient: SloApiClient;
 }
 
+// Sorted, newline-joined key lets React compare service sets by value rather
+// than array identity — callers aren't required to memoize `serviceNames`.
+function serviceNamesKey(names: string[]): string {
+  return [...names].sort().join('\n');
+}
+
+const MIN_PAGE_SIZE = 50;
+// Canonical pair = 2 availability + 2 latency per service; anything beyond
+// that is unexpected and we log a warning before paging through.
+const PER_SERVICE_BUDGET = 4;
+// Server endpoint caps at 200 — stay in sync so the hook never hits a 400.
+const MAX_SERVICES_PER_CALL = 200;
+
 /**
- * Classifier. Prefers the stored `canonicalKind` tag stamped at suggest-
- * driven create time (M5A). Falls back to the heuristic over the SLI
- * definition for legacy / manually-authored SLOs that predate the tag.
+ * Module-level latch. Once the aggregate endpoint returns 404 in a session,
+ * we remember the unavailability so subsequent hook mounts skip straight to
+ * the client-side fallback and don't pay the round-trip cost on every refresh.
+ * Reset only on a full page reload.
  */
-export function classifySloKind(slo: SloSummary): CanonicalKind | undefined {
-  if (slo.canonicalKind) return slo.canonicalKind;
-  if (slo.sliBackend !== 'prometheus') return undefined;
-  if (slo.sliLeafType === 'availability') return 'apm-availability';
-  if (slo.sliLeafType === 'latency_threshold') return 'apm-latency';
-  return undefined;
+let aggregateEndpointUnavailable = false;
+
+/**
+ * Detect an OSD `IHttpFetchError` that surfaced as a 404 — meaning the
+ * aggregate endpoint isn't registered (older server, pre-F1 build).
+ */
+function isNotFoundError(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false;
+  const status = (err as { response?: { status?: number } }).response?.status;
+  return status === 404;
 }
 
-function kindSide(kind: CanonicalKind | undefined): 'availability' | 'latency' | undefined {
-  if (!kind) return undefined;
-  if (kind.endsWith('-availability')) return 'availability';
-  if (kind.endsWith('-latency')) return 'latency';
-  return undefined;
+function rollupBucketFromAggregateEntry(
+  entry: SloAggregateResponse['bySvc'][string]
+): SloHealthBucket {
+  return {
+    total: entry.total,
+    ok: entry.ok,
+    warning: entry.warning,
+    breached: entry.breached,
+    noData: entry.noData,
+    stale: entry.stale,
+    disabled: entry.disabled,
+    rulesMissing: entry.rulesMissing,
+    hasAvailability: entry.hasAvailability,
+    hasLatency: entry.hasLatency,
+    missingCanonicalPair: entry.missingCanonicalPair,
+    slos: entry.slos,
+  };
 }
 
-function emptyBucket(): SloHealthBucket {
+/**
+ * Reduce a server aggregate envelope to the hook's `{ bySvc, aggregate }`
+ * shape. The server never ships an `aggregate` field (callers rarely need a
+ * true cross-service rollup beyond the `hasAvailability` / `hasLatency`
+ * guards), so we recompute it locally from the per-service buckets — cheap
+ * given the server also gates total services to ≤200.
+ */
+function fromAggregateResponse(
+  serviceNames: string[],
+  response: SloAggregateResponse
+): { bySvc: Map<string, SloHealthBucket>; aggregate: SloHealthBucket } {
+  const bySvc = new Map<string, SloHealthBucket>();
+  for (const name of serviceNames) {
+    const entry = response.bySvc[name];
+    bySvc.set(name, entry ? rollupBucketFromAggregateEntry(entry) : emptyBucketFor());
+  }
+
+  const aggregate = emptyBucketFor();
+  aggregate.hasAvailability = serviceNames.length > 0;
+  aggregate.hasLatency = serviceNames.length > 0;
+  for (const bucket of bySvc.values()) {
+    aggregate.total += bucket.total;
+    aggregate.ok += bucket.ok;
+    aggregate.warning += bucket.warning;
+    aggregate.breached += bucket.breached;
+    aggregate.noData += bucket.noData;
+    aggregate.stale += bucket.stale;
+    aggregate.disabled += bucket.disabled;
+    aggregate.rulesMissing += bucket.rulesMissing;
+    aggregate.slos.push(...bucket.slos);
+    if (!bucket.hasAvailability) aggregate.hasAvailability = false;
+    if (!bucket.hasLatency) aggregate.hasLatency = false;
+  }
+  aggregate.missingCanonicalPair = !(aggregate.hasAvailability && aggregate.hasLatency);
+  return { bySvc, aggregate };
+}
+
+function emptyBucketFor(): SloHealthBucket {
   return {
     total: 0,
     ok: 0,
@@ -116,96 +170,15 @@ function emptyBucket(): SloHealthBucket {
   };
 }
 
-function tallyState(bucket: SloHealthBucket, state: SloHealthState): void {
-  switch (state) {
-    case 'ok':
-      bucket.ok += 1;
-      break;
-    case 'warning':
-      bucket.warning += 1;
-      break;
-    case 'breached':
-      bucket.breached += 1;
-      break;
-    case 'no_data':
-      bucket.noData += 1;
-      break;
-    case 'stale':
-      bucket.stale += 1;
-      break;
-    case 'disabled':
-      bucket.disabled += 1;
-      break;
-    case 'rules_missing':
-      bucket.rulesMissing += 1;
-      break;
-  }
-}
-
-function recomputeDerived(bucket: SloHealthBucket): void {
-  bucket.missingCanonicalPair = !(bucket.hasAvailability && bucket.hasLatency);
-}
-
-/**
- * Roll `summaries` up into per-service + aggregate buckets. Exposed for
- * tests; the hook wraps this with fetch-state management.
- */
-export function rollupSloHealth(
-  serviceNames: string[],
-  summaries: SloSummary[]
-): { bySvc: Map<string, SloHealthBucket>; aggregate: SloHealthBucket } {
-  const bySvc = new Map<string, SloHealthBucket>();
-  for (const name of serviceNames) bySvc.set(name, emptyBucket());
-
-  const aggregate = emptyBucket();
-  // Aggregate tracks "every service has X", not "any summary exists" — start
-  // true and flip when we find a service without availability / latency.
-  aggregate.hasAvailability = serviceNames.length > 0;
-  aggregate.hasLatency = serviceNames.length > 0;
-
-  for (const slo of summaries) {
-    const bucket = bySvc.get(slo.service);
-    if (!bucket) continue; // summary outside the requested service set
-    bucket.total += 1;
-    bucket.slos.push(slo);
-    tallyState(bucket, slo.status.state);
-
-    const side = kindSide(classifySloKind(slo));
-    if (side === 'availability') bucket.hasAvailability = true;
-    if (side === 'latency') bucket.hasLatency = true;
-
-    aggregate.total += 1;
-    aggregate.slos.push(slo);
-    tallyState(aggregate, slo.status.state);
-  }
-
-  for (const bucket of bySvc.values()) {
-    recomputeDerived(bucket);
-    if (!bucket.hasAvailability) aggregate.hasAvailability = false;
-    if (!bucket.hasLatency) aggregate.hasLatency = false;
-  }
-  recomputeDerived(aggregate);
-
-  return { bySvc, aggregate };
-}
-
-// Sorted, newline-joined key lets React compare service sets by value rather
-// than array identity — callers aren't required to memoize `serviceNames`.
-function serviceNamesKey(names: string[]): string {
-  return [...names].sort().join('\n');
-}
-
-const MIN_PAGE_SIZE = 50;
-// Canonical pair = 2 availability + 2 latency per service; anything beyond
-// that is unexpected and we log a warning before paging through.
-const PER_SERVICE_BUDGET = 4;
-
 export const useServiceSloHealth = ({
   serviceNames,
   datasourceId,
   apiClient,
 }: UseServiceSloHealthParams): UseServiceSloHealthResult => {
-  const [summaries, setSummaries] = useState<SloSummary[]>([]);
+  const [state, setState] = useState<{
+    bySvc: Map<string, SloHealthBucket>;
+    aggregate: SloHealthBucket;
+  }>(() => rollupSloHealth(serviceNames, []));
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<Error | undefined>(undefined);
   const [refetchTrigger, setRefetchTrigger] = useState(0);
@@ -222,10 +195,22 @@ export const useServiceSloHealth = ({
     if (!datasourceId || activeNames.length === 0) {
       // Guard against unstable serviceNames array identity from callers that pass
       // a fresh array per render (e.g. ServiceSloTab passes [serviceName]).
-      setSummaries((prev) => (prev.length === 0 ? prev : []));
+      setState((prev) => (prev.aggregate.total === 0 ? prev : rollupSloHealth(activeNames, [])));
       setError((prev) => (prev === undefined ? prev : undefined));
       setIsLoading((prev) => (prev ? false : prev));
       return;
+    }
+
+    // Guard at the caller boundary: server rejects >200 services. Truncate
+    // + warn so the hook still renders a partial panel rather than 400ing.
+    let names = activeNames;
+    if (names.length > MAX_SERVICES_PER_CALL) {
+      console.warn(
+        '[useServiceSloHealth] serviceNames (%d) exceeds cap (%d); truncating.',
+        names.length,
+        MAX_SERVICES_PER_CALL
+      );
+      names = names.slice(0, MAX_SERVICES_PER_CALL);
     }
 
     let cancelled = false;
@@ -233,10 +218,38 @@ export const useServiceSloHealth = ({
     setError(undefined);
 
     (async () => {
+      // Primary path: server aggregate endpoint. One round-trip regardless of
+      // service count. Fall back only on 404 (endpoint not registered).
+      if (!aggregateEndpointUnavailable) {
+        try {
+          const response = await apiClient.aggregate({
+            services: names,
+            datasourceId,
+          });
+          if (cancelled) return;
+          setState(fromAggregateResponse(names, response));
+          setIsLoading(false);
+          return;
+        } catch (err) {
+          if (cancelled) return;
+          if (isNotFoundError(err)) {
+            aggregateEndpointUnavailable = true;
+            // Fall through to the client-side path below.
+          } else {
+            setError(err instanceof Error ? err : new Error(String(err)));
+            setState(rollupSloHealth(names, []));
+            setIsLoading(false);
+            return;
+          }
+        }
+      }
+
+      // Fallback: client-side fan-out over `apiClient.list`. Kept intact
+      // from pre-F1 for back-compat with older OSD servers.
       try {
-        const pageSize = Math.max(MIN_PAGE_SIZE, activeNames.length * PER_SERVICE_BUDGET);
+        const pageSize = Math.max(MIN_PAGE_SIZE, names.length * PER_SERVICE_BUDGET);
         const baseFilters: SloListFilters = {
-          service: activeNames,
+          service: names,
           datasourceId: [datasourceId],
           pageSize,
         };
@@ -263,13 +276,13 @@ export const useServiceSloHealth = ({
         }
 
         if (!cancelled) {
-          setSummaries(collected);
+          setState(rollupSloHealth(names, collected));
           setIsLoading(false);
         }
       } catch (err) {
         if (cancelled) return;
         setError(err instanceof Error ? err : new Error(String(err)));
-        setSummaries([]);
+        setState(rollupSloHealth(names, []));
         setIsLoading(false);
       }
     })();
@@ -281,17 +294,25 @@ export const useServiceSloHealth = ({
     // stable across the caller's lifetime.
   }, [key, datasourceId, apiClient, refetchTrigger]);
 
-  const { bySvc, aggregate } = useMemo(
-    () => rollupSloHealth(serviceNames, summaries),
-    // `key` captures serviceNames content; rolling up on `summaries` identity
-    // is correct because fetch replaces the array on every refresh.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [key, summaries]
+  const result = useMemo(
+    () => state,
+    // `state` identity changes on every successful fetch; memo keeps
+    // references stable between renders that don't trigger a refetch.
+    [state]
   );
 
   const refetch = useCallback(() => {
     setRefetchTrigger((prev) => prev + 1);
   }, []);
 
-  return { bySvc, aggregate, isLoading, error, refetch };
+  return { bySvc: result.bySvc, aggregate: result.aggregate, isLoading, error, refetch };
 };
+
+/**
+ * Test-only hook reset. Clears the module-level fallback latch so each test
+ * starts with the aggregate endpoint considered available. Not exported for
+ * production callers — the latch intentionally persists for the session.
+ */
+export function __resetAggregateFallbackLatchForTests(): void {
+  aggregateEndpointUnavailable = false;
+}

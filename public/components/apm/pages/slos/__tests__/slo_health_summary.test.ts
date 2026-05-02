@@ -7,7 +7,13 @@ import { renderHook, waitFor, act } from '@testing-library/react';
 import type { SloApiClient } from '../slo_api_client';
 import type { PaginatedResponse } from '../../../../../../common/types/alerting/types';
 import type { SloHealthState, SloSummary } from '../../../../../../common/slo/slo_types';
-import { classifySloKind, rollupSloHealth, useServiceSloHealth } from '../slo_health_summary';
+import {
+  __resetAggregateFallbackLatchForTests,
+  classifySloKind,
+  rollupSloHealth,
+  useServiceSloHealth,
+} from '../slo_health_summary';
+import type { SloAggregateResponse } from '../../../../../../common/slo/slo_types';
 
 function makeSummary(
   overrides: Partial<SloSummary> & Pick<SloSummary, 'id' | 'service'>
@@ -246,8 +252,54 @@ describe('rollupSloHealth', () => {
 });
 
 describe('useServiceSloHealth', () => {
-  function makeApiClient(list: jest.Mock): SloApiClient {
-    return ({ list } as unknown) as SloApiClient;
+  function makeApiClient(opts: { aggregate?: jest.Mock; list?: jest.Mock }): SloApiClient {
+    return ({
+      aggregate: opts.aggregate ?? jest.fn(),
+      list: opts.list ?? jest.fn(),
+    } as unknown) as SloApiClient;
+  }
+
+  function aggregateResponse(
+    serviceNames: string[],
+    summaries: SloSummary[]
+  ): SloAggregateResponse {
+    // Build the response shape the server produces by routing through the
+    // same rollup — keeps the fixture honest without re-deriving numbers by hand.
+    const { bySvc } = rollupSloHealth(serviceNames, summaries);
+    const out: SloAggregateResponse = { bySvc: {} };
+    for (const name of serviceNames) {
+      const bucket = bySvc.get(name);
+      out.bySvc[name] = bucket
+        ? {
+            total: bucket.total,
+            ok: bucket.ok,
+            warning: bucket.warning,
+            breached: bucket.breached,
+            noData: bucket.noData,
+            stale: bucket.stale,
+            disabled: bucket.disabled,
+            rulesMissing: bucket.rulesMissing,
+            hasAvailability: bucket.hasAvailability,
+            hasLatency: bucket.hasLatency,
+            missingCanonicalPair: bucket.missingCanonicalPair,
+            slos: bucket.slos,
+          }
+        : {
+            total: 0,
+            ok: 0,
+            warning: 0,
+            breached: 0,
+            noData: 0,
+            stale: 0,
+            disabled: 0,
+            rulesMissing: 0,
+            hasAvailability: false,
+            hasLatency: false,
+            missingCanonicalPair: true,
+            slos: [],
+          };
+    }
+    return out;
   }
 
   function page(
@@ -263,9 +315,22 @@ describe('useServiceSloHealth', () => {
     };
   }
 
+  function notFoundError(): Error {
+    const err = new Error('Not found') as Error & {
+      response?: { status: number };
+    };
+    err.response = { status: 404 };
+    return err;
+  }
+
+  beforeEach(() => {
+    __resetAggregateFallbackLatchForTests();
+  });
+
   it('returns empty buckets and does not fetch when datasourceId is absent', async () => {
+    const aggregate = jest.fn();
     const list = jest.fn();
-    const apiClient = makeApiClient(list);
+    const apiClient = makeApiClient({ aggregate, list });
     const { result } = renderHook(() =>
       useServiceSloHealth({
         serviceNames: ['foo'],
@@ -274,15 +339,16 @@ describe('useServiceSloHealth', () => {
       })
     );
     expect(result.current.isLoading).toBe(false);
+    expect(aggregate).not.toHaveBeenCalled();
     expect(list).not.toHaveBeenCalled();
     expect(result.current.aggregate.total).toBe(0);
-    // Buckets are still materialized for each requested service (counts zero).
     expect(result.current.bySvc.get('foo')).toMatchObject({ total: 0 });
   });
 
   it('returns empty buckets and does not fetch when serviceNames is empty', () => {
+    const aggregate = jest.fn();
     const list = jest.fn();
-    const apiClient = makeApiClient(list);
+    const apiClient = makeApiClient({ aggregate, list });
     const { result } = renderHook(() =>
       useServiceSloHealth({
         serviceNames: [],
@@ -290,37 +356,38 @@ describe('useServiceSloHealth', () => {
         apiClient,
       })
     );
+    expect(aggregate).not.toHaveBeenCalled();
     expect(list).not.toHaveBeenCalled();
     expect(result.current.aggregate.total).toBe(0);
   });
 
-  it('fetches, classifies, and rolls up summaries into per-service buckets', async () => {
-    const list = jest.fn().mockResolvedValue(
-      page([
-        makeSummary({
-          id: 'a',
-          service: 'foo',
-          sliBackend: 'prometheus',
-          sliLeafType: 'availability',
-          status: { state: 'ok' } as any,
-        }),
-        makeSummary({
-          id: 'b',
-          service: 'foo',
-          sliBackend: 'prometheus',
-          sliLeafType: 'latency_threshold',
-          status: { state: 'breached' } as any,
-        }),
-        makeSummary({
-          id: 'c',
-          service: 'bar',
-          sliBackend: 'prometheus',
-          sliLeafType: 'availability',
-          status: { state: 'no_data' } as any,
-        }),
-      ])
-    );
-    const apiClient = makeApiClient(list);
+  it('prefers the aggregate endpoint and rolls up per-service buckets in one call', async () => {
+    const summaries = [
+      makeSummary({
+        id: 'a',
+        service: 'foo',
+        sliBackend: 'prometheus',
+        sliLeafType: 'availability',
+        status: { state: 'ok' } as any,
+      }),
+      makeSummary({
+        id: 'b',
+        service: 'foo',
+        sliBackend: 'prometheus',
+        sliLeafType: 'latency_threshold',
+        status: { state: 'breached' } as any,
+      }),
+      makeSummary({
+        id: 'c',
+        service: 'bar',
+        sliBackend: 'prometheus',
+        sliLeafType: 'availability',
+        status: { state: 'no_data' } as any,
+      }),
+    ];
+    const aggregate = jest.fn().mockResolvedValue(aggregateResponse(['foo', 'bar'], summaries));
+    const list = jest.fn();
+    const apiClient = makeApiClient({ aggregate, list });
 
     const { result } = renderHook(() =>
       useServiceSloHealth({
@@ -331,15 +398,12 @@ describe('useServiceSloHealth', () => {
     );
 
     await waitFor(() => expect(result.current.isLoading).toBe(false));
-    expect(list).toHaveBeenCalledTimes(1);
-    expect(list).toHaveBeenCalledWith(
-      expect.objectContaining({
-        service: ['foo', 'bar'],
-        datasourceId: ['ds-1'],
-        pageSize: 50,
-        page: 1,
-      })
-    );
+    expect(aggregate).toHaveBeenCalledTimes(1);
+    expect(aggregate).toHaveBeenCalledWith({
+      services: ['foo', 'bar'],
+      datasourceId: 'ds-1',
+    });
+    expect(list).not.toHaveBeenCalled();
     expect(result.current.bySvc.get('foo')).toMatchObject({
       total: 2,
       ok: 1,
@@ -358,10 +422,86 @@ describe('useServiceSloHealth', () => {
     expect(result.current.aggregate.total).toBe(3);
   });
 
-  it('pages through when total exceeds pageSize and warns', async () => {
+  it('falls back to list fan-out on a 404 from aggregate', async () => {
+    const aggregate = jest.fn().mockRejectedValue(notFoundError());
+    const list = jest.fn().mockResolvedValue(
+      page([
+        makeSummary({
+          id: 'a',
+          service: 'foo',
+          sliBackend: 'prometheus',
+          sliLeafType: 'availability',
+        }),
+      ])
+    );
+    const apiClient = makeApiClient({ aggregate, list });
+
+    const { result } = renderHook(() =>
+      useServiceSloHealth({
+        serviceNames: ['foo'],
+        datasourceId: 'ds-1',
+        apiClient,
+      })
+    );
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+    expect(aggregate).toHaveBeenCalledTimes(1);
+    expect(list).toHaveBeenCalledTimes(1);
+    expect(list).toHaveBeenCalledWith(
+      expect.objectContaining({
+        service: ['foo'],
+        datasourceId: ['ds-1'],
+        page: 1,
+      })
+    );
+    expect(result.current.bySvc.get('foo')?.total).toBe(1);
+  });
+
+  it('skips the aggregate call after a prior 404 in the same session', async () => {
+    const aggregate = jest.fn().mockRejectedValue(notFoundError());
+    const list = jest.fn().mockResolvedValue(page([]));
+    const apiClient = makeApiClient({ aggregate, list });
+
+    const { result, rerender } = renderHook(
+      ({ ds }) =>
+        useServiceSloHealth({
+          serviceNames: ['foo'],
+          datasourceId: ds,
+          apiClient,
+        }),
+      { initialProps: { ds: 'ds-1' } }
+    );
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+    expect(aggregate).toHaveBeenCalledTimes(1);
+    expect(list).toHaveBeenCalledTimes(1);
+
+    // Change datasourceId — new fetch, but the aggregate latch means we
+    // should skip straight to `list` without a second aggregate attempt.
+    rerender({ ds: 'ds-2' });
+    await waitFor(() => expect(list).toHaveBeenCalledTimes(2));
+    expect(aggregate).toHaveBeenCalledTimes(1);
+  });
+
+  it('surfaces non-404 aggregate errors without falling back', async () => {
+    const aggregate = jest.fn().mockRejectedValue(new Error('boom'));
+    const list = jest.fn();
+    const apiClient = makeApiClient({ aggregate, list });
+    const { result } = renderHook(() =>
+      useServiceSloHealth({
+        serviceNames: ['foo'],
+        datasourceId: 'ds-1',
+        apiClient,
+      })
+    );
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+    expect(result.current.error).toEqual(new Error('boom'));
+    expect(list).not.toHaveBeenCalled();
+    expect(result.current.aggregate.total).toBe(0);
+  });
+
+  it('fallback path pages through when total exceeds pageSize and warns', async () => {
     const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const aggregate = jest.fn().mockRejectedValue(notFoundError());
     const services = Array.from({ length: 20 }, (_, i) => `svc-${i}`);
-    // First call returns pageSize=80 results with total=81 (forces a second page).
     const firstResults = Array.from({ length: 80 }, (_, i) =>
       makeSummary({ id: `a-${i}`, service: services[i % services.length] })
     );
@@ -374,7 +514,7 @@ describe('useServiceSloHealth', () => {
       .mockResolvedValueOnce(
         page(secondResults, { total: 81, pageSize: 80, page: 2, hasMore: false })
       );
-    const apiClient = makeApiClient(list);
+    const apiClient = makeApiClient({ aggregate, list });
 
     const { result } = renderHook(() =>
       useServiceSloHealth({
@@ -391,24 +531,9 @@ describe('useServiceSloHealth', () => {
     warn.mockRestore();
   });
 
-  it('surfaces fetch errors', async () => {
-    const list = jest.fn().mockRejectedValue(new Error('boom'));
-    const apiClient = makeApiClient(list);
-    const { result } = renderHook(() =>
-      useServiceSloHealth({
-        serviceNames: ['foo'],
-        datasourceId: 'ds-1',
-        apiClient,
-      })
-    );
-    await waitFor(() => expect(result.current.isLoading).toBe(false));
-    expect(result.current.error).toEqual(new Error('boom'));
-    expect(result.current.aggregate.total).toBe(0);
-  });
-
   it('does not refetch when serviceNames identity changes but content matches', async () => {
-    const list = jest.fn().mockResolvedValue(page([]));
-    const apiClient = makeApiClient(list);
+    const aggregate = jest.fn().mockResolvedValue(aggregateResponse(['foo', 'bar'], []));
+    const apiClient = makeApiClient({ aggregate });
     const { rerender } = renderHook(
       ({ names }) =>
         useServiceSloHealth({
@@ -418,15 +543,15 @@ describe('useServiceSloHealth', () => {
         }),
       { initialProps: { names: ['foo', 'bar'] } }
     );
-    await waitFor(() => expect(list).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(aggregate).toHaveBeenCalledTimes(1));
     rerender({ names: ['bar', 'foo'] }); // same set, different order + identity
     await Promise.resolve();
-    expect(list).toHaveBeenCalledTimes(1);
+    expect(aggregate).toHaveBeenCalledTimes(1);
   });
 
   it('refetches when refetch() is called', async () => {
-    const list = jest.fn().mockResolvedValue(page([]));
-    const apiClient = makeApiClient(list);
+    const aggregate = jest.fn().mockResolvedValue(aggregateResponse(['foo'], []));
+    const apiClient = makeApiClient({ aggregate });
     const { result } = renderHook(() =>
       useServiceSloHealth({
         serviceNames: ['foo'],
@@ -434,10 +559,28 @@ describe('useServiceSloHealth', () => {
         apiClient,
       })
     );
-    await waitFor(() => expect(list).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(aggregate).toHaveBeenCalledTimes(1));
     act(() => {
       result.current.refetch();
     });
-    await waitFor(() => expect(list).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(aggregate).toHaveBeenCalledTimes(2));
+  });
+
+  it('truncates + warns when serviceNames exceeds the 200-service cap', async () => {
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const many = Array.from({ length: 250 }, (_, i) => `svc-${i}`);
+    const aggregate = jest.fn().mockResolvedValue({ bySvc: {} } as SloAggregateResponse);
+    const apiClient = makeApiClient({ aggregate });
+    renderHook(() =>
+      useServiceSloHealth({
+        serviceNames: many,
+        datasourceId: 'ds-1',
+        apiClient,
+      })
+    );
+    await waitFor(() => expect(aggregate).toHaveBeenCalledTimes(1));
+    expect(aggregate.mock.calls[0][0].services.length).toBe(200);
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
   });
 });

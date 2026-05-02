@@ -499,6 +499,34 @@ export interface ProbeSliResponse {
   errors?: { good?: string; total?: string };
 }
 
+/**
+ * Response shape for `GET ${OBSERVABILITY_BASE}/v1/slos/_aggregate`.
+ *
+ * Server rolls up SLO summaries into per-service buckets in memory, so the
+ * client makes one round-trip regardless of service count. The client-side
+ * hook falls back to the list fan-out on 404 for older OSD servers that
+ * predate this endpoint.
+ */
+export interface SloAggregateBucket {
+  total: number;
+  ok: number;
+  warning: number;
+  breached: number;
+  noData: number;
+  stale: number;
+  disabled: number;
+  rulesMissing: number;
+  hasAvailability: boolean;
+  hasLatency: boolean;
+  missingCanonicalPair: boolean;
+  /** Full `SloSummary` rows — retained so the Service Details SLOs tab can render without a second fetch. */
+  slos: SloSummary[];
+}
+
+export interface SloAggregateResponse {
+  bySvc: Record<string, SloAggregateBucket>;
+}
+
 export interface SloListFilters {
   /**
    * Restrict listing to SLOs owned by these datasource ids. Empty/undefined

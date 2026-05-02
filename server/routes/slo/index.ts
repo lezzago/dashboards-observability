@@ -40,6 +40,7 @@ import {
 import { registerProbeSliRoute } from './probe_sli';
 import { registerSloReconcileRoute } from './reconcile_route';
 import { registerSloAdoptionRoutes } from './adoption_route';
+import { registerSloAggregateRoute } from './aggregate_route';
 
 /**
  * OSD context type with the optional `dataSource` plugin extension. Same
@@ -473,6 +474,19 @@ export function registerSloRoutes(options: RegisterSloRoutesOptions) {
   if (prometheusBackend) {
     registerProbeSliRoute(router, logger, prometheusBackend, datasourceService, discoveryService);
   }
+
+  // F1 — per-service aggregate rollup. Registered ahead of the list route so
+  // the `/_aggregate` path isn't shadowed by the `/{id}` catch-all.
+  registerSloAggregateRoute(router, sloService, logger, (ctx) =>
+    buildStatusContext(
+      ctx,
+      datasourceService,
+      discoveryService,
+      ruleHealthChecker,
+      ruleDedupEnabled
+    )
+  );
+
   router.get(
     {
       path: SLO_BASE,
