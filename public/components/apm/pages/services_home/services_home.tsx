@@ -35,14 +35,18 @@ import { useServicesRedMetrics } from '../../shared/hooks/use_services_red_metri
 import { useApmConfig } from '../../config/apm_config_context';
 import { SloApiClient } from '../slos/slo_api_client';
 import {
-  SloHealthAccessError,
   SloHealthCell,
   SloHealthPanel,
   SLO_HEALTH_COLUMN_HEADER,
   SLO_HEALTH_COLUMN_HEADER_TIP,
   SLO_HEALTH_COLUMN_WIDTH,
 } from './slo_health_panel';
-import { SloHealthBucket, useServiceSloHealth } from '../slos/slo_health_summary';
+import {
+  SloHealthAccessError,
+  SloHealthBucket,
+  toSloHealthAccessError,
+  useServiceSloHealth,
+} from '../slos/slo_health_summary';
 import { coreRefs } from '../../../../framework/core_refs';
 import { ApmPageHeader } from '../../shared/components/apm_page_header';
 import { EmptyState } from '../../shared/components/empty_state';
@@ -380,13 +384,10 @@ export const ServicesHome: React.FC<ServicesHomeProps> = ({
     apiClient: sloApiClient ?? sloApiClientStub,
   });
 
-  // Reduce the hook's raw Error to our UI-facing error kind (generic vs 403).
-  const sloHealthError: SloHealthAccessError | undefined = useMemo(() => {
-    if (!sloHealth.error) return undefined;
-    const body = (sloHealth.error as { response?: { status?: number } }).response;
-    if (body?.status === 403) return { kind: 'forbidden' };
-    return { kind: 'generic', message: sloHealth.error.message };
-  }, [sloHealth.error]);
+  const sloHealthError: SloHealthAccessError | undefined = useMemo(
+    () => toSloHealthAccessError(sloHealth.error),
+    [sloHealth.error]
+  );
 
   // Stable accessor used by the per-row cell. Only changes when the hook's
   // Map identity changes — which happens on refetch, not on every mousemove.

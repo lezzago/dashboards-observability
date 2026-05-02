@@ -30,12 +30,9 @@ import {
   EuiToolTip,
 } from '@elastic/eui';
 import { i18n } from '@osd/i18n';
-import { observabilityApmSloID } from '../../../../../common/constants/apm';
-import { coreRefs } from '../../../../framework/core_refs';
-import type { SloHealthBucket } from '../slos/slo_health_summary';
+import { navigateToSloListing, navigateToSloSuggest } from '../../shared/utils/navigation_utils';
+import type { SloHealthAccessError, SloHealthBucket } from '../slos/slo_health_summary';
 import { ChipRow } from '../slos/slo_health_chip_row';
-
-export type SloHealthAccessError = { kind: 'generic'; message?: string } | { kind: 'forbidden' };
 
 export interface SloHealthPanelProps {
   aggregate: SloHealthBucket;
@@ -53,31 +50,6 @@ export interface SloHealthCellProps {
   bucket: SloHealthBucket | undefined;
   isLoading: boolean;
   error: SloHealthAccessError | undefined;
-}
-
-// ============================================================================
-// Navigation
-// ============================================================================
-
-/**
- * `#/slos/suggest?source=apm&services=<csv>` inside the apm-slo app. We have
- * to cross a HashRouter boundary (services home is in apm-services, suggest
- * page in apm-slo) — go through `application.navigateToApp`.
- */
-export function navigateToSloSuggest(services: string[]): void {
-  const qs = new URLSearchParams({ source: 'apm' });
-  if (services.length > 0) qs.set('services', services.join(','));
-  const path = `#/slos/suggest?${qs.toString()}`;
-  coreRefs?.application?.navigateToApp(observabilityApmSloID, { path });
-  window.dispatchEvent(new HashChangeEvent('hashchange'));
-}
-
-/** `#/slos?service=<csv>` inside the apm-slo app. */
-export function navigateToSloListing(services: string[]): void {
-  const path =
-    services.length > 0 ? `#/slos?service=${encodeURIComponent(services.join(','))}` : '#/slos';
-  coreRefs?.application?.navigateToApp(observabilityApmSloID, { path });
-  window.dispatchEvent(new HashChangeEvent('hashchange'));
 }
 
 // ============================================================================

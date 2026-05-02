@@ -18,12 +18,8 @@ jest.mock('../../../../../framework/core_refs', () => ({
   },
 }));
 
-import {
-  SloHealthCell,
-  SloHealthPanel,
-  navigateToSloListing,
-  navigateToSloSuggest,
-} from '../slo_health_panel';
+import { SloHealthCell, SloHealthPanel } from '../slo_health_panel';
+import { navigateToSloListing, navigateToSloSuggest } from '../../../shared/utils/navigation_utils';
 import type { SloHealthBucket } from '../../slos/slo_health_summary';
 
 function makeBucket(overrides: Partial<SloHealthBucket> = {}): SloHealthBucket {

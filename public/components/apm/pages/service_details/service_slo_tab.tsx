@@ -4,11 +4,12 @@
  */
 
 /**
- * Service Details → SLOs tab. Reuses `useServiceSloHealth` (the single source
- * of truth that also powers the Services Home header panel and per-row cell)
- * and shares the ChipRow primitive. The tab intentionally does NOT subscribe
- * to the Service Details time picker — SLO state is evaluated against each
- * SLO's own rolling window.
+ * Service Details → SLOs tab. The parent (`service_details.tsx`) owns the
+ * `useServiceSloHealth` call and passes the bucket + loading/error/refetch
+ * down as props, so the tab-label breach badge and the tab body share a
+ * single SLO list() fetch per page mount. The tab intentionally does NOT
+ * subscribe to the Service Details time picker — SLO state is evaluated
+ * against each SLO's own rolling window.
  */
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
@@ -35,10 +36,9 @@ import { i18n } from '@osd/i18n';
 import type { SloHealthState, SloSummary } from '../../../../../common/slo/slo_types';
 import { formatPct } from '../../../../../common/slo/format';
 import { getSloHealthColor } from '../../../../../common/slo/state';
-import { SloApiClient } from '../slos/slo_api_client';
-import { SloHealthBucket, useServiceSloHealth } from '../slos/slo_health_summary';
+import { SloHealthAccessError, SloHealthBucket } from '../slos/slo_health_summary';
 import { ChipRow } from '../slos/slo_health_chip_row';
-import { SloHealthAccessError, navigateToSloSuggest } from '../services_home/slo_health_panel';
+import { navigateToSloSuggest } from '../../shared/utils/navigation_utils';
 import { coreRefs } from '../../../../framework/core_refs';
 import { observabilityApmSloID } from '../../../../../common/constants/apm';
 import type { TimeRange } from '../../common/types/service_details_types';
@@ -48,8 +48,17 @@ const LOADING_GRACE_MS = 150;
 
 export interface ServiceSloTabProps {
   serviceName: string;
-  datasourceId: string;
-  apiClient: SloApiClient;
+  /**
+   * Bucket for this service, sourced from the parent's `useServiceSloHealth`
+   * call. Undefined while the hook is loading its initial response or when
+   * the service has no summaries yet. Parent ownership (M5B) means Services
+   * Details pages issue a single SLO list() — the tab-label breach badge
+   * and the tab content share one fetch.
+   */
+  bucket: SloHealthBucket | undefined;
+  isLoading: boolean;
+  error: SloHealthAccessError | undefined;
+  refetch: () => void;
   /**
    * Accepted for symmetry with the other service-details tabs
    * (ServiceOverview / ServiceOperations / ServiceDependencies). The hook is
@@ -240,37 +249,16 @@ function worstTargetLabel(slo: SloSummary): string {
 // Component
 // ---------------------------------------------------------------------------
 
-/**
- * Reduce a raw Error from `useServiceSloHealth` into the access-error
- * discriminator consumed by the panel / tab UI. Matches the logic in
- * services_home.tsx — kept inline to avoid extending the M2 public API until
- * M5 consolidates error handling.
- */
-function toAccessError(error: Error | undefined): SloHealthAccessError | undefined {
-  if (!error) return undefined;
-  const body = (error as { response?: { status?: number } }).response;
-  if (body?.status === 403) return { kind: 'forbidden' };
-  return { kind: 'generic', message: error.message };
-}
-
 export const ServiceSloTab: React.FC<ServiceSloTabProps> = ({
   serviceName,
-  datasourceId,
-  apiClient,
+  bucket,
+  isLoading,
+  error: accessError,
+  refetch,
 }) => {
-  // Fresh array per render is intentional — the M1 hook's internal
-  // content-based key guards against array-identity churn.
-  const sloHealth = useServiceSloHealth({
-    serviceNames: [serviceName],
-    datasourceId,
-    apiClient,
-  });
-
-  const accessError = useMemo(() => toAccessError(sloHealth.error), [sloHealth.error]);
-  const showSkeleton = useDelayedLoading(sloHealth.isLoading);
-  const bucket = sloHealth.bySvc.get(serviceName);
+  const showSkeleton = useDelayedLoading(isLoading);
   const total = bucket?.total ?? 0;
-  const isFirstLoad = sloHealth.isLoading && total === 0 && !accessError;
+  const isFirstLoad = isLoading && total === 0 && !accessError;
 
   const onSuggest = useCallback(() => {
     navigateToSloSuggest([serviceName]);
@@ -388,7 +376,7 @@ export const ServiceSloTab: React.FC<ServiceSloTabProps> = ({
             </EuiAccordion>
           ) : null}
           <EuiSpacer size="s" />
-          <EuiButton size="s" onClick={sloHealth.refetch} data-test-subj="serviceSloTabErrorRetry">
+          <EuiButton size="s" onClick={refetch} data-test-subj="serviceSloTabErrorRetry">
             {t.errorRetry}
           </EuiButton>
         </EuiCallOut>
@@ -397,7 +385,7 @@ export const ServiceSloTab: React.FC<ServiceSloTabProps> = ({
   }
 
   // ---------------- Empty (no SLOs for this service) ----------------
-  if (!sloHealth.isLoading && total === 0) {
+  if (!isLoading && total === 0) {
     return (
       <EuiPanel hasBorder paddingSize="m" data-test-subj="serviceSloTab">
         <EuiEmptyPrompt
@@ -433,7 +421,7 @@ export const ServiceSloTab: React.FC<ServiceSloTabProps> = ({
   // Suppress "missing" verdict while loading — never call a service "missing"
   // based on incomplete data.
   const showMissingCallout =
-    !sloHealth.isLoading && bucket != null && bucket.missingCanonicalPair && total > 0;
+    !isLoading && bucket != null && bucket.missingCanonicalPair && total > 0;
 
   return (
     <EuiPanel hasBorder paddingSize="m" data-test-subj="serviceSloTab">
@@ -490,7 +478,7 @@ export const ServiceSloTab: React.FC<ServiceSloTabProps> = ({
       <EuiInMemoryTable<SloSummary>
         items={items}
         columns={columns}
-        loading={sloHealth.isLoading}
+        loading={isLoading}
         pagination={{ initialPageSize: 10, pageSizeOptions: [10, 25, 50] }}
         sorting={{ sort: { field: 'name', direction: 'asc' } }}
         data-test-subj="serviceSloTabTable"

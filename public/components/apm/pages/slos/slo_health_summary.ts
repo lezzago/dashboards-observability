@@ -54,6 +54,25 @@ export interface UseServiceSloHealthResult {
   refetch: () => void;
 }
 
+/**
+ * UI-facing reduction of the raw hook error. `forbidden` renders a dedicated
+ * "you don't have access" callout; `generic` surfaces the server message.
+ */
+export type SloHealthAccessError = { kind: 'generic'; message?: string } | { kind: 'forbidden' };
+
+/**
+ * Reduce a raw Error from `useServiceSloHealth` into the access-error
+ * discriminator consumed by Services Home header + per-row cells and the
+ * Service Details SLOs tab. Keep this alongside the hook so every caller
+ * collapses errors the same way.
+ */
+export function toSloHealthAccessError(error: Error | undefined): SloHealthAccessError | undefined {
+  if (!error) return undefined;
+  const body = (error as { response?: { status?: number } }).response;
+  if (body?.status === 403) return { kind: 'forbidden' };
+  return { kind: 'generic', message: error.message };
+}
+
 export interface UseServiceSloHealthParams {
   serviceNames: string[];
   datasourceId: string;

@@ -4,10 +4,13 @@
  */
 
 import React from 'react';
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import type { PaginatedResponse } from '../../../../../../common/types/alerting/types';
+import { act, fireEvent, render, screen } from '@testing-library/react';
 import type { SloHealthState, SloSummary } from '../../../../../../common/slo/slo_types';
-import type { SloApiClient } from '../../slos/slo_api_client';
+import {
+  rollupSloHealth,
+  SloHealthAccessError,
+  SloHealthBucket,
+} from '../../slos/slo_health_summary';
 
 // Stub coreRefs before importing the tab so the navigate helpers resolve.
 const mockNavigateToApp = jest.fn();
@@ -67,30 +70,40 @@ function makeSummary(
   } as SloSummary;
 }
 
-function makeApiClient(
-  results: SloSummary[] = [],
-  opts: Partial<Omit<PaginatedResponse<SloSummary>, 'results'>> = {}
-): SloApiClient {
-  const response: PaginatedResponse<SloSummary> = {
-    results,
-    total: opts.total ?? results.length,
-    page: opts.page ?? 1,
-    pageSize: opts.pageSize ?? Math.max(50, results.length),
-    hasMore: opts.hasMore ?? false,
-  };
-  return ({
-    list: jest.fn().mockResolvedValue(response),
-  } as unknown) as SloApiClient;
-}
-
-function makeFailingApiClient(error: unknown): SloApiClient {
-  return ({
-    list: jest.fn().mockRejectedValue(error),
-  } as unknown) as SloApiClient;
-}
-
 const SERVICE = 'payments-api';
-const DATASOURCE = 'ds-1';
+
+/**
+ * Build the bucket the parent hook would compute for this service. Using the
+ * real `rollupSloHealth` keeps the test coupled to the production hook math
+ * rather than a hand-rolled bucket shape, so when M5A-style classifier tweaks
+ * arrive the tests follow automatically.
+ */
+function bucketFor(service: string, summaries: SloSummary[]): SloHealthBucket | undefined {
+  return rollupSloHealth([service], summaries).bySvc.get(service);
+}
+
+interface RenderOpts {
+  bucket?: SloHealthBucket | undefined;
+  isLoading?: boolean;
+  error?: SloHealthAccessError | undefined;
+  refetch?: () => void;
+}
+
+function renderTab(opts: RenderOpts = {}) {
+  const refetch = opts.refetch ?? jest.fn();
+  return {
+    refetch,
+    ...render(
+      <ServiceSloTab
+        serviceName={SERVICE}
+        bucket={opts.bucket}
+        isLoading={opts.isLoading ?? false}
+        error={opts.error}
+        refetch={refetch}
+      />
+    ),
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Tab-label badge
@@ -124,32 +137,24 @@ describe('ServiceSloTab — empty state', () => {
     mockNavigateToApp.mockClear();
   });
 
-  it('renders the EuiEmptyPrompt when no SLOs are tracked for this service', async () => {
-    const apiClient = makeApiClient([]);
-    render(<ServiceSloTab serviceName={SERVICE} datasourceId={DATASOURCE} apiClient={apiClient} />);
-    await waitFor(() => {
-      expect(screen.getByTestId('serviceSloTabEmptyPrompt')).toBeInTheDocument();
-    });
+  it('renders the EuiEmptyPrompt when no SLOs are tracked for this service', () => {
+    renderTab({ bucket: bucketFor(SERVICE, []) });
+    expect(screen.getByTestId('serviceSloTabEmptyPrompt')).toBeInTheDocument();
     expect(screen.getByText('No SLOs tracked for this service')).toBeInTheDocument();
-    // Missing-pair callout must not render alongside empty prompt.
     expect(screen.queryByTestId('serviceSloTabMissingPairCallout')).toBeNull();
   });
 
-  it('primary empty-state action navigates to scoped suggest page', async () => {
-    const apiClient = makeApiClient([]);
-    render(<ServiceSloTab serviceName={SERVICE} datasourceId={DATASOURCE} apiClient={apiClient} />);
-    const primary = await screen.findByTestId('serviceSloTabEmptyPromptPrimary');
-    fireEvent.click(primary);
+  it('primary empty-state action navigates to scoped suggest page', () => {
+    renderTab({ bucket: bucketFor(SERVICE, []) });
+    fireEvent.click(screen.getByTestId('serviceSloTabEmptyPromptPrimary'));
     expect(mockNavigateToApp).toHaveBeenLastCalledWith('observability-apm-slo', {
       path: `#/slos/suggest?source=apm&services=${encodeURIComponent(SERVICE)}`,
     });
   });
 
-  it('secondary empty-state action navigates to create wizard', async () => {
-    const apiClient = makeApiClient([]);
-    render(<ServiceSloTab serviceName={SERVICE} datasourceId={DATASOURCE} apiClient={apiClient} />);
-    const secondary = await screen.findByTestId('serviceSloTabEmptyPromptSecondary');
-    fireEvent.click(secondary);
+  it('secondary empty-state action navigates to create wizard', () => {
+    renderTab({ bucket: bucketFor(SERVICE, []) });
+    fireEvent.click(screen.getByTestId('serviceSloTabEmptyPromptSecondary'));
     expect(mockNavigateToApp).toHaveBeenLastCalledWith('observability-apm-slo', {
       path: '#/slos/create',
     });
@@ -157,8 +162,8 @@ describe('ServiceSloTab — empty state', () => {
 });
 
 describe('ServiceSloTab — complete canonical pair', () => {
-  it('renders chips and table, no missing-pair callout', async () => {
-    const apiClient = makeApiClient([
+  it('renders chips and table, no missing-pair callout', () => {
+    const summaries = [
       makeSummary({
         id: 'a',
         service: SERVICE,
@@ -187,11 +192,9 @@ describe('ServiceSloTab — complete canonical pair', () => {
           computedAt: '',
         },
       }),
-    ]);
-    render(<ServiceSloTab serviceName={SERVICE} datasourceId={DATASOURCE} apiClient={apiClient} />);
-    await waitFor(() => {
-      expect(screen.getByTestId('serviceSloTabTable')).toBeInTheDocument();
-    });
+    ];
+    renderTab({ bucket: bucketFor(SERVICE, summaries) });
+    expect(screen.getByTestId('serviceSloTabTable')).toBeInTheDocument();
     expect(screen.getByTestId('serviceSloTabChipRow')).toBeInTheDocument();
     expect(screen.getByTestId('serviceSloTabFootnote')).toBeInTheDocument();
     expect(screen.queryByTestId('serviceSloTabMissingPairCallout')).toBeNull();
@@ -203,57 +206,34 @@ describe('ServiceSloTab — missing-pair variants', () => {
     mockNavigateToApp.mockClear();
   });
 
-  it('shows "Latency SLO missing" when only availability is present', async () => {
-    const apiClient = makeApiClient([
-      makeSummary({
-        id: 'a',
-        service: SERVICE,
-        sliLeafType: 'availability',
-      }),
-    ]);
-    render(<ServiceSloTab serviceName={SERVICE} datasourceId={DATASOURCE} apiClient={apiClient} />);
-    const callout = await screen.findByTestId('serviceSloTabMissingPairCallout');
+  it('shows "Latency SLO missing" when only availability is present', () => {
+    const summaries = [makeSummary({ id: 'a', service: SERVICE, sliLeafType: 'availability' })];
+    renderTab({ bucket: bucketFor(SERVICE, summaries) });
+    const callout = screen.getByTestId('serviceSloTabMissingPairCallout');
     expect(callout).toHaveTextContent('Latency SLO missing');
   });
 
-  it('shows "Availability SLO missing" when only latency is present', async () => {
-    const apiClient = makeApiClient([
-      makeSummary({
-        id: 'b',
-        service: SERVICE,
-        sliLeafType: 'latency_threshold',
-      }),
-    ]);
-    render(<ServiceSloTab serviceName={SERVICE} datasourceId={DATASOURCE} apiClient={apiClient} />);
-    const callout = await screen.findByTestId('serviceSloTabMissingPairCallout');
+  it('shows "Availability SLO missing" when only latency is present', () => {
+    const summaries = [
+      makeSummary({ id: 'b', service: SERVICE, sliLeafType: 'latency_threshold' }),
+    ];
+    renderTab({ bucket: bucketFor(SERVICE, summaries) });
+    const callout = screen.getByTestId('serviceSloTabMissingPairCallout');
     expect(callout).toHaveTextContent('Availability SLO missing');
   });
 
-  it('shows "Canonical pair incomplete" when neither canonical kind is present but other SLOs exist', async () => {
+  it('shows "Canonical pair incomplete" when neither canonical kind is present but other SLOs exist', () => {
     // A custom SLI that doesn't classify as availability or latency.
-    const apiClient = makeApiClient([
-      makeSummary({
-        id: 'c',
-        service: SERVICE,
-        sliLeafType: 'custom',
-      }),
-    ]);
-    render(<ServiceSloTab serviceName={SERVICE} datasourceId={DATASOURCE} apiClient={apiClient} />);
-    const callout = await screen.findByTestId('serviceSloTabMissingPairCallout');
+    const summaries = [makeSummary({ id: 'c', service: SERVICE, sliLeafType: 'custom' })];
+    renderTab({ bucket: bucketFor(SERVICE, summaries) });
+    const callout = screen.getByTestId('serviceSloTabMissingPairCallout');
     expect(callout).toHaveTextContent('Canonical pair incomplete');
   });
 
-  it('missing-pair CTA scopes to this one service', async () => {
-    const apiClient = makeApiClient([
-      makeSummary({
-        id: 'a',
-        service: SERVICE,
-        sliLeafType: 'availability',
-      }),
-    ]);
-    render(<ServiceSloTab serviceName={SERVICE} datasourceId={DATASOURCE} apiClient={apiClient} />);
-    const cta = await screen.findByTestId('serviceSloTabMissingPairCta');
-    fireEvent.click(cta);
+  it('missing-pair CTA scopes to this one service', () => {
+    const summaries = [makeSummary({ id: 'a', service: SERVICE, sliLeafType: 'availability' })];
+    renderTab({ bucket: bucketFor(SERVICE, summaries) });
+    fireEvent.click(screen.getByTestId('serviceSloTabMissingPairCta'));
     expect(mockNavigateToApp).toHaveBeenLastCalledWith('observability-apm-slo', {
       path: `#/slos/suggest?source=apm&services=${encodeURIComponent(SERVICE)}`,
     });
@@ -261,53 +241,34 @@ describe('ServiceSloTab — missing-pair variants', () => {
 });
 
 describe('ServiceSloTab — error + 403', () => {
-  it('renders the forbidden callout and hides retry when the hook reports 403', async () => {
-    const err = Object.assign(new Error('forbidden'), { response: { status: 403 } });
-    const apiClient = makeFailingApiClient(err);
-    render(<ServiceSloTab serviceName={SERVICE} datasourceId={DATASOURCE} apiClient={apiClient} />);
-    await waitFor(() => {
-      expect(screen.getByTestId('serviceSloTabForbiddenCallout')).toBeInTheDocument();
-    });
+  it('renders the forbidden callout and hides retry when error is forbidden', () => {
+    renderTab({ error: { kind: 'forbidden' } });
+    expect(screen.getByTestId('serviceSloTabForbiddenCallout')).toBeInTheDocument();
     expect(screen.queryByTestId('serviceSloTabErrorRetry')).toBeNull();
   });
 
-  it('renders the generic error callout with retry on non-403 errors', async () => {
-    const apiClient = makeFailingApiClient(new Error('boom'));
-    render(<ServiceSloTab serviceName={SERVICE} datasourceId={DATASOURCE} apiClient={apiClient} />);
-    await waitFor(() => {
-      expect(screen.getByTestId('serviceSloTabErrorCallout')).toBeInTheDocument();
-    });
-    expect(screen.getByTestId('serviceSloTabErrorRetry')).toBeInTheDocument();
+  it('renders the generic error callout with retry on non-403 errors', () => {
+    const refetch = jest.fn();
+    renderTab({ error: { kind: 'generic', message: 'boom' }, refetch });
+    expect(screen.getByTestId('serviceSloTabErrorCallout')).toBeInTheDocument();
+    const retry = screen.getByTestId('serviceSloTabErrorRetry');
+    fireEvent.click(retry);
+    expect(refetch).toHaveBeenCalled();
   });
 });
 
 describe('ServiceSloTab — loading grace timer', () => {
-  it('waits ~150ms before showing the skeleton', async () => {
+  it('waits ~150ms before showing the skeleton', () => {
     jest.useFakeTimers();
-    let resolveList: (value: PaginatedResponse<SloSummary>) => void = () => {};
-    const listPromise = new Promise<PaginatedResponse<SloSummary>>((resolve) => {
-      resolveList = resolve;
-    });
-    const apiClient = ({ list: jest.fn().mockReturnValue(listPromise) } as unknown) as SloApiClient;
-
-    render(<ServiceSloTab serviceName={SERVICE} datasourceId={DATASOURCE} apiClient={apiClient} />);
-
-    expect(screen.queryByTestId('serviceSloTabLoading')).toBeNull();
-    act(() => {
-      jest.advanceTimersByTime(160);
-    });
-    expect(screen.getByTestId('serviceSloTabLoading')).toBeInTheDocument();
-
-    // Resolve so the pending promise doesn't leak.
-    await act(async () => {
-      resolveList({
-        results: [],
-        total: 0,
-        page: 1,
-        pageSize: 50,
-        hasMore: false,
+    try {
+      renderTab({ isLoading: true });
+      expect(screen.queryByTestId('serviceSloTabLoading')).toBeNull();
+      act(() => {
+        jest.advanceTimersByTime(160);
       });
+      expect(screen.getByTestId('serviceSloTabLoading')).toBeInTheDocument();
+    } finally {
       jest.useRealTimers();
-    });
+    }
   });
 });

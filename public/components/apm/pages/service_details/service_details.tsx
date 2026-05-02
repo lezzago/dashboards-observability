@@ -23,7 +23,7 @@ import { ServiceOperations } from './service_operations';
 import { ServiceDependencies } from './service_dependencies';
 import { ServiceSloTab, SloTabLabel } from './service_slo_tab';
 import { SloApiClient } from '../slos/slo_api_client';
-import { useServiceSloHealth } from '../slos/slo_health_summary';
+import { toSloHealthAccessError, useServiceSloHealth } from '../slos/slo_health_summary';
 import { coreRefs } from '../../../../framework/core_refs';
 import {
   TimeRange,
@@ -159,10 +159,8 @@ export const ServiceDetails: React.FC<ServiceDetailsProps> = ({
     return config?.serviceMapDataset?.id || '';
   }, [config]);
 
-  // SLO health for the tab label badge. ServiceSloTab itself also calls the
-  // hook (it owns its own fetch state per the M1 guard), but the hook's
-  // content-based dedup key plus its time-picker independence mean a parallel
-  // call here is cheap — one extra list() per service-details page load.
+  // SLO health for both the tab-label breach badge and the SLOs tab content.
+  // Parent-owned so the page issues one `list()` instead of two (M5B).
   const sloApiClient = useMemo(() => {
     const http = coreRefs.http;
     return http ? new SloApiClient(http) : undefined;
@@ -181,7 +179,11 @@ export const ServiceDetails: React.FC<ServiceDetailsProps> = ({
     datasourceId: sloHealthDisabled ? '' : prometheusConnectionId,
     apiClient: sloApiClient ?? sloApiClientStub,
   });
-  const breachedCount = tabSloHealth.bySvc.get(serviceName)?.breached ?? 0;
+  const sloBucket = tabSloHealth.bySvc.get(serviceName);
+  const breachedCount = sloBucket?.breached ?? 0;
+  const sloAccessError = useMemo(() => toSloHealthAccessError(tabSloHealth.error), [
+    tabSloHealth.error,
+  ]);
 
   // Define tabs
   const tabs: EuiTabbedContentTab[] = useMemo(
@@ -246,8 +248,10 @@ export const ServiceDetails: React.FC<ServiceDetailsProps> = ({
         content: (
           <ServiceSloTab
             serviceName={serviceName}
-            datasourceId={prometheusConnectionId}
-            apiClient={sloApiClient ?? sloApiClientStub}
+            bucket={sloBucket}
+            isLoading={tabSloHealth.isLoading}
+            error={sloAccessError}
+            refetch={tabSloHealth.refetch}
             timeRange={timeRange}
           />
         ),
@@ -261,8 +265,10 @@ export const ServiceDetails: React.FC<ServiceDetailsProps> = ({
       serviceMapDataset,
       refreshTrigger,
       breachedCount,
-      sloApiClient,
-      sloApiClientStub,
+      sloBucket,
+      sloAccessError,
+      tabSloHealth.isLoading,
+      tabSloHealth.refetch,
     ]
   );
 
