@@ -4,6 +4,24 @@
  */
 
 /**
+ * Canonical kind stamped onto suggest-driven SLO creates.
+ *
+ * Defined here (not in the suggest engine) so `SloSpec` / `SloSummary` can
+ * reference it without pulling the suggest engine — a public-only module —
+ * into `common/`. The suggest engine re-imports from this module.
+ */
+export type SuggestionKind =
+  | 'apm-availability'
+  | 'apm-latency'
+  | 'http-availability'
+  | 'http-latency'
+  | 'rpc-availability'
+  | 'rpc-latency'
+  | 'db-latency'
+  | 'messaging-latency'
+  | 'genai-availability';
+
+/**
  * SLO/SLI domain types.
  *
  * This file is the source of truth for the shape of an SLO in this plugin.
@@ -226,6 +244,12 @@ export interface SloSpec {
     primaryUser?: string;
   };
   tier?: string;
+  /**
+   * Canonical SLO kind stamped when the SLO was created from a suggest-engine
+   * recommendation. Absent for manually-authored SLOs — readers must fall
+   * back to a heuristic over `sli.definition` for pre-M5 and manual SLOs.
+   */
+  canonicalKind?: SuggestionKind;
 
   sli: SliNode;
 
@@ -368,6 +392,8 @@ export interface SloSummary {
   service: string;
   owner: { teams: string[]; primaryUser?: string };
   tier?: string;
+  /** See `SloSpec.canonicalKind`. Mirrored into the listing projection. */
+  canonicalKind?: SuggestionKind;
   sliNodeType: 'single' | 'composite';
   sliBackend?: 'prometheus' | 'opensearch';
   sliLeafType?: string;

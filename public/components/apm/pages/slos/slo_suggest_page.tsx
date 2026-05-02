@@ -304,7 +304,9 @@ export const SloSuggestPage: React.FC<SloSuggestPageProps> = ({
   const applyOverrides = useCallback(
     (s: Suggestion): Suggestion => {
       const o = overrides[s.key] ?? {};
-      const spec = { ...s.input.spec };
+      // Stamp canonicalKind from the suggestion so readers can classify
+      // without re-running the heuristic. M5A: tag wins, heuristic fallback.
+      const spec = { ...s.input.spec, canonicalKind: s.kindId };
       if (o.ownerTeam && o.ownerTeam.trim()) {
         spec.owner = { ...spec.owner, teams: [o.ownerTeam.trim()] };
       }

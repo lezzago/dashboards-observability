@@ -216,6 +216,19 @@ const sloSpecSchema = schema.object(
       primaryUser: schema.maybe(schema.string()),
     }),
     tier: schema.maybe(schema.string()),
+    canonicalKind: schema.maybe(
+      schema.oneOf([
+        schema.literal('apm-availability'),
+        schema.literal('apm-latency'),
+        schema.literal('http-availability'),
+        schema.literal('http-latency'),
+        schema.literal('rpc-availability'),
+        schema.literal('rpc-latency'),
+        schema.literal('db-latency'),
+        schema.literal('messaging-latency'),
+        schema.literal('genai-availability'),
+      ])
+    ),
     sli: sliNodeSchema,
     objectives: schema.arrayOf(objectiveSchema, { minSize: 1 }),
     budgetWarningThresholds: schema.arrayOf(budgetWarningThresholdSchema),

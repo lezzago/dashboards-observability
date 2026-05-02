@@ -50,7 +50,10 @@ import type {
   SloAlarmConfig,
   SloCreateInput,
   SloSpec,
+  SuggestionKind,
 } from '../../../../../common/slo/slo_types';
+
+export type { SuggestionKind } from '../../../../../common/slo/slo_types';
 
 // ============================================================================
 // Public types
@@ -96,18 +99,6 @@ export interface ServiceDiscoveryInput {
    */
   existingRuleGroups?: PromRuleGroup[];
 }
-
-/** Stable prefix on `Suggestion.key` — used by the live-SLI preview. */
-export type SuggestionKind =
-  | 'apm-availability'
-  | 'apm-latency'
-  | 'http-availability'
-  | 'http-latency'
-  | 'rpc-availability'
-  | 'rpc-latency'
-  | 'db-latency'
-  | 'messaging-latency'
-  | 'genai-availability';
 
 /** Display-friendly label shown in the card badge. */
 export const KIND_LABEL: Record<SuggestionKind, string> = {

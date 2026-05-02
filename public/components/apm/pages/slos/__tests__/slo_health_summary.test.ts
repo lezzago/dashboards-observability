@@ -83,6 +83,29 @@ describe('classifySloKind (heuristic)', () => {
     });
     expect(classifySloKind(slo)).toBeUndefined();
   });
+
+  it('prefers a stored canonicalKind tag over the heuristic', () => {
+    // Heuristic would say apm-latency (latency_threshold leaf); the tag wins.
+    const slo = makeSummary({
+      id: 'tagged',
+      service: 'foo',
+      sliBackend: 'prometheus',
+      sliLeafType: 'latency_threshold',
+      canonicalKind: 'apm-availability',
+    });
+    expect(classifySloKind(slo)).toBe('apm-availability');
+  });
+
+  it('returns the full suggestion kind when canonicalKind is a non-APM tag', () => {
+    const slo = makeSummary({
+      id: 'tagged',
+      service: 'foo',
+      sliBackend: 'prometheus',
+      sliLeafType: 'availability',
+      canonicalKind: 'http-availability',
+    });
+    expect(classifySloKind(slo)).toBe('http-availability');
+  });
 });
 
 describe('rollupSloHealth', () => {
@@ -160,6 +183,54 @@ describe('rollupSloHealth', () => {
     expect(bySvc.get('foo')!.missingCanonicalPair).toBe(false);
     expect(bySvc.get('bar')!.missingCanonicalPair).toBe(true);
     expect(aggregate.missingCanonicalPair).toBe(true);
+  });
+
+  it('counts non-APM suggestion kinds toward hasAvailability / hasLatency by suffix', () => {
+    // Decision: for canonical-pair purposes, any *-availability or *-latency
+    // tag counts toward the corresponding side. So an HTTP availability SLO
+    // + an RPC latency SLO completes the pair for a service — the pair is
+    // "one of each kind of thing," not "an APM-specific availability and
+    // latency SLO."
+    const summaries = [
+      makeSummary({
+        id: 'a',
+        service: 'foo',
+        canonicalKind: 'http-availability',
+        // Give the heuristic a reason to disagree — the tag must win.
+        sliBackend: 'prometheus',
+        sliLeafType: 'custom',
+      }),
+      makeSummary({
+        id: 'b',
+        service: 'foo',
+        canonicalKind: 'rpc-latency',
+        sliBackend: 'prometheus',
+        sliLeafType: 'custom',
+      }),
+    ];
+    const { bySvc } = rollupSloHealth(['foo'], summaries);
+    expect(bySvc.get('foo')).toMatchObject({
+      hasAvailability: true,
+      hasLatency: true,
+      missingCanonicalPair: false,
+    });
+  });
+
+  it('falls back to the heuristic when canonicalKind is absent', () => {
+    // Legacy SLO without a stored tag — heuristic classifies from sliLeafType.
+    const summaries = [
+      makeSummary({
+        id: 'legacy',
+        service: 'foo',
+        sliBackend: 'prometheus',
+        sliLeafType: 'availability',
+      }),
+    ];
+    const { bySvc } = rollupSloHealth(['foo'], summaries);
+    expect(bySvc.get('foo')).toMatchObject({
+      hasAvailability: true,
+      hasLatency: false,
+    });
   });
 
   it('ignores summaries for services outside the requested set', () => {

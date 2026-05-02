@@ -19,9 +19,17 @@ import type {
   SloHealthState,
   SloListFilters,
   SloSummary,
+  SuggestionKind,
 } from '../../../../../common/slo/slo_types';
 
-export type CanonicalKind = 'apm-availability' | 'apm-latency';
+/**
+ * The classifier returns the full `SuggestionKind` union so downstream
+ * surfaces can distinguish http/rpc/db/etc. when the SLO was created from a
+ * suggestion. `hasAvailability` / `hasLatency` roll-ups treat every kind
+ * ending in `-availability` / `-latency` as the respective side, so an HTTP
+ * availability SLO still counts toward the canonical pair for its service.
+ */
+export type CanonicalKind = SuggestionKind;
 
 export interface SloHealthBucket {
   total: number;
@@ -53,15 +61,22 @@ export interface UseServiceSloHealthParams {
 }
 
 /**
- * Heuristic classifier. Returns the canonical kind for APM availability /
- * latency SLIs backed by Prometheus, otherwise `undefined`. Future work (M5)
- * will prefer a stored `canonicalKind` field on `SloSpec`; the heuristic
- * remains for legacy SLOs.
+ * Classifier. Prefers the stored `canonicalKind` tag stamped at suggest-
+ * driven create time (M5A). Falls back to the heuristic over the SLI
+ * definition for legacy / manually-authored SLOs that predate the tag.
  */
 export function classifySloKind(slo: SloSummary): CanonicalKind | undefined {
+  if (slo.canonicalKind) return slo.canonicalKind;
   if (slo.sliBackend !== 'prometheus') return undefined;
   if (slo.sliLeafType === 'availability') return 'apm-availability';
   if (slo.sliLeafType === 'latency_threshold') return 'apm-latency';
+  return undefined;
+}
+
+function kindSide(kind: CanonicalKind | undefined): 'availability' | 'latency' | undefined {
+  if (!kind) return undefined;
+  if (kind.endsWith('-availability')) return 'availability';
+  if (kind.endsWith('-latency')) return 'latency';
   return undefined;
 }
 
@@ -136,9 +151,9 @@ export function rollupSloHealth(
     bucket.slos.push(slo);
     tallyState(bucket, slo.status.state);
 
-    const kind = classifySloKind(slo);
-    if (kind === 'apm-availability') bucket.hasAvailability = true;
-    if (kind === 'apm-latency') bucket.hasLatency = true;
+    const side = kindSide(classifySloKind(slo));
+    if (side === 'availability') bucket.hasAvailability = true;
+    if (side === 'latency') bucket.hasLatency = true;
 
     aggregate.total += 1;
     aggregate.slos.push(slo);

@@ -2059,6 +2059,7 @@ export class SloService {
       service: doc.spec.service,
       owner: doc.spec.owner,
       tier: doc.spec.tier,
+      canonicalKind: doc.spec.canonicalKind,
       sliNodeType: doc.spec.sli.type,
       sliBackend: single?.definition.backend,
       sliLeafType:
