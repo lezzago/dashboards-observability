@@ -886,8 +886,7 @@ export const SloDetailPage: React.FC<SloDetailPageProps> = ({
             {dedupFingerprints ? (
               <>
                 <p>
-                  The per-SLO alert group (
-                  <code>{prov?.alertGroupName}</code>) is removed
+                  The per-SLO alert group (<code>{prov?.alertGroupName}</code>) is removed
                   immediately. Shared recording rules are reference-counted: if no other SLO
                   references the same SLI shape the recording group is queued for deletion, with a
                   24h grace period in case you re-create the SLO.
