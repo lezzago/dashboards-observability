@@ -33,6 +33,7 @@ import { i18n } from '@osd/i18n';
 import { observabilityApmSloID } from '../../../../../common/constants/apm';
 import { coreRefs } from '../../../../framework/core_refs';
 import type { SloHealthBucket } from '../slos/slo_health_summary';
+import { ChipRow } from '../slos/slo_health_chip_row';
 
 export type SloHealthAccessError = { kind: 'generic'; message?: string } | { kind: 'forbidden' };
 
@@ -140,104 +141,6 @@ const t = {
     'observability.apm.services.sloHealth.missingCanonicalPair',
     { defaultMessage: 'Missing canonical pair' }
   ),
-};
-
-// ============================================================================
-// Chip row — shared by the header panel
-// ============================================================================
-
-interface ChipSpec {
-  key: 'breached' | 'warning' | 'noData' | 'ok' | 'disabled';
-  color: 'danger' | 'warning' | 'subdued' | 'success' | 'default';
-  label: (n: number) => string;
-  count: number;
-}
-
-function chipSpecsForBucket(b: SloHealthBucket): ChipSpec[] {
-  // `rules_missing` folds into breached (both danger); `stale` folds into
-  // noData (both subdued). Keeps the row at exactly five chips for layout
-  // stability across refetches.
-  return [
-    {
-      key: 'breached',
-      color: 'danger',
-      count: b.breached + b.rulesMissing,
-      label: (n) =>
-        i18n.translate('observability.apm.services.sloHealth.chip.breached', {
-          defaultMessage: '{n} breached',
-          values: { n },
-        }),
-    },
-    {
-      key: 'warning',
-      color: 'warning',
-      count: b.warning,
-      label: (n) =>
-        i18n.translate('observability.apm.services.sloHealth.chip.warning', {
-          defaultMessage: '{n} warning',
-          values: { n },
-        }),
-    },
-    {
-      key: 'noData',
-      color: 'subdued',
-      count: b.noData + b.stale,
-      label: (n) =>
-        i18n.translate('observability.apm.services.sloHealth.chip.noData', {
-          defaultMessage: '{n} no data',
-          values: { n },
-        }),
-    },
-    {
-      key: 'ok',
-      color: 'success',
-      count: b.ok,
-      label: (n) =>
-        i18n.translate('observability.apm.services.sloHealth.chip.ok', {
-          defaultMessage: '{n} OK',
-          values: { n },
-        }),
-    },
-    {
-      key: 'disabled',
-      color: 'default',
-      count: b.disabled,
-      label: (n) =>
-        i18n.translate('observability.apm.services.sloHealth.chip.disabled', {
-          defaultMessage: '{n} disabled',
-          values: { n },
-        }),
-    },
-  ];
-}
-
-const ChipRow: React.FC<{ aggregate: SloHealthBucket }> = ({ aggregate }) => {
-  const specs = chipSpecsForBucket(aggregate);
-  return (
-    <EuiFlexGroup
-      gutterSize="m"
-      alignItems="center"
-      responsive={false}
-      role="group"
-      aria-label={i18n.translate('observability.apm.services.sloHealth.chipRowAriaLabel', {
-        defaultMessage: 'SLO health summary for {n, plural, one {# service} other {# services}}',
-        values: { n: aggregate.slos.length || 0 },
-      })}
-    >
-      {specs.map((spec) => (
-        <EuiFlexItem key={spec.key} grow={false}>
-          <EuiHealth
-            // Subdued gray on count=0 keeps the row layout stable across refreshes,
-            // per plan §3.2 chip discipline.
-            color={spec.count === 0 ? 'subdued' : spec.color}
-            data-test-subj={`sloHealthPanelChip-${spec.key}`}
-          >
-            {spec.label(spec.count)}
-          </EuiHealth>
-        </EuiFlexItem>
-      ))}
-    </EuiFlexGroup>
-  );
 };
 
 // ============================================================================
