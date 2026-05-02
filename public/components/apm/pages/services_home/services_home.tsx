@@ -106,6 +106,8 @@ interface ServicesTablePanelProps {
   sloIsLoading: boolean;
   sloError: SloHealthAccessError | undefined;
   sloRefetch: () => void;
+  /** Prometheus datasource id used by SLO-rule queries. Empty string disables the sparkline. */
+  sloDatasourceId: string;
 }
 
 /**
@@ -136,6 +138,7 @@ const ServicesTablePanelUI: React.FC<ServicesTablePanelProps> = ({
   sloIsLoading,
   sloError,
   sloRefetch,
+  sloDatasourceId,
 }) => (
   <>
     {/* Top Widgets Row */}
@@ -179,6 +182,7 @@ const ServicesTablePanelUI: React.FC<ServicesTablePanelProps> = ({
       isLoading={sloIsLoading}
       error={sloError}
       onRetry={sloRefetch}
+      prometheusConnectionId={sloDatasourceId}
     />
 
     {/* Services Table */}
@@ -1435,6 +1439,7 @@ export const ServicesHome: React.FC<ServicesHomeProps> = ({
                           sloIsLoading={sloHealth.isLoading}
                           sloError={sloHealthError}
                           sloRefetch={sloHealth.refetch}
+                          sloDatasourceId={sloDatasourceId}
                         />
                       </EuiResizablePanel>
                     </>

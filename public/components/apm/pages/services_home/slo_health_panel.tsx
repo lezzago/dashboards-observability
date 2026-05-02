@@ -33,6 +33,7 @@ import { i18n } from '@osd/i18n';
 import { navigateToSloListing, navigateToSloSuggest } from '../../shared/utils/navigation_utils';
 import type { SloHealthAccessError, SloHealthBucket } from '../slos/slo_health_summary';
 import { ChipRow } from '../slos/slo_health_chip_row';
+import { SloBudgetSparkline } from './slo_budget_sparkline';
 
 export interface SloHealthPanelProps {
   aggregate: SloHealthBucket;
@@ -43,6 +44,12 @@ export interface SloHealthPanelProps {
   isLoading: boolean;
   error: SloHealthAccessError | undefined;
   onRetry: () => void;
+  /**
+   * Prometheus datasource id the SLO rules live in. When present, the panel
+   * renders a 7d aggregate-error-ratio sparkline below the chip row. Passed
+   * in rather than re-derived so the panel stays framework-agnostic.
+   */
+  prometheusConnectionId?: string;
 }
 
 export interface SloHealthCellProps {
@@ -143,6 +150,7 @@ export const SloHealthPanel: React.FC<SloHealthPanelProps> = ({
   isLoading,
   error,
   onRetry,
+  prometheusConnectionId,
 }) => {
   const showSkeleton = useDelayedLoading(isLoading);
 
@@ -267,6 +275,15 @@ export const SloHealthPanel: React.FC<SloHealthPanelProps> = ({
             </EuiFlexGroup>
           </EuiFlexItem>
         </EuiFlexGroup>
+        {!error && aggregate.total > 0 && prometheusConnectionId ? (
+          <>
+            <EuiSpacer size="s" />
+            <SloBudgetSparkline
+              services={allServices}
+              prometheusConnectionId={prometheusConnectionId}
+            />
+          </>
+        ) : null}
       </EuiPanel>
       <EuiSpacer size="s" />
     </>
