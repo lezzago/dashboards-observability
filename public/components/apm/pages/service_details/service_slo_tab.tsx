@@ -1,0 +1,548 @@
+/*
+ * Copyright OpenSearch Contributors
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/**
+ * Service Details → SLOs tab. Reuses `useServiceSloHealth` (the single source
+ * of truth that also powers the Services Home header panel and per-row cell)
+ * and shares the ChipRow primitive. The tab intentionally does NOT subscribe
+ * to the Service Details time picker — SLO state is evaluated against each
+ * SLO's own rolling window.
+ */
+
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import {
+  EuiAccordion,
+  EuiBasicTableColumn,
+  EuiButton,
+  EuiButtonEmpty,
+  EuiCallOut,
+  EuiEmptyPrompt,
+  EuiFlexGroup,
+  EuiFlexItem,
+  EuiHealth,
+  EuiInMemoryTable,
+  EuiLink,
+  EuiLoadingContent,
+  EuiNotificationBadge,
+  EuiPanel,
+  EuiSpacer,
+  EuiText,
+  EuiToolTip,
+} from '@elastic/eui';
+import { i18n } from '@osd/i18n';
+import type { SloHealthState, SloSummary } from '../../../../../common/slo/slo_types';
+import { formatPct } from '../../../../../common/slo/format';
+import { getSloHealthColor } from '../../../../../common/slo/state';
+import { SloApiClient } from '../slos/slo_api_client';
+import { SloHealthBucket, useServiceSloHealth } from '../slos/slo_health_summary';
+import { ChipRow } from '../slos/slo_health_chip_row';
+import { SloHealthAccessError, navigateToSloSuggest } from '../services_home/slo_health_panel';
+import { coreRefs } from '../../../../framework/core_refs';
+import { observabilityApmSloID } from '../../../../../common/constants/apm';
+import type { TimeRange } from '../../common/types/service_details_types';
+
+const ERROR_MESSAGE_TRUNCATE_LEN = 200;
+const LOADING_GRACE_MS = 150;
+
+export interface ServiceSloTabProps {
+  serviceName: string;
+  datasourceId: string;
+  apiClient: SloApiClient;
+  /**
+   * Accepted for symmetry with the other service-details tabs
+   * (ServiceOverview / ServiceOperations / ServiceDependencies). The hook is
+   * deliberately not time-range-aware — each SLO evaluates against its own
+   * rolling window — so this prop is intentionally unused inside the body.
+   */
+  timeRange?: TimeRange;
+}
+
+const t = {
+  tabName: i18n.translate('observability.apm.serviceDetails.tabs.slos', {
+    defaultMessage: 'SLOs',
+  }),
+  chipRowAria: (name: string) =>
+    i18n.translate('observability.apm.serviceDetails.sloTab.chipRowAria', {
+      defaultMessage: 'SLO health summary for {name}',
+      values: { name },
+    }),
+  footnote: i18n.translate('observability.apm.serviceDetails.sloTab.footnote', {
+    defaultMessage:
+      "State is evaluated against each SLO's rolling window, independent of the page time range.",
+  }),
+  missingTitlePair: i18n.translate(
+    'observability.apm.serviceDetails.sloTab.missingPair.titlePair',
+    { defaultMessage: 'Canonical pair incomplete' }
+  ),
+  missingTitleAvailability: i18n.translate(
+    'observability.apm.serviceDetails.sloTab.missingPair.titleAvailability',
+    { defaultMessage: 'Availability SLO missing' }
+  ),
+  missingTitleLatency: i18n.translate(
+    'observability.apm.serviceDetails.sloTab.missingPair.titleLatency',
+    { defaultMessage: 'Latency SLO missing' }
+  ),
+  missingBody: i18n.translate('observability.apm.serviceDetails.sloTab.missingPair.body', {
+    defaultMessage:
+      'Tracking both availability and latency is the baseline for service-level reliability.',
+  }),
+  missingCta: i18n.translate('observability.apm.serviceDetails.sloTab.missingPair.cta', {
+    defaultMessage: 'Suggest missing SLOs',
+  }),
+  emptyTitle: i18n.translate('observability.apm.serviceDetails.sloTab.empty.title', {
+    defaultMessage: 'No SLOs tracked for this service',
+  }),
+  emptyBody: i18n.translate('observability.apm.serviceDetails.sloTab.empty.body', {
+    defaultMessage:
+      'Track reliability objectives for availability and latency so regressions trigger alerts before users notice.',
+  }),
+  emptyPrimary: i18n.translate('observability.apm.serviceDetails.sloTab.empty.primary', {
+    defaultMessage: 'Suggest SLOs',
+  }),
+  emptySecondary: i18n.translate('observability.apm.serviceDetails.sloTab.empty.secondary', {
+    defaultMessage: 'Create manually',
+  }),
+  errorTitle: i18n.translate('observability.apm.serviceDetails.sloTab.error.title', {
+    defaultMessage: "Couldn't load SLOs",
+  }),
+  errorRetry: i18n.translate('observability.apm.serviceDetails.sloTab.error.retry', {
+    defaultMessage: 'Retry',
+  }),
+  errorShowDetails: i18n.translate('observability.apm.serviceDetails.sloTab.error.showDetails', {
+    defaultMessage: 'Show details',
+  }),
+  forbiddenTitle: i18n.translate('observability.apm.serviceDetails.sloTab.forbidden.title', {
+    defaultMessage: "You don't have permission to view SLOs",
+  }),
+  forbiddenBody: i18n.translate('observability.apm.serviceDetails.sloTab.forbidden.body', {
+    defaultMessage: 'Ask an admin to grant the slo-read role.',
+  }),
+  colName: i18n.translate('observability.apm.serviceDetails.sloTab.col.name', {
+    defaultMessage: 'Name',
+  }),
+  colType: i18n.translate('observability.apm.serviceDetails.sloTab.col.type', {
+    defaultMessage: 'Type',
+  }),
+  colState: i18n.translate('observability.apm.serviceDetails.sloTab.col.state', {
+    defaultMessage: 'State',
+  }),
+  colTarget: i18n.translate('observability.apm.serviceDetails.sloTab.col.target', {
+    defaultMessage: 'Target',
+  }),
+  colCurrent: i18n.translate('observability.apm.serviceDetails.sloTab.col.current', {
+    defaultMessage: 'Current',
+  }),
+  colWindow: i18n.translate('observability.apm.serviceDetails.sloTab.col.window', {
+    defaultMessage: 'Window',
+  }),
+  colActions: i18n.translate('observability.apm.serviceDetails.sloTab.col.actions', {
+    defaultMessage: 'Actions',
+  }),
+  actionView: i18n.translate('observability.apm.serviceDetails.sloTab.action.view', {
+    defaultMessage: 'View',
+  }),
+  stateLabel: (state: SloHealthState): string => {
+    const labels: Record<SloHealthState, string> = {
+      breached: i18n.translate('observability.apm.serviceDetails.sloTab.state.breached', {
+        defaultMessage: 'Breached',
+      }),
+      warning: i18n.translate('observability.apm.serviceDetails.sloTab.state.warning', {
+        defaultMessage: 'Warning',
+      }),
+      ok: i18n.translate('observability.apm.serviceDetails.sloTab.state.ok', {
+        defaultMessage: 'Healthy',
+      }),
+      no_data: i18n.translate('observability.apm.serviceDetails.sloTab.state.noData', {
+        defaultMessage: 'No data',
+      }),
+      stale: i18n.translate('observability.apm.serviceDetails.sloTab.state.stale', {
+        defaultMessage: 'Stale',
+      }),
+      disabled: i18n.translate('observability.apm.serviceDetails.sloTab.state.disabled', {
+        defaultMessage: 'Disabled',
+      }),
+      rules_missing: i18n.translate('observability.apm.serviceDetails.sloTab.state.rulesMissing', {
+        defaultMessage: 'Rules missing',
+      }),
+    };
+    return labels[state];
+  },
+};
+
+function missingPairTitle(bucket: SloHealthBucket): string {
+  if (!bucket.hasAvailability && !bucket.hasLatency) return t.missingTitlePair;
+  if (!bucket.hasAvailability) return t.missingTitleAvailability;
+  return t.missingTitleLatency;
+}
+
+function truncate(message: string, max: number): string {
+  if (message.length <= max) return message;
+  return `${message.slice(0, max)}…`;
+}
+
+/**
+ * Defer the loading-state skeleton until the fetch has taken >150ms — matches
+ * the Services Home header panel so cache hits don't flash a skeleton.
+ */
+function useDelayedLoading(isLoading: boolean, delayMs = LOADING_GRACE_MS): boolean {
+  const [delayed, setDelayed] = useState(false);
+  useEffect(() => {
+    if (!isLoading) {
+      setDelayed(false);
+      return;
+    }
+    const timer = window.setTimeout(() => setDelayed(true), delayMs);
+    return () => window.clearTimeout(timer);
+  }, [isLoading, delayMs]);
+  return delayed;
+}
+
+// ---------------------------------------------------------------------------
+// SLO type label derived from the listing projection
+// ---------------------------------------------------------------------------
+
+function sloTypeLabel(slo: SloSummary): string {
+  if (slo.sliNodeType === 'composite') return 'Composite';
+  const backend = slo.sliBackend ?? 'unknown';
+  const leaf = slo.sliLeafType ?? 'unknown';
+  return `${backend}/${leaf}`;
+}
+
+function windowLabel(slo: SloSummary): string {
+  if (slo.window.type === 'rolling') return `Rolling ${slo.window.duration}`;
+  return `Calendar ${slo.window.period}`;
+}
+
+// Pick the worst objective for the "Current" column so the table value agrees
+// with the state chip.
+function worstObjectiveCurrent(slo: SloSummary): string {
+  const objectives = slo.status.objectives;
+  if (!objectives || objectives.length === 0) return '—';
+  const worst = objectives.reduce((acc, o) =>
+    o.errorBudgetRemaining < acc.errorBudgetRemaining ? o : acc
+  );
+  if (worst.currentValueUnit === 'ratio') {
+    return formatPct(Math.max(0, worst.currentValue), { decimals: 2 });
+  }
+  if (worst.currentValueUnit === 'seconds') {
+    return `${worst.currentValue.toFixed(3)}s`;
+  }
+  return String(worst.currentValue);
+}
+
+function worstTargetLabel(slo: SloSummary): string {
+  return `${(slo.worstTarget * 100).toFixed(slo.worstTarget >= 0.999 ? 2 : 1)}%`;
+}
+
+// ---------------------------------------------------------------------------
+// Component
+// ---------------------------------------------------------------------------
+
+/**
+ * Reduce a raw Error from `useServiceSloHealth` into the access-error
+ * discriminator consumed by the panel / tab UI. Matches the logic in
+ * services_home.tsx — kept inline to avoid extending the M2 public API until
+ * M5 consolidates error handling.
+ */
+function toAccessError(error: Error | undefined): SloHealthAccessError | undefined {
+  if (!error) return undefined;
+  const body = (error as { response?: { status?: number } }).response;
+  if (body?.status === 403) return { kind: 'forbidden' };
+  return { kind: 'generic', message: error.message };
+}
+
+export const ServiceSloTab: React.FC<ServiceSloTabProps> = ({
+  serviceName,
+  datasourceId,
+  apiClient,
+}) => {
+  // Fresh array per render is intentional — the M1 hook's internal
+  // content-based key guards against array-identity churn.
+  const sloHealth = useServiceSloHealth({
+    serviceNames: [serviceName],
+    datasourceId,
+    apiClient,
+  });
+
+  const accessError = useMemo(() => toAccessError(sloHealth.error), [sloHealth.error]);
+  const showSkeleton = useDelayedLoading(sloHealth.isLoading);
+  const bucket = sloHealth.bySvc.get(serviceName);
+  const total = bucket?.total ?? 0;
+  const isFirstLoad = sloHealth.isLoading && total === 0 && !accessError;
+
+  const onSuggest = useCallback(() => {
+    navigateToSloSuggest([serviceName]);
+  }, [serviceName]);
+
+  const onCreateManually = useCallback(() => {
+    coreRefs?.application?.navigateToApp(observabilityApmSloID, { path: '#/slos/create' });
+    window.dispatchEvent(new HashChangeEvent('hashchange'));
+  }, []);
+
+  const columns = useMemo<Array<EuiBasicTableColumn<SloSummary>>>(
+    () => [
+      {
+        name: t.colName,
+        render: (row: SloSummary) => (
+          <EuiLink
+            onClick={() => {
+              coreRefs?.application?.navigateToApp(observabilityApmSloID, {
+                path: `#/slos/${encodeURIComponent(row.id)}`,
+              });
+              window.dispatchEvent(new HashChangeEvent('hashchange'));
+            }}
+            data-test-subj={`serviceSloTabRowName-${row.id}`}
+          >
+            <EuiText size="s">
+              <strong>{row.name}</strong>
+            </EuiText>
+          </EuiLink>
+        ),
+      },
+      {
+        name: t.colType,
+        render: (row: SloSummary) => <EuiText size="s">{sloTypeLabel(row)}</EuiText>,
+      },
+      {
+        name: t.colState,
+        render: (row: SloSummary) => (
+          <EuiHealth color={getSloHealthColor(row.status.state)}>
+            {t.stateLabel(row.status.state)}
+          </EuiHealth>
+        ),
+      },
+      {
+        name: t.colTarget,
+        render: (row: SloSummary) => <EuiText size="s">{worstTargetLabel(row)}</EuiText>,
+      },
+      {
+        name: t.colCurrent,
+        render: (row: SloSummary) => <EuiText size="s">{worstObjectiveCurrent(row)}</EuiText>,
+      },
+      {
+        name: t.colWindow,
+        render: (row: SloSummary) => <EuiText size="s">{windowLabel(row)}</EuiText>,
+      },
+      {
+        name: t.colActions,
+        render: (row: SloSummary) => (
+          <EuiButtonEmpty
+            size="xs"
+            onClick={() => {
+              coreRefs?.application?.navigateToApp(observabilityApmSloID, {
+                path: `#/slos/${encodeURIComponent(row.id)}`,
+              });
+              window.dispatchEvent(new HashChangeEvent('hashchange'));
+            }}
+            data-test-subj={`serviceSloTabRowAction-${row.id}`}
+          >
+            {t.actionView}
+          </EuiButtonEmpty>
+        ),
+      },
+    ],
+    []
+  );
+
+  // ---------------- Forbidden ----------------
+  if (accessError?.kind === 'forbidden') {
+    return (
+      <EuiPanel hasBorder paddingSize="m" data-test-subj="serviceSloTab">
+        <EuiCallOut
+          color="warning"
+          iconType="lock"
+          title={t.forbiddenTitle}
+          data-test-subj="serviceSloTabForbiddenCallout"
+        >
+          <p>{t.forbiddenBody}</p>
+        </EuiCallOut>
+      </EuiPanel>
+    );
+  }
+
+  // ---------------- Error ----------------
+  if (accessError?.kind === 'generic') {
+    const full = accessError.message ?? '';
+    const short = truncate(full, ERROR_MESSAGE_TRUNCATE_LEN);
+    const needsDetails = full.length > ERROR_MESSAGE_TRUNCATE_LEN;
+    return (
+      <EuiPanel hasBorder paddingSize="m" data-test-subj="serviceSloTab">
+        <EuiCallOut
+          color="danger"
+          iconType="alert"
+          title={t.errorTitle}
+          data-test-subj="serviceSloTabErrorCallout"
+        >
+          <p>{short}</p>
+          {needsDetails ? (
+            <EuiAccordion
+              id="serviceSloTabErrorAccordion"
+              buttonContent={t.errorShowDetails}
+              paddingSize="s"
+            >
+              <EuiText size="s">
+                <pre style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{full}</pre>
+              </EuiText>
+            </EuiAccordion>
+          ) : null}
+          <EuiSpacer size="s" />
+          <EuiButton size="s" onClick={sloHealth.refetch} data-test-subj="serviceSloTabErrorRetry">
+            {t.errorRetry}
+          </EuiButton>
+        </EuiCallOut>
+      </EuiPanel>
+    );
+  }
+
+  // ---------------- Empty (no SLOs for this service) ----------------
+  if (!sloHealth.isLoading && total === 0) {
+    return (
+      <EuiPanel hasBorder paddingSize="m" data-test-subj="serviceSloTab">
+        <EuiEmptyPrompt
+          iconType="visGauge"
+          title={<h2>{t.emptyTitle}</h2>}
+          body={<p>{t.emptyBody}</p>}
+          data-test-subj="serviceSloTabEmptyPrompt"
+          actions={[
+            <EuiButton
+              fill
+              iconType="wand"
+              onClick={onSuggest}
+              key="suggest"
+              data-test-subj="serviceSloTabEmptyPromptPrimary"
+            >
+              {t.emptyPrimary}
+            </EuiButton>,
+            <EuiButtonEmpty
+              onClick={onCreateManually}
+              key="create"
+              data-test-subj="serviceSloTabEmptyPromptSecondary"
+            >
+              {t.emptySecondary}
+            </EuiButtonEmpty>,
+          ]}
+        />
+      </EuiPanel>
+    );
+  }
+
+  // ---------------- Populated (possibly during a refresh) ----------------
+  const items = bucket?.slos ?? [];
+  // Suppress "missing" verdict while loading — never call a service "missing"
+  // based on incomplete data.
+  const showMissingCallout =
+    !sloHealth.isLoading && bucket != null && bucket.missingCanonicalPair && total > 0;
+
+  return (
+    <EuiPanel hasBorder paddingSize="m" data-test-subj="serviceSloTab">
+      {/* State row */}
+      <div
+        role="group"
+        aria-label={t.chipRowAria(serviceName)}
+        data-test-subj="serviceSloTabChipRow"
+      >
+        {isFirstLoad ? (
+          showSkeleton ? (
+            <EuiLoadingContent lines={1} data-test-subj="serviceSloTabLoading" />
+          ) : (
+            <div style={{ height: 20 }} />
+          )
+        ) : bucket ? (
+          <ChipRow aggregate={bucket} />
+        ) : null}
+      </div>
+
+      {showMissingCallout ? (
+        <>
+          <EuiSpacer size="m" />
+          <EuiCallOut
+            color="warning"
+            iconType="alert"
+            size="s"
+            title={missingPairTitle(bucket!)}
+            data-test-subj="serviceSloTabMissingPairCallout"
+          >
+            <EuiFlexGroup gutterSize="s" alignItems="center" responsive={false}>
+              <EuiFlexItem grow={true}>
+                <EuiText size="s">
+                  <p>{t.missingBody}</p>
+                </EuiText>
+              </EuiFlexItem>
+              <EuiFlexItem grow={false}>
+                <EuiButton
+                  size="s"
+                  iconType="wand"
+                  onClick={onSuggest}
+                  data-test-subj="serviceSloTabMissingPairCta"
+                >
+                  {t.missingCta}
+                </EuiButton>
+              </EuiFlexItem>
+            </EuiFlexGroup>
+          </EuiCallOut>
+        </>
+      ) : null}
+
+      <EuiSpacer size="m" />
+
+      <EuiInMemoryTable<SloSummary>
+        items={items}
+        columns={columns}
+        loading={sloHealth.isLoading}
+        pagination={{ initialPageSize: 10, pageSizeOptions: [10, 25, 50] }}
+        sorting={{ sort: { field: 'name', direction: 'asc' } }}
+        data-test-subj="serviceSloTabTable"
+      />
+
+      <EuiSpacer size="xs" />
+      <EuiText size="xs" color="subdued" data-test-subj="serviceSloTabFootnote">
+        <p>{t.footnote}</p>
+      </EuiText>
+    </EuiPanel>
+  );
+};
+
+// ---------------------------------------------------------------------------
+// Tab-label helpers (consumed by service_details.tsx)
+// ---------------------------------------------------------------------------
+
+export const SERVICE_SLO_TAB_NAME = t.tabName;
+
+interface SloTabLabelProps {
+  breached: number;
+}
+
+/**
+ * Tab label with optional breached-count notification badge. When the badge is
+ * present, the visible tab text is aria-hidden and a screen-reader-only span
+ * carries the count so the badge doesn't get announced twice.
+ */
+export const SloTabLabel: React.FC<SloTabLabelProps> = ({ breached }) => {
+  if (breached <= 0) return <>{t.tabName}</>;
+  const ariaLabel = i18n.translate('observability.apm.serviceDetails.sloTab.label.breachedAria', {
+    defaultMessage: 'SLOs, {n, plural, one {# breached} other {# breached}}',
+    values: { n: breached },
+  });
+  return (
+    <>
+      <span aria-label={ariaLabel}>{t.tabName}</span>
+      <EuiToolTip
+        content={i18n.translate('observability.apm.serviceDetails.sloTab.label.badgeTooltip', {
+          defaultMessage:
+            '{n, plural, one {# SLO is breached} other {# SLOs are breached}} for this service.',
+          values: { n: breached },
+        })}
+      >
+        <EuiNotificationBadge
+          color="accent"
+          data-test-subj="serviceDetailsTab-slos-badge"
+          style={{ marginLeft: 4 }}
+        >
+          {breached}
+        </EuiNotificationBadge>
+      </EuiToolTip>
+    </>
+  );
+};

@@ -21,6 +21,10 @@ import { useApmConfig } from '../../config/apm_config_context';
 import { ServiceOverview } from './service_overview';
 import { ServiceOperations } from './service_operations';
 import { ServiceDependencies } from './service_dependencies';
+import { ServiceSloTab, SloTabLabel } from './service_slo_tab';
+import { SloApiClient } from '../slos/slo_api_client';
+import { useServiceSloHealth } from '../slos/slo_health_summary';
+import { coreRefs } from '../../../../framework/core_refs';
 import {
   TimeRange,
   ServiceDetailsTabId,
@@ -155,6 +159,30 @@ export const ServiceDetails: React.FC<ServiceDetailsProps> = ({
     return config?.serviceMapDataset?.id || '';
   }, [config]);
 
+  // SLO health for the tab label badge. ServiceSloTab itself also calls the
+  // hook (it owns its own fetch state per the M1 guard), but the hook's
+  // content-based dedup key plus its time-picker independence mean a parallel
+  // call here is cheap — one extra list() per service-details page load.
+  const sloApiClient = useMemo(() => {
+    const http = coreRefs.http;
+    return http ? new SloApiClient(http) : undefined;
+  }, []);
+  const sloApiClientStub = useMemo(
+    () =>
+      (({
+        list: () =>
+          Promise.resolve({ results: [], total: 0, page: 1, pageSize: 0, hasMore: false }),
+      } as unknown) as SloApiClient),
+    []
+  );
+  const sloHealthDisabled = !sloApiClient || !prometheusConnectionId;
+  const tabSloHealth = useServiceSloHealth({
+    serviceNames: sloHealthDisabled ? [] : [serviceName],
+    datasourceId: sloHealthDisabled ? '' : prometheusConnectionId,
+    apiClient: sloApiClient ?? sloApiClientStub,
+  });
+  const breachedCount = tabSloHealth.bySvc.get(serviceName)?.breached ?? 0;
+
   // Define tabs
   const tabs: EuiTabbedContentTab[] = useMemo(
     () => [
@@ -206,8 +234,36 @@ export const ServiceDetails: React.FC<ServiceDetailsProps> = ({
           />
         ),
       },
+      {
+        id: SERVICE_DETAILS_CONSTANTS.TABS.SLOS,
+        // The tab label carries the breached-count badge so users spot an
+        // active breach without opening the tab. Badge is suppressed at zero.
+        name: (
+          <span data-test-subj="serviceDetailsTab-slos">
+            <SloTabLabel breached={breachedCount} />
+          </span>
+        ),
+        content: (
+          <ServiceSloTab
+            serviceName={serviceName}
+            datasourceId={prometheusConnectionId}
+            apiClient={sloApiClient ?? sloApiClientStub}
+            timeRange={timeRange}
+          />
+        ),
+      },
     ],
-    [serviceName, environment, timeRange, prometheusConnectionId, serviceMapDataset, refreshTrigger]
+    [
+      serviceName,
+      environment,
+      timeRange,
+      prometheusConnectionId,
+      serviceMapDataset,
+      refreshTrigger,
+      breachedCount,
+      sloApiClient,
+      sloApiClientStub,
+    ]
   );
 
   // Get selected tab
