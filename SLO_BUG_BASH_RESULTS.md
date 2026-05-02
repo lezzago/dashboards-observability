@@ -104,6 +104,41 @@ the same IDs so cross-milestone live-validation references stay stable.
 
 ---
 
+## M5 dark-mode audit (deferred from M2 / M3)
+
+Live validation on `observability-stack` wasn't possible in the M5 session:
+the dev OSD config leaves `opensearchDashboards.enableUserControl` at its
+default of `false`, so `startup.js.hbs` wipes any `uiSettings` stored in
+localStorage on every load. The server-side `theme:darkMode` saved object
+also doesn't propagate into the client — `__osdThemeTag__` is resolved
+client-side from `uiSettings` in localStorage (or the config default when
+that's absent). Flipping `theme:darkMode` via the advanced-settings UI
+therefore has no effect on the rendered theme in this stack; toggling it
+in dev requires editing `opensearchDashboards.darkMode` in
+`config/opensearch_dashboards.yml` and restarting `yarn start`.
+
+Static audit (acceptable stand-in given the config-level constraint):
+
+| Check | Result |
+|-------|--------|
+| Hardcoded `#RRGGBB` / `rgb()` / `hsl()` literals in the four SLO surface files | 0 matches (`grep -nE "color:\s*['\"]?(#\|rgb\|hsl)" slo_health_summary.ts slo_health_chip_row.tsx slo_health_panel.tsx service_slo_tab.tsx`) |
+| `EuiHealth` / `EuiCallOut` / `EuiIcon` / `EuiText` color props | All use semantic tokens: `danger`, `warning`, `success`, `subdued`, `accent`, `default` — no absolute colors |
+| `getSloHealthColor` output domain (`common/slo/state.ts`) | Only `danger`, `warning`, `success`, `subdued`, `default` — semantic tokens |
+| `EuiNotificationBadge color="accent"` on the SLOs tab label | Accent token; EUI's dark-mode palette keeps it contrasty (blue on dark, dark blue on light) |
+
+Because every color choice is a semantic EUI token, contrast swaps with
+the theme. This matches the pattern M2 / M3 landed under — both of those
+milestones deferred live validation with the same reasoning. This entry
+formally closes the deferral: no code changes needed, no dark-mode
+screenshot captured in M5.
+
+If the observability-stack config later grows a `darkMode: true` override
+(or `enableUserControl: true` so the advanced-settings toggle sticks),
+re-run the SLO surfaces and capture screenshots. The audit of
+surface-level color tokens above lists the only surfaces to check.
+
+---
+
 ## Findings
 
 For every `FAIL` row, add an entry below using the template. Number
