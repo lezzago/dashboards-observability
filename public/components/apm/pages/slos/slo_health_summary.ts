@@ -186,8 +186,8 @@ export const useServiceSloHealth = ({
   useEffect(() => {
     const activeNames = serviceNamesRef.current;
     if (!datasourceId || activeNames.length === 0) {
-      // Guard against callers passing unstable `apiClient` / `serviceNames`
-      // references: writing a fresh `[]` every render would loop the effect.
+      // Guard against unstable serviceNames array identity from callers that pass
+      // a fresh array per render (e.g. ServiceSloTab passes [serviceName]).
       setSummaries((prev) => (prev.length === 0 ? prev : []));
       setError((prev) => (prev === undefined ? prev : undefined));
       setIsLoading((prev) => (prev ? false : prev));
