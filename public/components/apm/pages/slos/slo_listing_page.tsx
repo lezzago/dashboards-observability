@@ -29,10 +29,12 @@ import {
   EuiToolTip,
 } from '@elastic/eui';
 import { euiThemeVars } from '@osd/ui-shared-deps/theme';
+import { i18n } from '@osd/i18n';
 import { useHistory, useLocation } from 'react-router-dom';
 import { ChromeStart, HttpStart, NotificationsStart } from '../../../../../../../src/core/public';
 import { HeaderControlledComponentsWrapper } from '../../../../plugin_helpers/plugin_headerControl';
 import { ActiveFilterBadges, FilterBadge } from '../../shared/components/active_filter_badges';
+import { navigateToServicesList } from '../../shared/utils/navigation_utils';
 import { SloOverviewPanel } from './slo_overview_panel';
 import { DATASOURCE_SELECTION_CAP, SloListFilterPanel } from './slo_list_filter_panel';
 import { usePrometheusDatasources } from './use_prometheus_datasources';
@@ -739,12 +741,6 @@ export const SloListingPage: React.FC<SloListingPageProps> = ({
     </EuiButton>
   );
 
-  const suggestButton = (
-    <EuiButton href="#/slos/suggest" data-test-subj="slosSuggest" size="s" iconType="wand">
-      Suggest SLOs
-    </EuiButton>
-  );
-
   const refreshButton = (
     <EuiButtonEmpty
       onClick={load}
@@ -777,9 +773,7 @@ export const SloListingPage: React.FC<SloListingPageProps> = ({
   return (
     <EuiPage data-test-subj="slosPage">
       <EuiPageBody component="main">
-        <HeaderControlledComponentsWrapper
-          components={[refreshButton, suggestButton, createButton]}
-        />
+        <HeaderControlledComponentsWrapper components={[refreshButton, createButton]} />
         <EuiPageContent color="transparent" hasBorder={false} paddingSize="none">
           <EuiPageContentBody>
             {isFirstLoad ? (
@@ -802,29 +796,40 @@ export const SloListingPage: React.FC<SloListingPageProps> = ({
               <EuiPanel style={{ marginTop: '8px' }} data-test-subj="slosEmptyNoSlos">
                 <EuiEmptyPrompt
                   iconType="visualizeApp"
-                  title={<h2>No SLOs yet</h2>}
+                  title={
+                    <h2>
+                      {i18n.translate('observability.apm.slo.listing.emptyState.title', {
+                        defaultMessage: 'No SLOs yet',
+                      })}
+                    </h2>
+                  }
                   body={
                     <p>
-                      Track service level objectives for your Prometheus-backed services. Let us
-                      auto-suggest SLOs from the metrics you&apos;re already scraping, or start from
-                      a template.
+                      {i18n.translate('observability.apm.slo.listing.emptyState.body', {
+                        defaultMessage:
+                          'Track reliability objectives for your APM services. Visit the Services view to see which services are missing SLOs and create them directly from there.',
+                      })}
                     </p>
                   }
                   actions={[
                     <EuiButton
-                      key="suggest"
+                      key="services"
                       fill
-                      href="#/slos/suggest"
-                      data-test-subj="slosSuggestEmpty"
+                      onClick={navigateToServicesList}
+                      data-test-subj="slosEmptyGoToServices"
                     >
-                      Suggest SLOs
+                      {i18n.translate('observability.apm.slo.listing.emptyState.goToServices', {
+                        defaultMessage: 'Go to Services',
+                      })}
                     </EuiButton>,
                     <EuiButtonEmpty
                       key="create"
                       href="#/slos/create"
                       data-test-subj="slosCreateEmpty"
                     >
-                      Start from a template
+                      {i18n.translate('observability.apm.slo.listing.emptyState.createManually', {
+                        defaultMessage: 'Create manually',
+                      })}
                     </EuiButtonEmpty>,
                   ]}
                 />

@@ -9,6 +9,11 @@ import { MemoryRouter, Route } from 'react-router-dom';
 import { SloListingPage } from '../slo_listing_page';
 import type { SloApiClient } from '../slo_api_client';
 import type { SloListFilters, SloSummary } from '../../../../../../common/slo/slo_types';
+import { navigateToServicesList } from '../../../shared/utils/navigation_utils';
+
+jest.mock('../../../shared/utils/navigation_utils', () => ({
+  navigateToServicesList: jest.fn(),
+}));
 
 // Overview panel + header wrapper reach into chrome/portals that aren't
 // wired in this jsdom setup. Inline them so the rest of the page mounts.
@@ -81,6 +86,10 @@ function renderPage(listImpl: SloApiClient['list'], initialSearch = '') {
 }
 
 describe('SloListingPage — filter integration', () => {
+  beforeEach(() => {
+    (navigateToServicesList as jest.Mock).mockReset();
+  });
+
   it('shows the "no SLOs yet" empty state when list returns zero unfiltered', async () => {
     const list = jest.fn().mockResolvedValue({
       results: [],
@@ -94,6 +103,44 @@ describe('SloListingPage — filter integration', () => {
     });
     expect(await screen.findByTestId('slosEmptyNoSlos')).toBeInTheDocument();
     expect(screen.queryByTestId('slosEmptyFilteredZero')).not.toBeInTheDocument();
+    // Empty state pitches Services as the primary discovery path (M4: the
+    // listing page no longer hosts a Suggest SLOs button).
+    expect(screen.queryByTestId('slosSuggestEmpty')).not.toBeInTheDocument();
+    const servicesCta = screen.getByTestId('slosEmptyGoToServices');
+    expect(servicesCta).toHaveTextContent('Go to Services');
+    expect(screen.getByTestId('slosCreateEmpty')).toHaveTextContent('Create manually');
+  });
+
+  it('cross-navigates to Services Home when the empty-state CTA is clicked', async () => {
+    const list = jest.fn().mockResolvedValue({
+      results: [],
+      total: 0,
+      page: 1,
+      pageSize: 100,
+      hasMore: false,
+    });
+    await act(async () => {
+      renderPage(list);
+    });
+    await act(async () => {
+      fireEvent.click(await screen.findByTestId('slosEmptyGoToServices'));
+    });
+    expect(navigateToServicesList).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not render a header-toolbar Suggest SLOs button (M4)', async () => {
+    const list = jest.fn().mockResolvedValue({
+      results: [makeSummary()],
+      total: 1,
+      page: 1,
+      pageSize: 100,
+      hasMore: false,
+    });
+    await act(async () => {
+      renderPage(list);
+    });
+    await screen.findByTestId('slosTable');
+    expect(screen.queryByTestId('slosSuggest')).not.toBeInTheDocument();
   });
 
   it('shows the "no matches" empty state with Clear-filters CTA when filtered to zero', async () => {
