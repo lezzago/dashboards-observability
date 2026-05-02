@@ -13,7 +13,11 @@
  * came off in.
  */
 
-import type { SloHealthState, SloListFilters } from '../../../../../common/slo/slo_types';
+import type {
+  SloHealthState,
+  SloListFilters,
+  SuggestionKind,
+} from '../../../../../common/slo/slo_types';
 
 const SLI_BACKENDS = new Set(['prometheus', 'opensearch']);
 const MODES = new Set(['active', 'shadow']);
@@ -24,6 +28,17 @@ const STATES = new Set<SloHealthState>([
   'no_data',
   'stale',
   'disabled',
+]);
+const CANONICAL_KINDS = new Set<SuggestionKind>([
+  'apm-availability',
+  'apm-latency',
+  'http-availability',
+  'http-latency',
+  'rpc-availability',
+  'rpc-latency',
+  'db-latency',
+  'messaging-latency',
+  'genai-availability',
 ]);
 
 function parseList(raw: string | null): string[] {
@@ -64,6 +79,11 @@ export function deserializeFiltersFromSearch(search: string): SloListFilters {
   const tier = parseList(params.get('tier'));
   if (tier.length) out.tier = tier;
 
+  const canonicalKind = parseList(params.get('canonicalKind')).filter((s): s is SuggestionKind =>
+    CANONICAL_KINDS.has(s as SuggestionKind)
+  );
+  if (canonicalKind.length) out.canonicalKind = canonicalKind;
+
   const mode = parseList(params.get('mode')).filter((s) => MODES.has(s)) as Array<
     'active' | 'shadow'
   >;
@@ -89,6 +109,9 @@ export function serializeFiltersToSearch(filters: SloListFilters): string {
   if (filters.service?.length) params.set('service', filters.service.join(','));
   if (filters.team?.length) params.set('team', filters.team.join(','));
   if (filters.tier?.length) params.set('tier', filters.tier.join(','));
+  if (filters.canonicalKind?.length) {
+    params.set('canonicalKind', filters.canonicalKind.join(','));
+  }
   if (filters.mode?.length) params.set('mode', filters.mode.join(','));
   if (filters.enabled !== undefined) params.set('enabled', String(filters.enabled));
   if (filters.search && filters.search.trim().length > 0) params.set('search', filters.search);

@@ -35,6 +35,14 @@ describe('slo_list_filter_url', () => {
       expect(deserializeFiltersFromSearch('?state=ok')).toEqual({ state: ['ok'] });
       expect(deserializeFiltersFromSearch('')).toEqual({});
     });
+
+    it('parses canonicalKind and drops unknown kinds', () => {
+      expect(
+        deserializeFiltersFromSearch('?canonicalKind=apm-availability,http-latency,bogus-kind')
+      ).toEqual({
+        canonicalKind: ['apm-availability', 'http-latency'],
+      });
+    });
   });
 
   describe('serializeFiltersToSearch', () => {
@@ -63,6 +71,14 @@ describe('slo_list_filter_url', () => {
         enabled: false,
         mode: ['active' as const],
         search: 'checkout',
+      };
+      const raw = serializeFiltersToSearch(original);
+      expect(deserializeFiltersFromSearch(`?${raw}`)).toEqual(original);
+    });
+
+    it('round-trips canonicalKind', () => {
+      const original = {
+        canonicalKind: ['apm-availability' as const, 'db-latency' as const],
       };
       const raw = serializeFiltersToSearch(original);
       expect(deserializeFiltersFromSearch(`?${raw}`)).toEqual(original);

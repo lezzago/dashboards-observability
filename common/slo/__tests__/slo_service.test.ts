@@ -412,3 +412,52 @@ describe('SloService.list — datasource filter normalization', () => {
     expect(out).toHaveLength(2);
   });
 });
+
+describe('SloService.list — canonicalKind filter', () => {
+  async function seedMixed(svc: SloService) {
+    await svc.create({
+      spec: validSpec({ name: 'apm-avail-a', canonicalKind: 'apm-availability' }),
+    });
+    await svc.create({
+      spec: validSpec({ name: 'apm-lat-b', canonicalKind: 'apm-latency' }),
+    });
+    await svc.create({
+      spec: validSpec({ name: 'http-avail-c', canonicalKind: 'http-availability' }),
+    });
+    // Untagged SLO — predates the tag, must fall outside any canonicalKind filter.
+    await svc.create({ spec: validSpec({ name: 'legacy-untagged-d' }) });
+  }
+
+  it('returns only tagged SLOs matching the filter', async () => {
+    const svc = new SloService(noopLogger());
+    await seedMixed(svc);
+    const out = await svc.list({ canonicalKind: ['apm-availability'] });
+    expect(out.map((s) => s.name)).toEqual(['apm-avail-a']);
+  });
+
+  it('supports multi-value filter', async () => {
+    const svc = new SloService(noopLogger());
+    await seedMixed(svc);
+    const out = await svc.list({
+      canonicalKind: ['apm-availability', 'http-availability'],
+    });
+    expect(out.map((s) => s.name).sort()).toEqual(['apm-avail-a', 'http-avail-c']);
+  });
+
+  it('excludes untagged SLOs (no heuristic inference at filter layer)', async () => {
+    const svc = new SloService(noopLogger());
+    await seedMixed(svc);
+    const out = await svc.list({ canonicalKind: ['apm-availability', 'apm-latency'] });
+    // legacy-untagged-d would heuristically classify as apm-availability (leaf
+    // 'availability' + prometheus backend), but the filter doesn't reach back
+    // to the SLI shape — only the stored tag.
+    expect(out.some((s) => s.name === 'legacy-untagged-d')).toBe(false);
+  });
+
+  it('ignores an empty canonicalKind filter (no-op)', async () => {
+    const svc = new SloService(noopLogger());
+    await seedMixed(svc);
+    const out = await svc.list({ canonicalKind: [] });
+    expect(out).toHaveLength(4);
+  });
+});

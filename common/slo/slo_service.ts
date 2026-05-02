@@ -1821,6 +1821,16 @@ export class SloService {
     if (filters?.tier && filters.tier.length > 0) {
       filtered = filtered.filter((d) => d.spec.tier && filters.tier!.includes(d.spec.tier));
     }
+    // Match on the stored `canonicalKind` tag only — no heuristic inference
+    // at the filter layer, so untagged legacy SLOs simply fall outside the
+    // filter. Users explicitly asking "show me APM-availability SLOs" don't
+    // want prometheus/availability-leaf SLOs they never labelled with an
+    // APM intent swept in by accident.
+    if (filters?.canonicalKind && filters.canonicalKind.length > 0) {
+      filtered = filtered.filter(
+        (d) => d.spec.canonicalKind && filters.canonicalKind!.includes(d.spec.canonicalKind)
+      );
+    }
     if (filters?.sliBackend && filters.sliBackend.length > 0) {
       filtered = filtered.filter(
         (d) =>

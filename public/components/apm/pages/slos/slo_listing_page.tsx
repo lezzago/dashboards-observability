@@ -52,6 +52,7 @@ import type {
 import { formatPct } from '../../../../../common/slo/format';
 import { getSloHealthColor } from '../../../../../common/slo/state';
 import { templateIconFor } from './template_icons';
+import { KIND_LABEL } from './suggest_engine';
 
 export interface SloListingPageProps {
   apiClient: SloApiClient;
@@ -700,6 +701,14 @@ export const SloListingPage: React.FC<SloListingPageProps> = ({
         category: 'Tier',
         values: filters.tier,
         onRemove: () => clearKey('tier'),
+      });
+    }
+    if (filters.canonicalKind?.length) {
+      badges.push({
+        key: 'canonicalKind',
+        category: 'Canonical kind',
+        values: filters.canonicalKind.map((k) => KIND_LABEL[k] ?? k),
+        onRemove: () => clearKey('canonicalKind'),
       });
     }
     if (filters.mode?.length) {

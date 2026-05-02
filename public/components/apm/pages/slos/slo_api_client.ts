@@ -235,6 +235,7 @@ function serializeFilters(filters: SloListFilters): Record<string, string | numb
   if (filters.service?.length) query.service = filters.service.join(',');
   if (filters.team?.length) query.team = filters.team.join(',');
   if (filters.tier?.length) query.tier = filters.tier.join(',');
+  if (filters.canonicalKind?.length) query.canonicalKind = filters.canonicalKind.join(',');
   if (filters.enabled !== undefined) query.enabled = String(filters.enabled);
   if (filters.mode?.length) query.mode = filters.mode.join(',');
   if (filters.search) query.search = filters.search;

@@ -501,6 +501,7 @@ export function registerSloRoutes(options: RegisterSloRoutesOptions) {
           service: schema.maybe(schema.string()),
           team: schema.maybe(schema.string()),
           tier: schema.maybe(schema.string()),
+          canonicalKind: schema.maybe(schema.string()),
           enabled: schema.maybe(schema.string()),
           mode: schema.maybe(schema.string()),
           search: schema.maybe(schema.string()),
@@ -525,6 +526,19 @@ export function registerSloRoutes(options: RegisterSloRoutesOptions) {
         service: q.service ? q.service.split(',') : undefined,
         team: q.team ? q.team.split(',') : undefined,
         tier: q.tier ? q.tier.split(',') : undefined,
+        canonicalKind: q.canonicalKind
+          ? (q.canonicalKind.split(',') as Array<
+              | 'apm-availability'
+              | 'apm-latency'
+              | 'http-availability'
+              | 'http-latency'
+              | 'rpc-availability'
+              | 'rpc-latency'
+              | 'db-latency'
+              | 'messaging-latency'
+              | 'genai-availability'
+            >)
+          : undefined,
         enabled: q.enabled === undefined ? undefined : q.enabled === 'true',
         mode: q.mode ? (q.mode.split(',') as Array<'active' | 'shadow'>) : undefined,
         search: q.search,

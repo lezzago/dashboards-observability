@@ -540,6 +540,13 @@ export interface SloListFilters {
   service?: string[];
   team?: string[];
   tier?: string[];
+  /**
+   * Canonical SLO kind — stamped at suggest-driven create time (M5A) or
+   * inferred heuristically by readers. Listing filter only; omitted means
+   * "any kind". Server matches on the stored tag (no heuristic inference at
+   * the filter layer — an untagged SLO simply falls outside the filter).
+   */
+  canonicalKind?: SuggestionKind[];
   enabled?: boolean;
   mode?: Array<'active' | 'shadow'>;
   search?: string;

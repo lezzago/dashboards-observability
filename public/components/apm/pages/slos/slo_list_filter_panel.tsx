@@ -35,8 +35,10 @@ import type {
   SloHealthState,
   SloListFilters,
   SloSummary,
+  SuggestionKind,
 } from '../../../../../common/slo/slo_types';
 import { SLO_HEALTH_COLOR, SLO_HEALTH_ORDER } from '../../../../../common/slo/state';
+import { KIND_LABEL } from './suggest_engine';
 
 /**
  * Max number of Prometheus datasources that can be selected simultaneously.
@@ -60,6 +62,24 @@ const MODE_LABEL: Record<SloMode, string> = {
   active: 'Active',
   shadow: 'Shadow',
 };
+
+/**
+ * Canonical-kind options for the facet. Keep the order stable (APM-first,
+ * otel/http/rpc next, then db/messaging/genai) so the checkbox list reads
+ * the same across reloads regardless of which kinds happen to exist in the
+ * current result set.
+ */
+const CANONICAL_KIND_ORDER: readonly SuggestionKind[] = [
+  'apm-availability',
+  'apm-latency',
+  'http-availability',
+  'http-latency',
+  'rpc-availability',
+  'rpc-latency',
+  'db-latency',
+  'messaging-latency',
+  'genai-availability',
+];
 
 export interface SloListFilterPanelProps {
   filters: SloListFilters;
@@ -420,6 +440,20 @@ export const SloListFilterPanel: React.FC<SloListFilterPanelProps> = ({
         options={allLeafTypes.map((v) => ({ id: v, label: v }))}
         selected={filters.sliLeafType}
         onToggle={(id) => patch({ sliLeafType: toggleInArray(filters.sliLeafType, id) })}
+      />
+      <EuiHorizontalRule margin="xs" />
+
+      <FacetAccordion
+        id="slosFilterAccordion-canonicalKind"
+        label="Canonical kind"
+        dataTestSubj="slosFilterAccordion-canonicalKind"
+        options={CANONICAL_KIND_ORDER.map((k) => ({ id: k, label: KIND_LABEL[k] }))}
+        selected={filters.canonicalKind}
+        onToggle={(id) =>
+          patch({
+            canonicalKind: toggleInArray(filters.canonicalKind, id as SuggestionKind),
+          })
+        }
       />
       <EuiHorizontalRule margin="xs" />
 

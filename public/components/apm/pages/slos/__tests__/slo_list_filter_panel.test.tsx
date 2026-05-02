@@ -43,11 +43,39 @@ describe('SloListFilterPanel (sidebar)', () => {
     render(<SloListFilterPanel filters={{}} onChange={jest.fn()} items={[makeSummary()]} />);
     expect(screen.getByTestId('slosFilterAccordion-state')).toBeInTheDocument();
     expect(screen.getByTestId('slosFilterAccordion-sliType')).toBeInTheDocument();
+    expect(screen.getByTestId('slosFilterAccordion-canonicalKind')).toBeInTheDocument();
     expect(screen.getByTestId('slosFilterAccordion-service')).toBeInTheDocument();
     expect(screen.getByTestId('slosFilterAccordion-team')).toBeInTheDocument();
     expect(screen.getByTestId('slosFilterAccordion-tier')).toBeInTheDocument();
     expect(screen.getByTestId('slosFilterAccordion-mode')).toBeInTheDocument();
     expect(screen.getByTestId('slosFilterAccordion-enabled')).toBeInTheDocument();
+  });
+
+  it('renders human-readable canonical kind labels from KIND_LABEL', () => {
+    render(<SloListFilterPanel filters={{}} onChange={jest.fn()} items={[makeSummary()]} />);
+    expect(screen.getByLabelText('APM availability')).toBeInTheDocument();
+    expect(screen.getByLabelText('HTTP latency')).toBeInTheDocument();
+    expect(screen.getByLabelText('GenAI availability')).toBeInTheDocument();
+  });
+
+  it('toggles canonical kind when its checkbox is clicked', () => {
+    const onChange = jest.fn();
+    render(<SloListFilterPanel filters={{}} onChange={onChange} items={[makeSummary()]} />);
+    fireEvent.click(screen.getByLabelText('APM availability'));
+    expect(onChange).toHaveBeenCalledWith({ canonicalKind: ['apm-availability'] });
+  });
+
+  it('clears canonicalKind when the last selected checkbox is unticked', () => {
+    const onChange = jest.fn();
+    render(
+      <SloListFilterPanel
+        filters={{ canonicalKind: ['apm-availability'] }}
+        onChange={onChange}
+        items={[makeSummary()]}
+      />
+    );
+    fireEvent.click(screen.getByLabelText('APM availability'));
+    expect(onChange).toHaveBeenCalledWith({ canonicalKind: undefined });
   });
 
   it('toggles a state value when its checkbox is clicked', () => {
