@@ -80,10 +80,10 @@ const PER_SERVICE_BUDGET = 4;
 const MAX_SERVICES_PER_CALL = 200;
 
 /**
- * Module-level latch. Once the aggregate endpoint returns 404 in a session,
- * we remember the unavailability so subsequent hook mounts skip straight to
- * the client-side fallback and don't pay the round-trip cost on every refresh.
- * Reset only on a full page reload.
+ * Session-level latch: once the aggregate endpoint returns 404, skip it for
+ * the remainder of this session and use the list fan-out instead. Intentional
+ * — avoids retrying a known-missing endpoint on every mount. A server deploy
+ * mid-session won't be picked up until the next page load.
  */
 let aggregateEndpointUnavailable = false;
 

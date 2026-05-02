@@ -92,6 +92,11 @@ bypassing the ruler dual-write). Datasource: `ObservabilityStack_Prometheus`.
 | quote      | (none)                                            | Zero SLOs (empty prompt) |
 | shipping   | (none)                                            | Zero SLOs (empty prompt) |
 
+**Post-F2 update:** `m3-cart-availability` and `m3-cart-latency` are now
+tagged with `canonicalKind` (`apm-availability` and `apm-latency`
+respectively), exercising the M5 tag-preferred classifier path. Other
+fixtures remain untagged and exercise the heuristic fallback.
+
 Pre-existing unrelated fixture: `session-f-smoke` on `checkoutservice`
 (custom-PromQL SLI; does not classify under apm-availability / apm-latency
 heuristics; `checkoutservice` is not in the `span_derived` service list so

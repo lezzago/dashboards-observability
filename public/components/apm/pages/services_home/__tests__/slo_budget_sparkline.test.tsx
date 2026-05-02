@@ -108,9 +108,12 @@ describe('SloBudgetSparkline', () => {
       <SloBudgetSparkline services={['cart']} prometheusConnectionId="ds-prom" />
     );
     expect(container.firstChild).toBeNull();
+    // Caption should not render when the sparkline itself is absent —
+    // otherwise it's a floating orphan.
+    expect(screen.queryByTestId('sloBudgetSparklineScopeCaption')).not.toBeInTheDocument();
   });
 
-  it('renders the label and chart when data is present', () => {
+  it('renders the label, chart, and scope caption when data is present', () => {
     setHook({
       series: [
         {
@@ -126,5 +129,8 @@ describe('SloBudgetSparkline', () => {
     render(<SloBudgetSparkline services={['cart']} prometheusConnectionId="ds-prom" />);
     expect(screen.getByText('Aggregate error ratio (7d)')).toBeInTheDocument();
     expect(screen.getByTestId('mockEchartsRender')).toBeInTheDocument();
+    expect(screen.getByTestId('sloBudgetSparklineScopeCaption')).toHaveTextContent(
+      '7d error-ratio trend across all services in this datasource'
+    );
   });
 });

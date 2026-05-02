@@ -84,6 +84,9 @@ const t = {
   label: i18n.translate('observability.apm.services.sloBudgetSparkline.label', {
     defaultMessage: 'Aggregate error ratio (7d)',
   }),
+  scopeCaption: i18n.translate('observability.apm.services.sloHealth.sparklineScopeCaption', {
+    defaultMessage: '7d error-ratio trend across all services in this datasource',
+  }),
   tooltipRemaining: (v: number, ts: string) =>
     i18n.translate('observability.apm.services.sloBudgetSparkline.tooltip', {
       defaultMessage: '{ts}: {pct} error ratio',
@@ -207,6 +210,9 @@ export const SloBudgetSparkline: React.FC<SloBudgetSparklineProps> = ({
         </EuiFlexItem>
       </EuiFlexGroup>
       <EchartsRender spec={spec} height={CHART_HEIGHT} />
+      <EuiText size="xs" color="subdued" data-test-subj="sloBudgetSparklineScopeCaption">
+        {t.scopeCaption}
+      </EuiText>
     </SparklineShell>
   );
 };
