@@ -118,15 +118,22 @@ function estimateTimeToExhaustion(
  * Horizontal budget bar.
  *
  * Layout:
- *  - Main bar: left = consumed (red/warning), right = remaining (green).
- *    Scales so negative remaining renders as fully-red + overflow indicator.
- *  - Warning threshold: a dashed vertical line at the "consumed > warn"
- *    position (e.g. 50% of budget). Gives operators a visual anchor for
- *    "how close am I to paging on budget depletion?".
+ *  - Main bar: three zone bands partition the [0, 1] budget universe — green
+ *    (healthy) from 0 to warn-at-consumed, amber (warning) from warn to 100%,
+ *    red (breach) past 100% when over budget. Zones act as a reference
+ *    palette so the ticks read as true boundaries instead of decorations.
+ *  - Warn-at-consumed tick (dashed): marks the green→amber transition.
+ *  - 100% breach tick (dashed): marks the amber→red transition at the right
+ *    edge of the allowed budget. Always rendered so "overflow is visible"
+ *    holds even when consumption is below 100%.
  *  - 24h overlay: a thin bar beneath the main bar showing the last 24h of
  *    budget consumption as a proportion of total budget — answers "am I
  *    burning faster than the window allows?". Omitted when 24h data is
  *    unavailable rather than rendering a placeholder.
+ *
+ * Dark-mode safety: zone fills use 20% opacity so the zones tint the track
+ * without shouting in either palette. Light-mode readability stays intact
+ * because the dashed ticks and adjacent numeric copy carry the live signal.
  */
 const BudgetBar: React.FC<{
   /** Fraction of budget remaining (0..1; can be negative). */
@@ -143,14 +150,30 @@ const BudgetBar: React.FC<{
   last24hConsumed: number | null;
 }> = ({ remaining, warnAtConsumed, last24hConsumed }) => {
   const consumed = Math.max(0, 1 - remaining);
-  const consumedPct = Math.min(100, consumed * 100);
-  const overBudget = remaining < 0;
-  const warnPct =
-    warnAtConsumed !== null && warnAtConsumed >= 0 && warnAtConsumed <= 1
-      ? warnAtConsumed * 100
-      : null;
+  const overBudget = consumed > 1;
+  const warnFraction =
+    warnAtConsumed !== null && warnAtConsumed >= 0 && warnAtConsumed <= 1 ? warnAtConsumed : null;
+  // Zone widths as % of the [0, 1] budget universe. If the spec carries no
+  // warn-at-consumed, the amber band collapses and the 100% breach tick alone
+  // anchors the boundary.
+  const greenWidthPct = (warnFraction ?? 1) * 100;
+  const amberWidthPct = warnFraction !== null ? (1 - warnFraction) * 100 : 0;
+  // Cap the rendered breach zone at 20% of bar width so a 300% blow-through
+  // doesn't stretch the layout; when the true overflow exceeds the cap, a
+  // glyph at the right edge flags "off scale".
+  const overflowAbs = overBudget ? consumed - 1 : 0;
+  const overflowRenderedPct = Math.min(overflowAbs, 0.2) * 100;
+  const overflowClipped = overflowAbs > 0.2;
+
   const show24h = last24hConsumed !== null && Number.isFinite(last24hConsumed);
   const last24hPct = show24h ? Math.min(100, Math.max(0, last24hConsumed as number) * 100) : 0;
+
+  const zoneStyle: React.CSSProperties = {
+    position: 'absolute',
+    top: 0,
+    bottom: 0,
+    opacity: 0.2,
+  };
 
   return (
     <>
@@ -160,37 +183,56 @@ const BudgetBar: React.FC<{
           height: 14,
           background: euiThemeVars.euiColorLightestShade,
           borderRadius: 4,
-          overflow: 'hidden',
+          // Visible, not hidden: the breach zone and its 100% tick render past
+          // the track's right edge when the SLO is over budget.
+          overflow: 'visible',
         }}
         data-test-subj="slosBudgetBar"
       >
         <div
           style={{
-            position: 'absolute',
+            ...zoneStyle,
             left: 0,
-            top: 0,
-            bottom: 0,
-            width: `${consumedPct}%`,
-            background: overBudget ? euiThemeVars.euiColorDanger : euiThemeVars.euiColorWarning,
-            transition: 'width 200ms ease',
-          }}
-        />
-        <div
-          style={{
-            position: 'absolute',
-            left: `${consumedPct}%`,
-            top: 0,
-            bottom: 0,
-            right: 0,
+            width: `${greenWidthPct}%`,
             background: euiThemeVars.euiColorSuccess,
-            opacity: overBudget ? 0 : 0.35,
+            borderTopLeftRadius: 4,
+            borderBottomLeftRadius: 4,
+            borderTopRightRadius: amberWidthPct > 0 || overBudget ? 0 : 4,
+            borderBottomRightRadius: amberWidthPct > 0 || overBudget ? 0 : 4,
           }}
+          data-test-subj="slosBudgetBarZoneHealthy"
         />
-        {warnPct !== null && (
+        {amberWidthPct > 0 && (
+          <div
+            style={{
+              ...zoneStyle,
+              left: `${greenWidthPct}%`,
+              width: `${amberWidthPct}%`,
+              background: euiThemeVars.euiColorWarning,
+              borderTopRightRadius: overBudget ? 0 : 4,
+              borderBottomRightRadius: overBudget ? 0 : 4,
+            }}
+            data-test-subj="slosBudgetBarZoneWarning"
+          />
+        )}
+        {overBudget && (
+          <div
+            style={{
+              ...zoneStyle,
+              left: '100%',
+              width: `${overflowRenderedPct}%`,
+              background: euiThemeVars.euiColorDanger,
+              borderTopRightRadius: 4,
+              borderBottomRightRadius: 4,
+            }}
+            data-test-subj="slosBudgetBarZoneBreach"
+          />
+        )}
+        {warnFraction !== null && (
           <div
             style={{
               position: 'absolute',
-              left: `${warnPct}%`,
+              left: `${warnFraction * 100}%`,
               top: -2,
               bottom: -2,
               width: 0,
@@ -198,6 +240,37 @@ const BudgetBar: React.FC<{
             }}
             data-test-subj="slosBudgetBarThreshold"
           />
+        )}
+        <div
+          style={{
+            position: 'absolute',
+            left: '100%',
+            top: -2,
+            bottom: -2,
+            width: 0,
+            borderLeft: `1px dashed ${euiThemeVars.euiColorDangerText}`,
+          }}
+          data-test-subj="slosBudgetBarBreachTick"
+        />
+        {overflowClipped && (
+          <div
+            style={{
+              position: 'absolute',
+              left: `${100 + overflowRenderedPct}%`,
+              top: 0,
+              bottom: 0,
+              display: 'flex',
+              alignItems: 'center',
+              paddingLeft: 2,
+              fontSize: 10,
+              lineHeight: 1,
+              color: euiThemeVars.euiColorDangerText,
+            }}
+            data-test-subj="slosBudgetBarOverflow"
+            aria-label="budget consumed far exceeds 100%"
+          >
+            ▶
+          </div>
         )}
       </div>
       {show24h && (
@@ -389,27 +462,6 @@ export const SloBudgetPanel: React.FC<SloBudgetPanelProps> = ({
           <EuiStat
             titleSize="m"
             reverse
-            description={
-              <EuiToolTip content="Current SLI value over the SLO's window, compared to the target.">
-                <span>Attainment</span>
-              </EuiToolTip>
-            }
-            title={
-              <span style={{ color: attainmentColor }}>
-                {formatPct(attainment, { decimals: 3 }).replace(/\.?0+%$/, '%')}
-              </span>
-            }
-            data-test-subj="slosBudgetAttainment"
-          />
-          <EuiText size="xs" color="subdued">
-            target {formatPct(target, { decimals: 3 }).replace(/\.?0+%$/, '%')}
-          </EuiText>
-        </EuiFlexItem>
-
-        <EuiFlexItem>
-          <EuiStat
-            titleSize="m"
-            reverse
             titleColor={remainingColor as 'success' | 'accent' | 'danger'}
             description={
               <EuiToolTip content="Fraction of the error budget still available. Negative means the SLO has been exceeded.">
@@ -451,6 +503,27 @@ export const SloBudgetPanel: React.FC<SloBudgetPanelProps> = ({
           />
           <EuiText size="xs" color="subdued">
             based on 1h burn
+          </EuiText>
+        </EuiFlexItem>
+
+        <EuiFlexItem>
+          <EuiStat
+            titleSize="m"
+            reverse
+            description={
+              <EuiToolTip content="Current SLI value over the SLO's window, compared to the target.">
+                <span>Attainment</span>
+              </EuiToolTip>
+            }
+            title={
+              <span style={{ color: attainmentColor }}>
+                {formatPct(attainment, { decimals: 3 }).replace(/\.?0+%$/, '%')}
+              </span>
+            }
+            data-test-subj="slosBudgetAttainment"
+          />
+          <EuiText size="xs" color="subdued">
+            target {formatPct(target, { decimals: 3 }).replace(/\.?0+%$/, '%')}
           </EuiText>
         </EuiFlexItem>
 

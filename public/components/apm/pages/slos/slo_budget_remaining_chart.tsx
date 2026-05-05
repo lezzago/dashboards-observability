@@ -136,12 +136,16 @@ export function buildBudgetRemainingOption(
     },
     yAxis: {
       type: 'value',
-      // Keep a small headroom below 0 so the "exhausted" markLine label stays
-      // readable when budget is healthy. When the series dips into the negative
-      // breach region (PromQL clamps at -0.5), extend down far enough to show
-      // the actual low — otherwise we silently clip data between -0.5 and -0.1.
-      min: (value: { min: number; max: number }) =>
-        Number.isFinite(value.min) ? Math.min(-0.1, value.min) : -0.1,
+      // Healthy series (min >= 0) pin the floor at 0 so the "exhausted" markLine
+      // acts as the axis baseline; rendering a -10% gutter on a flat 100% line
+      // reads as a phantom breach region. Only drop below zero when the series
+      // actually breaches — in that case, keep -0.1 headroom so shallow dips are
+      // legible and honour deeper values (PromQL clamps at -0.5) when present.
+      min: (value: { min: number; max: number }) => {
+        if (!Number.isFinite(value.min)) return -0.1;
+        if (value.min >= 0) return 0;
+        return Math.min(-0.1, value.min);
+      },
       max: 1,
       axisLabel: {
         color: euiThemeVars.euiColorDarkShade,

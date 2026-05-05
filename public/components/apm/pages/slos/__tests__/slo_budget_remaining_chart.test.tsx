@@ -160,7 +160,7 @@ describe('buildBudgetRemainingOption', () => {
     expect(area.color).toMatch(/189.*39.*30/);
   });
 
-  it('caps yAxis max at 1 and keeps -0.1 headroom for healthy data while expanding to show breach dips', () => {
+  it('caps yAxis max at 1 and clamps the floor by series sign: healthy pins at 0, mild breach keeps -0.1 headroom, deep breach drops further', () => {
     const opt = buildBudgetRemainingOption({
       seriesName: 'obj-1',
       data: [],
@@ -171,11 +171,18 @@ describe('buildBudgetRemainingOption', () => {
       max: number;
     };
     expect(yAxis.max).toBe(1);
-    // Healthy data — axis keeps a small negative gutter so the "exhausted"
-    // markLine's label isn't clipped.
-    expect(yAxis.min({ min: 0.4, max: 1 })).toBe(-0.1);
-    // Breach data (PromQL clamps at -0.5) — axis drops far enough to show it.
+    // Healthy data — axis floor pins to 0 so a flat 100% line doesn't render
+    // a phantom breach region below zero.
+    expect(yAxis.min({ min: 0.4, max: 1 })).toBe(0);
+    // Exactly at zero still counts as healthy.
+    expect(yAxis.min({ min: 0, max: 1 })).toBe(0);
+    // Mild breach — axis drops into the standard -0.1 headroom so the shallow
+    // dip is visible without swallowing the rest of the chart.
+    expect(yAxis.min({ min: -0.05, max: 0.9 })).toBe(-0.1);
+    // Deep breach (PromQL clamps at -0.5) — axis drops all the way to show it.
     expect(yAxis.min({ min: -0.3, max: 0.9 })).toBe(-0.3);
+    // No data — fall back to a small negative gutter.
+    expect(yAxis.min({ min: NaN, max: NaN })).toBe(-0.1);
   });
 });
 
