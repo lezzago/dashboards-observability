@@ -15,6 +15,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   EuiAccordion,
+  EuiBadge,
   EuiBasicTableColumn,
   EuiButton,
   EuiButtonEmpty,
@@ -152,6 +153,16 @@ const t = {
   actionView: i18n.translate('observability.apm.serviceDetails.sloTab.action.view', {
     defaultMessage: 'View',
   }),
+  currentAwaitingData: i18n.translate(
+    'observability.apm.serviceDetails.sloTab.current.awaitingData',
+    { defaultMessage: 'Awaiting data' }
+  ),
+  currentStale: i18n.translate('observability.apm.serviceDetails.sloTab.current.stale', {
+    defaultMessage: 'Stale',
+  }),
+  currentDisabled: i18n.translate('observability.apm.serviceDetails.sloTab.current.disabled', {
+    defaultMessage: 'Disabled',
+  }),
   stateLabel: (state: SloHealthState): string => {
     const labels: Record<SloHealthState, string> = {
       breached: i18n.translate('observability.apm.serviceDetails.sloTab.state.breached', {
@@ -245,6 +256,17 @@ function worstTargetLabel(slo: SloSummary): string {
   return `${(slo.worstTarget * 100).toFixed(slo.worstTarget >= 0.999 ? 2 : 1)}%`;
 }
 
+// States where the SLO isn't producing a meaningful "current" value. Rendering
+// the literal `0.00%` / `0.000s` for these would be indistinguishable from a
+// real zero reading; callers surface an "Awaiting data" / "Stale" / "Disabled"
+// badge instead.
+function currentPlaceholderLabel(state: SloHealthState): string | null {
+  if (state === 'no_data') return t.currentAwaitingData;
+  if (state === 'stale') return t.currentStale;
+  if (state === 'disabled') return t.currentDisabled;
+  return null;
+}
+
 // ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
@@ -307,7 +329,21 @@ export const ServiceSloTab: React.FC<ServiceSloTabProps> = ({
       },
       {
         name: t.colCurrent,
-        render: (row: SloSummary) => <EuiText size="s">{worstObjectiveCurrent(row)}</EuiText>,
+        render: (row: SloSummary) => {
+          const placeholder = currentPlaceholderLabel(row.status.state);
+          if (placeholder !== null) {
+            return (
+              <EuiBadge
+                color="hollow"
+                iconType="questionInCircle"
+                data-test-subj={`serviceSloTabCurrentPlaceholder-${row.id}`}
+              >
+                {placeholder}
+              </EuiBadge>
+            );
+          }
+          return <EuiText size="s">{worstObjectiveCurrent(row)}</EuiText>;
+        },
       },
       {
         name: t.colWindow,

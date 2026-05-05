@@ -358,9 +358,16 @@ export const SloOverviewPanel: React.FC<SloOverviewPanelProps> = ({
    * No-data SLOs are intentionally excluded here; the KPI tiles + rail already
    * surface them, and showing "100% because it hasn't measured yet" as the
    * top at-risk entry is misleading on a fresh dev cluster.
+   *
+   * `anyAtRisk` is true when at least one reporting SLO has < 75% budget left;
+   * below that bar the leaderboard collapses to a subdued all-green line so a
+   * fresh cluster doesn't claim "worst first" under a row of 100%s. The 0.75
+   * threshold sits safely above the `< 0.25 → critical` band already used in
+   * the listing budget column.
    */
   const atRisk = useMemo(() => {
     const CHIP_COUNT = 3;
+    const AT_RISK_THRESHOLD = 0.75;
     const rows = items
       .filter((s) => s.enabled && isReporting(s))
       .map((s) => ({ summary: s, remaining: worstBudgetRemaining(s) }))
@@ -368,6 +375,8 @@ export const SloOverviewPanel: React.FC<SloOverviewPanelProps> = ({
     return {
       shown: rows.slice(0, CHIP_COUNT),
       totalBurning: rows.filter((r) => r.remaining < 0.25).length,
+      anyAtRisk: rows.some((r) => r.remaining < AT_RISK_THRESHOLD),
+      hasReporting: rows.length > 0,
     };
   }, [items]);
 
@@ -536,12 +545,33 @@ export const SloOverviewPanel: React.FC<SloOverviewPanelProps> = ({
               color: euiThemeVars.euiColorDarkShade,
             }}
           >
-            At risk · worst error budget first
+            {atRisk.hasReporting && !atRisk.anyAtRisk
+              ? 'Error budget'
+              : 'At risk · worst error budget first'}
           </span>
           {atRisk.shown.length === 0 ? (
             <EuiText size="xs" color="subdued">
               No reporting SLOs.
             </EuiText>
+          ) : !atRisk.anyAtRisk ? (
+            // Fallback when every reporting SLO has ≥75% budget — otherwise the
+            // leaderboard would sit under a "worst first" caption showing a row
+            // of 100%s, which reads as a ranking when there's nothing to rank.
+            <div
+              style={{ display: 'flex', flexDirection: 'column', gap: 2 }}
+              data-test-subj="slosOverviewAtRiskAllGreen"
+            >
+              <EuiText size="xs" color="subdued">
+                All reporting SLOs have &gt;75% budget remaining.
+              </EuiText>
+              <EuiLink
+                href="#/slos"
+                style={{ fontSize: 11, alignSelf: 'flex-start' }}
+                data-test-subj="slosOverviewAtRiskViewByBudget"
+              >
+                View by remaining budget
+              </EuiLink>
+            </div>
           ) : (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
               {atRisk.shown.map(({ summary: s, remaining }) => {

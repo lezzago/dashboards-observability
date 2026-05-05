@@ -117,6 +117,12 @@ const BudgetColumnBar: React.FC<{ remaining: number; width?: number }> = ({
  * signal and the firing badge as an exception indicator.
  */
 const SloHealthCell: React.FC<{ row: SloSummary }> = ({ row }) => {
+  const state = row.status.state;
+  // For SLOs that aren't producing samples, `worstBudgetRemaining` falls back
+  // to 1 (100%), which paints a full green bar and reads as "healthy" at a
+  // glance. Suppress the budget text + bar in those states — the state chip
+  // already carries the correct signal.
+  const isReporting = state !== 'no_data' && state !== 'stale' && state !== 'disabled';
   const remaining = worstBudgetRemaining(row);
   const overBudget = remaining < 0;
   const budgetLabel = overBudget
@@ -137,23 +143,25 @@ const SloHealthCell: React.FC<{ row: SloSummary }> = ({ row }) => {
         justifyContent="flexStart"
       >
         <EuiFlexItem grow={false}>
-          <EuiToolTip content={`State: ${row.status.state}`}>
-            <EuiHealth color={getSloHealthColor(row.status.state)}>
-              <span style={{ fontSize: 12 }}>{row.status.state}</span>
+          <EuiToolTip content={`State: ${state}`}>
+            <EuiHealth color={getSloHealthColor(state)}>
+              <span style={{ fontSize: 12 }}>{state}</span>
             </EuiHealth>
           </EuiToolTip>
         </EuiFlexItem>
-        <EuiFlexItem grow={true} style={{ textAlign: 'right' }}>
-          <EuiToolTip content="Remaining error budget (worst objective).">
-            <EuiText
-              size="s"
-              color={budgetColor === 'default' ? 'default' : budgetColor}
-              style={{ fontWeight: 600 }}
-            >
-              {budgetLabel}
-            </EuiText>
-          </EuiToolTip>
-        </EuiFlexItem>
+        {isReporting ? (
+          <EuiFlexItem grow={true} style={{ textAlign: 'right' }}>
+            <EuiToolTip content="Remaining error budget (worst objective).">
+              <EuiText
+                size="s"
+                color={budgetColor === 'default' ? 'default' : budgetColor}
+                style={{ fontWeight: 600 }}
+              >
+                {budgetLabel}
+              </EuiText>
+            </EuiToolTip>
+          </EuiFlexItem>
+        ) : null}
         {firing > 0 ? (
           <EuiFlexItem grow={false}>
             <EuiToolTip content={`${firing} alert${firing === 1 ? '' : 's'} firing`}>
@@ -164,9 +172,11 @@ const SloHealthCell: React.FC<{ row: SloSummary }> = ({ row }) => {
           </EuiFlexItem>
         ) : null}
       </EuiFlexGroup>
-      <div style={{ marginTop: 4 }}>
-        <BudgetColumnBar remaining={remaining} width={160} />
-      </div>
+      {isReporting ? (
+        <div style={{ marginTop: 4 }}>
+          <BudgetColumnBar remaining={remaining} width={160} />
+        </div>
+      ) : null}
     </div>
   );
 };

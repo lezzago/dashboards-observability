@@ -240,6 +240,42 @@ describe('ServiceSloTab — missing-pair variants', () => {
   });
 });
 
+describe('ServiceSloTab — Current column placeholder for non-reporting states', () => {
+  it('renders an "Awaiting data" badge (and no 0.00%) when state is no_data', () => {
+    const summary = makeSummary({
+      id: 'nodata-1',
+      service: SERVICE,
+      name: 'availability SLO',
+      sliLeafType: 'availability',
+      status: {
+        sloId: 'nodata-1',
+        // Zero-value objective paired with no_data is the exact shape the
+        // listing projection emits for fresh SLOs — the regression under test
+        // is that we were rendering `0.00%` from this row and users read it
+        // as a real measurement.
+        objectives: [
+          {
+            objectiveName: 'obj1',
+            currentValue: 0,
+            currentValueUnit: 'ratio',
+            attainment: 0,
+            errorBudgetRemaining: 1,
+            state: 'no_data',
+          },
+        ],
+        state: 'no_data',
+        firingCount: 0,
+        ruleCount: 1,
+        computedAt: '',
+      },
+    });
+    renderTab({ bucket: bucketFor(SERVICE, [summary]) });
+    const placeholder = screen.getByTestId('serviceSloTabCurrentPlaceholder-nodata-1');
+    expect(placeholder).toHaveTextContent('Awaiting data');
+    expect(screen.queryByText('0.00%')).toBeNull();
+  });
+});
+
 describe('ServiceSloTab — error + 403', () => {
   it('renders the forbidden callout and hides retry when error is forbidden', () => {
     renderTab({ error: { kind: 'forbidden' } });
