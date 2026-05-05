@@ -388,6 +388,7 @@ export const SloWizardPage: React.FC<SloWizardPageProps> = ({
                     <ObjectivesSection
                       objectives={state.objectives}
                       latencyThresholdUnit={state.latencyThresholdUnit}
+                      windowDuration={state.windowDuration}
                       template={template}
                       errors={errors}
                       dispatch={dispatch}
