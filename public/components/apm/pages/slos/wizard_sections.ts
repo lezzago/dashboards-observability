@@ -51,6 +51,14 @@ export const WIZARD_SECTIONS: readonly WizardSection[] = [
       'spec.datasourceId': 'slosWizardDatasourceId',
     },
   },
+  // Window comes before SLI + objectives because the chosen time window
+  // conditions the SLI shape (Grafana SLO creation flow, audit cite S5).
+  {
+    id: 'window',
+    label: 'Window & mode',
+    anchorId: 'slosWizardSection-window',
+    errorPrefixes: ['spec.window'],
+  },
   {
     id: 'owner',
     label: 'Service & owner',
@@ -78,12 +86,6 @@ export const WIZARD_SECTIONS: readonly WizardSection[] = [
     label: 'Objectives',
     anchorId: 'slosWizardSection-objectives',
     errorPrefixes: ['spec.objectives'],
-  },
-  {
-    id: 'window',
-    label: 'Window & mode',
-    anchorId: 'slosWizardSection-window',
-    errorPrefixes: ['spec.window'],
   },
   {
     id: 'advanced',

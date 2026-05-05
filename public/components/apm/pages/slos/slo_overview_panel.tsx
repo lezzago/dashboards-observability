@@ -564,6 +564,12 @@ export const SloOverviewPanel: React.FC<SloOverviewPanelProps> = ({
               <EuiText size="xs" color="subdued">
                 All reporting SLOs have &gt;75% budget remaining.
               </EuiText>
+              {/*
+                Lands on `#/slos` which now defaults to worst-budget-first
+                (P1 #7). No explicit sort param needed; left plain so an
+                already-filtered listing URL isn't clobbered if a user lands
+                here mid-filter.
+              */}
               <EuiLink
                 href="#/slos"
                 style={{ fontSize: 11, alignSelf: 'flex-start' }}

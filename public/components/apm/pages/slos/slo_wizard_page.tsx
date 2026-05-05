@@ -296,11 +296,11 @@ export const SloWizardPage: React.FC<SloWizardPageProps> = ({
 
   const visibleSectionIds: WizardSectionId[] = [
     'identity',
+    'window',
     'owner',
     'sli',
     ...(template.sli.type === 'custom' ? (['promql'] as WizardSectionId[]) : []),
     'objectives',
-    'window',
     'advanced',
     'exclusions',
     'labels',
@@ -328,6 +328,12 @@ export const SloWizardPage: React.FC<SloWizardPageProps> = ({
                       dispatch={dispatch}
                       template={template.name}
                     />
+                  </div>
+
+                  <EuiSpacer size="m" />
+
+                  <div id={sectionAnchorId('window')}>
+                    <WindowPanel state={state} warnings={warnings} dispatch={dispatch} />
                   </div>
 
                   <EuiSpacer size="m" />
@@ -393,12 +399,6 @@ export const SloWizardPage: React.FC<SloWizardPageProps> = ({
                       errors={errors}
                       dispatch={dispatch}
                     />
-                  </div>
-
-                  <EuiSpacer size="m" />
-
-                  <div id={sectionAnchorId('window')}>
-                    <WindowPanel state={state} warnings={warnings} dispatch={dispatch} />
                   </div>
 
                   <EuiSpacer size="m" />

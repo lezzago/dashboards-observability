@@ -560,6 +560,20 @@ export const SloListingPage: React.FC<SloListingPageProps> = ({
     };
   }, [items]);
 
+  // Default sort for the listing: worst remaining budget first (P1 #7).
+  // EuiInMemoryTable's sorting={{ field: 'name' }} config takes over as soon as
+  // the user clicks a column header — until then, EUI renders items in input
+  // order, so pre-sorting here makes "what's burning" the first row instead of
+  // whatever's alphabetically first. Stable tiebreaker on name keeps the
+  // no-data cluster (every row returns `remaining = 1`) reading alphabetically.
+  const sortedItems = useMemo(() => {
+    return [...items].sort((a, b) => {
+      const diff = worstBudgetRemaining(a) - worstBudgetRemaining(b);
+      if (diff !== 0) return diff;
+      return a.name.localeCompare(b.name);
+    });
+  }, [items]);
+
   const defaultsLine = useMemo(() => {
     const parts: string[] = [];
     if (traitMajorities.tier.isDominant && traitMajorities.tier.value) {
@@ -931,7 +945,7 @@ export const SloListingPage: React.FC<SloListingPageProps> = ({
                       <EuiSpacer size="s" />
 
                       <SlosTablePanel
-                        items={items}
+                        items={sortedItems}
                         columns={columns}
                         loading={loading}
                         resultCount={items.length}

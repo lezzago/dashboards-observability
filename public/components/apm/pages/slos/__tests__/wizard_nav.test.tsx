@@ -14,10 +14,10 @@ describe('WizardNav', () => {
         errors={{}}
         visibleSectionIds={[
           'identity',
+          'window',
           'owner',
           'sli',
           'objectives',
-          'window',
           'advanced',
           'exclusions',
           'labels',
@@ -38,11 +38,11 @@ describe('WizardNav', () => {
         errors={{}}
         visibleSectionIds={[
           'identity',
+          'window',
           'owner',
           'sli',
           'promql',
           'objectives',
-          'window',
           'advanced',
           'exclusions',
           'labels',
@@ -62,10 +62,10 @@ describe('WizardNav', () => {
         }}
         visibleSectionIds={[
           'identity',
+          'window',
           'owner',
           'sli',
           'objectives',
-          'window',
           'advanced',
           'exclusions',
           'labels',

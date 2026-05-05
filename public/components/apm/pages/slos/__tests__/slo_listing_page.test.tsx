@@ -313,3 +313,70 @@ describe('SloListingPage — Rules column badge (W1.7)', () => {
     expect(labels).toEqual(['Traits', 'Rules', 'Health']);
   });
 });
+
+describe('SloListingPage — default sort (P1 #7)', () => {
+  function reportingSummary(id: string, remaining: number, name: string): SloSummary {
+    // A row with one objective whose remaining budget is `remaining`, so the
+    // component's `worstBudgetRemaining` resolves to that number. Using `ok`
+    // as the state keeps the health cell in its reporting branch.
+    return {
+      id,
+      datasourceId: 'ds-1',
+      datasourceType: 'prometheus',
+      name,
+      enabled: true,
+      mode: 'active',
+      service: 'payments-api',
+      owner: { teams: ['sre'] },
+      tier: 'tier-1',
+      sliNodeType: 'single',
+      sliBackend: 'prometheus',
+      sliLeafType: 'availability',
+      objectiveCount: 1,
+      worstTarget: 0.999,
+      window: { type: 'rolling', duration: '28d' },
+      labels: {},
+      status: {
+        sloId: id,
+        objectives: [
+          {
+            objectiveName: `${id}-obj`,
+            currentValue: 0.99,
+            currentValueUnit: 'ratio',
+            attainment: 0.99,
+            errorBudgetRemaining: remaining,
+            state: 'ok',
+          },
+        ],
+        state: 'ok',
+        firingCount: 0,
+        ruleCount: 1,
+        computedAt: new Date(0).toISOString(),
+      },
+    };
+  }
+
+  it('renders the lowest-remaining-budget SLO first by default', async () => {
+    const a = reportingSummary('a-slo', 0.1, 'a-slo');
+    const b = reportingSummary('b-slo', 0.9, 'b-slo');
+    const c = reportingSummary('c-slo', 0.05, 'c-slo');
+    const list = jest.fn().mockResolvedValue({
+      results: [a, b, c],
+      total: 3,
+      page: 1,
+      pageSize: 100,
+      hasMore: false,
+    });
+    await act(async () => {
+      renderPage(list);
+    });
+    await screen.findByTestId('slosTable');
+    // Name-cell anchors inherit row order; grab them in DOM order and assert
+    // the ids come out worst-first (C=0.05, A=0.10, B=0.90).
+    const links = Array.from(
+      document.querySelectorAll<HTMLAnchorElement>('[data-test-subj^="slosLink-"]')
+    );
+    const ids = links.map((el) => el.getAttribute('data-test-subj'));
+    expect(ids).toEqual(['slosLink-c-slo', 'slosLink-a-slo', 'slosLink-b-slo']);
+  });
+});
