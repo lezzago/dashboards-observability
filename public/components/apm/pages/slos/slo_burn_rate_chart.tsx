@@ -64,15 +64,16 @@ export interface BurnRateOptionInputs {
 export function buildBurnRateOption(inputs: BurnRateOptionInputs): echarts.EChartsOption {
   const { tiers } = inputs;
 
-  // Upper bound of everything we need to fit — tier thresholds plus sampled
-  // burn values. ECharts autoscales yAxis from series alone and would clip the
-  // top threshold's markLine label (rendered at the line's y position) against
-  // the grid's top edge. Compute the required height and pad ~25% for the label,
-  // then round up to a clean integer so the rendered axis labels don't pick up
-  // floating-point noise (e.g. `22.99999999…` rendering as "23x"). The ~25%
-  // headroom keeps `insideEndTop`/`insideStartTop` labels clear of the border
-  // even when the top threshold dominates yMax (normal operation — series is
-  // near zero, axis driven entirely by the tier thresholds).
+  // Y-axis is log10: default MWMBR tiers span 14.4x / 6x / 3x / 1x, and a linear
+  // axis dominated by the top tier crushes the 1x / 3x lines (and any <10x burn
+  // activity) into an unreadable sliver near zero. Log keeps all tiers legible
+  // across the decades of burn that actually show up in production.
+  //
+  // Log axes can't represent zero, so we pick a display floor of 0.1x — burn
+  // rates below that are operationally "quiet" and live at the axis bottom
+  // instead of breaking the line. Sample floor-substitution happens in the
+  // series mapping below; the tooltip reads from a parallel raw value so a
+  // flat-zero point still shows "0x" on hover instead of "0.1x".
   const seriesMax = tiers.reduce((acc, t) => {
     for (const [, v] of t.data) {
       if (Number.isFinite(v) && v > acc) acc = v;
@@ -81,8 +82,12 @@ export function buildBurnRateOption(inputs: BurnRateOptionInputs): echarts.EChar
   }, 0);
   const thresholdMax = tiers.reduce((acc, t) => (t.multiplier > acc ? t.multiplier : acc), 0);
   const yMaxCandidate = Math.max(seriesMax, thresholdMax);
-  // Fall back to 1 so the axis doesn't collapse when there's no data yet.
-  const yMax = yMaxCandidate > 0 ? Math.ceil(yMaxCandidate * 1.25) : 1;
+  // Snap yMax up to the next power of 10 above the padded anchor so the top
+  // threshold markLine sits clear of the grid border and the decade tick
+  // labels ECharts picks (0.1x, 1x, 10x, 100x) don't render half-visible.
+  const yMaxRaw = yMaxCandidate > 0 ? yMaxCandidate * 1.25 : 1;
+  const yMax = Math.pow(10, Math.ceil(Math.log10(yMaxRaw)));
+  const Y_AXIS_FLOOR = 0.1;
   return {
     // No legend — each tier's threshold markLine is already labeled with
     // `<severity> @ <multiplier>x` inline, which is what operators actually
@@ -95,7 +100,10 @@ export function buildBurnRateOption(inputs: BurnRateOptionInputs): echarts.EChar
       formatter: (params: unknown) => {
         const list = params as Array<{
           axisValue: number;
-          value: [number, number];
+          // Points carry a third element [ts, plotted, raw] so the tooltip
+          // can show the original value even when the plotted coordinate was
+          // floored up to Y_AXIS_FLOOR for log-axis visibility.
+          value: [number, number, number];
           seriesName: string;
           color: string;
         }>;
@@ -103,9 +111,9 @@ export function buildBurnRateOption(inputs: BurnRateOptionInputs): echarts.EChar
         const ts = new Date(list[0].axisValue).toLocaleString();
         const rows = list
           .map((p) => {
-            const v = Array.isArray(p.value) ? p.value[1] : (p.value as number);
+            const raw = Array.isArray(p.value) ? p.value[2] ?? p.value[1] : (p.value as number);
             const swatch = `<span style="display:inline-block;width:10px;height:10px;background:${p.color};margin-right:6px;border-radius:2px;"></span>`;
-            return `<div>${swatch}${p.seriesName}: <strong>${formatMultiplier(v)}</strong></div>`;
+            return `<div>${swatch}${p.seriesName}: <strong>${formatMultiplier(raw)}</strong></div>`;
           })
           .join('');
         return `<div>${ts}</div>${rows}`;
@@ -117,13 +125,12 @@ export function buildBurnRateOption(inputs: BurnRateOptionInputs): echarts.EChar
       axisLabel: { color: euiThemeVars.euiColorDarkShade, fontSize: 11 },
     },
     yAxis: {
-      type: 'value',
+      type: 'log',
+      logBase: 10,
       name: 'burn rate',
       nameGap: 25,
       nameTextStyle: { color: euiThemeVars.euiColorDarkShade, fontSize: 11 },
-      // Burn rate is non-negative; pin the floor so recording-rule clock-skew
-      // blips don't drag the axis below zero and waste vertical space.
-      min: 0,
+      min: Y_AXIS_FLOOR,
       max: yMax,
       axisLabel: {
         color: euiThemeVars.euiColorDarkShade,
@@ -137,7 +144,13 @@ export function buildBurnRateOption(inputs: BurnRateOptionInputs): echarts.EChar
     series: tiers.map((t) => ({
       name: t.label,
       type: 'line',
-      data: t.data,
+      // Floor each sample at Y_AXIS_FLOOR so the log axis doesn't drop points
+      // where burn = 0. Tooltip reads the raw value from index [2] so a genuine
+      // zero still shows "0x" on hover.
+      data: t.data.map(([ts, v]) => {
+        const plotted = Number.isFinite(v) && v > Y_AXIS_FLOOR ? v : Y_AXIS_FLOOR;
+        return [ts, plotted, v];
+      }),
       smooth: false,
       symbol: 'none',
       lineStyle: { color: t.color, width: 2 },

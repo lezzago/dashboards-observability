@@ -151,7 +151,7 @@ describe('buildBurnRateOption', () => {
     expect(secondMark.label.formatter).toContain('ticket');
   });
 
-  it('pins yAxis floor at 0 and pads max above the highest threshold or sample', () => {
+  it('uses a log10 yAxis snapped to the next decade above the highest threshold or sample', () => {
     const opt = buildBurnRateOption({
       tiers: [
         {
@@ -170,14 +170,27 @@ describe('buildBurnRateOption', () => {
         },
       ],
     });
-    const yAxis = opt.yAxis as { min: number; max: number };
-    expect(yAxis.min).toBe(0);
+    const yAxis = opt.yAxis as {
+      type: string;
+      logBase: number;
+      min: number;
+      max: number;
+    };
+    // Log axis so the 1x / 3x / 14.4x / 20x tiers stay visually separated
+    // instead of being crushed near zero by a linear scale dominated by the
+    // largest tier.
+    expect(yAxis.type).toBe('log');
+    expect(yAxis.logBase).toBe(10);
+    // Display floor of 0.1x — log axes can't represent zero and burn rates
+    // below 0.1x are operationally "quiet".
+    expect(yAxis.min).toBe(0.1);
     // 20x threshold is the highest anchor; axis must clear it so the
-    // markLine label doesn't render on top of the grid border.
-    expect(yAxis.max).toBeGreaterThan(20);
+    // markLine label doesn't render on top of the grid border. Snaps up to
+    // the next power of 10 above 20 * 1.25 = 25, i.e. 100.
+    expect(yAxis.max).toBe(100);
   });
 
-  it('pads yAxis above the highest sampled value when samples exceed thresholds', () => {
+  it('snaps yAxis to the next decade above the highest sampled value when samples exceed thresholds', () => {
     const opt = buildBurnRateOption({
       tiers: [
         {
@@ -191,14 +204,42 @@ describe('buildBurnRateOption', () => {
         },
       ],
     });
-    const yAxis = opt.yAxis as { min: number; max: number };
-    expect(yAxis.max).toBeGreaterThan(50);
+    const yAxis = opt.yAxis as { max: number };
+    // 50 * 1.25 = 62.5, next power of 10 is 100.
+    expect(yAxis.max).toBe(100);
   });
 
   it('falls back to a non-zero yAxis max when there is no data and no tiers', () => {
     const opt = buildBurnRateOption({ tiers: [] });
     const yAxis = opt.yAxis as { min: number; max: number };
     expect(yAxis.max).toBeGreaterThan(0);
+  });
+
+  it('floors sub-0.1 and zero sample points at the axis floor so the log scale renders them', () => {
+    const opt = buildBurnRateOption({
+      tiers: [
+        {
+          label: 'Page · Quick',
+          severity: 'page',
+          multiplier: 14,
+          color: '#A00',
+          // Mix: a real signal, a genuine zero, and a sub-floor value. On a
+          // log axis only the first would render natively — the other two
+          // need to be lifted to Y_AXIS_FLOOR (0.1) or they break the line.
+          data: [
+            [1, 2],
+            [2, 0],
+            [3, 0.05],
+          ],
+        },
+      ],
+    });
+    const seriesList = opt.series as Array<{ data: Array<[number, number, number]> }>;
+    expect(seriesList[0].data).toEqual([
+      [1, 2, 2],
+      [2, 0.1, 0],
+      [3, 0.1, 0.05],
+    ]);
   });
 });
 
