@@ -108,7 +108,31 @@ describe('SloHealthPanel', () => {
     expect(screen.getByTestId('sloHealthPanelChip-warning')).toHaveTextContent('1 warning');
     expect(screen.getByTestId('sloHealthPanelChip-noData')).toHaveTextContent('1 no data');
     expect(screen.getByTestId('sloHealthPanelChip-ok')).toHaveTextContent('2 OK');
-    expect(screen.getByTestId('sloHealthPanelChip-disabled')).toHaveTextContent('0 disabled');
+    expect(screen.queryByTestId('sloHealthPanelChip-disabled')).toBeNull();
+  });
+
+  it('renders only non-zero chips when some tiers are empty', () => {
+    render(
+      <SloHealthPanel
+        aggregate={makeBucket({
+          total: 5,
+          ok: 5,
+          hasAvailability: true,
+          hasLatency: true,
+          missingCanonicalPair: false,
+        })}
+        bySvc={new Map([['foo', makeBucket({ missingCanonicalPair: false })]])}
+        allServices={['foo']}
+        isLoading={false}
+        error={undefined}
+        onRetry={jest.fn()}
+      />
+    );
+    expect(screen.getByTestId('sloHealthPanelChip-ok')).toHaveTextContent('5 OK');
+    expect(screen.queryByTestId('sloHealthPanelChip-breached')).toBeNull();
+    expect(screen.queryByTestId('sloHealthPanelChip-warning')).toBeNull();
+    expect(screen.queryByTestId('sloHealthPanelChip-noData')).toBeNull();
+    expect(screen.queryByTestId('sloHealthPanelChip-disabled')).toBeNull();
   });
 
   it('collapses the left column to an empty-state message when aggregate.total=0', () => {

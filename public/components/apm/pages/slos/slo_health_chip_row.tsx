@@ -84,7 +84,14 @@ export function chipSpecsForBucket(b: SloHealthBucket): ChipSpec[] {
 }
 
 export const ChipRow: React.FC<{ aggregate: SloHealthBucket }> = ({ aggregate }) => {
-  const specs = chipSpecsForBucket(aggregate);
+  // Hide zero-count chips so color retains its semantic meaning: a gray "0
+  // breached" chip reads the same as a gray "33 no data" chip, which collapses
+  // a good state into an unknown one. Callers already guard the all-zero case
+  // with their own empty-state UI, so rendering nothing here is safe.
+  const specs = chipSpecsForBucket(aggregate).filter((spec) => spec.count > 0);
+  if (specs.length === 0) {
+    return null;
+  }
   return (
     <EuiFlexGroup
       gutterSize="m"
@@ -98,12 +105,7 @@ export const ChipRow: React.FC<{ aggregate: SloHealthBucket }> = ({ aggregate })
     >
       {specs.map((spec) => (
         <EuiFlexItem key={spec.key} grow={false}>
-          <EuiHealth
-            // Subdued gray on count=0 keeps the row layout stable across refreshes,
-            // per plan §3.2 chip discipline.
-            color={spec.count === 0 ? 'subdued' : spec.color}
-            data-test-subj={`sloHealthPanelChip-${spec.key}`}
-          >
+          <EuiHealth color={spec.color} data-test-subj={`sloHealthPanelChip-${spec.key}`}>
             {spec.label(spec.count)}
           </EuiHealth>
         </EuiFlexItem>
