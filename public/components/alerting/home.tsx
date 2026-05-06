@@ -4,7 +4,7 @@
  */
 
 import React, { useEffect, useMemo } from 'react';
-import { HashRouter, Route } from 'react-router-dom';
+import { HashRouter, Route, Switch } from 'react-router-dom';
 import { coreRefs } from '../../framework/core_refs';
 import {
   ALERT_MANAGER_DEFAULT_DATASOURCES_SETTING,
@@ -57,17 +57,26 @@ export const AlertingHome = () => {
 
   if (!apiClient) return null;
 
+  // Path-based routes so external deep links (`#/rules?slo_id=<id>`,
+  // `#/alerts?...`, `#/routing`) land on the correct tab. Query-string
+  // params are parsed inside `AlarmsPage` and applied as label filters.
+  const renderPage = (initialTab?: 'alerts' | 'rules' | 'routing') => () => (
+    <AlarmsPage
+      apiClient={apiClient}
+      defaultDatasources={defaultDatasources}
+      maxDatasources={maxDatasources}
+      initialTab={initialTab}
+    />
+  );
+
   return (
     <HashRouter>
-      <Route
-        render={() => (
-          <AlarmsPage
-            apiClient={apiClient}
-            defaultDatasources={defaultDatasources}
-            maxDatasources={maxDatasources}
-          />
-        )}
-      />
+      <Switch>
+        <Route path="/rules" render={renderPage('rules')} />
+        <Route path="/routing" render={renderPage('routing')} />
+        <Route path="/alerts" render={renderPage('alerts')} />
+        <Route render={renderPage()} />
+      </Switch>
     </HashRouter>
   );
 };

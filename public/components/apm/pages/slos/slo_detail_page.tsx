@@ -39,6 +39,7 @@ import { TimeRangePicker } from '../../shared/components/time_filter';
 import { TimeRange } from '../../common/types/service_types';
 import { SloVisualizations } from './slo_visualizations';
 import { SloMetadataPanel } from './slo_metadata_panel';
+import { SloAlertsPanel } from './slo_alerts_panel';
 import type { RuleHealthResponse, SloApiClient } from './slo_api_client';
 import type {
   Objective,
@@ -747,6 +748,10 @@ export const SloDetailPage: React.FC<SloDetailPageProps> = ({
                 data-test-subj="slosDetailObjectivesTable"
               />
             </EuiPanel>
+
+            <EuiSpacer size="m" />
+
+            <SloAlertsPanel doc={doc} ruleHealth={ruleHealth} />
 
             <EuiSpacer size="m" />
 

@@ -23,6 +23,7 @@ import {
   EuiFlexItem,
   EuiButton,
   EuiButtonEmpty,
+  EuiLink,
   EuiPanel,
   EuiDescriptionList,
   EuiBasicTable,
@@ -34,6 +35,8 @@ import {
   EuiLoadingContent,
   EuiStat,
 } from '@elastic/eui';
+import { coreRefs } from '../../framework/core_refs';
+import { observabilityApmSloID } from '../../../common/constants/apm';
 import { EchartsRender } from './echarts_render';
 import {
   AlertHistoryEntry,
@@ -318,6 +321,24 @@ export const MonitorDetailFlyout: React.FC<MonitorDetailFlyoutProps> = ({
               </EuiFlexGroup>
             </EuiFlexItem>
           </EuiFlexGroup>
+          {monitor.labels?.slo_id && (
+            <>
+              <EuiSpacer size="xs" />
+              <EuiLink
+                data-test-subj="monitorDetailFlyoutSloBacklink"
+                onClick={() => {
+                  const sloId = monitor.labels.slo_id;
+                  coreRefs?.application?.navigateToApp(observabilityApmSloID, {
+                    path: `#/slos/${encodeURIComponent(sloId)}`,
+                  });
+                  window.dispatchEvent(new HashChangeEvent('hashchange'));
+                }}
+              >
+                <EuiIcon type="link" size="s" /> View SLO:{' '}
+                {monitor.labels.slo_name ?? monitor.labels.slo_id}
+              </EuiLink>
+            </>
+          )}
           <EuiSpacer size="s" />
           {/* Quick actions */}
           <EuiFlexGroup gutterSize="s" responsive={false}>

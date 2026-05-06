@@ -14,6 +14,15 @@ jest.mock('echarts', () => ({
   })),
 }));
 
+const mockNavigateToApp = jest.fn();
+jest.mock('../../../framework/core_refs', () => ({
+  coreRefs: {
+    application: {
+      navigateToApp: (...args: unknown[]) => mockNavigateToApp(...args),
+    },
+  },
+}));
+
 global.ResizeObserver = jest.fn().mockImplementation(() => ({
   observe: jest.fn(),
   disconnect: jest.fn(),
@@ -51,6 +60,10 @@ const mockApiClient = {
 };
 
 describe('MonitorDetailFlyout', () => {
+  beforeEach(() => {
+    mockNavigateToApp.mockClear();
+  });
+
   it('renders flyout with monitor name', () => {
     const { getByText } = render(
       <MonitorDetailFlyout
@@ -77,5 +90,68 @@ describe('MonitorDetailFlyout', () => {
     );
     fireEvent.click(getByLabelText('Close this dialog'));
     expect(onClose).toHaveBeenCalled();
+  });
+
+  it('does not render the SLO backlink when rule has no slo_id label', () => {
+    const { queryByTestId } = render(
+      <MonitorDetailFlyout
+        monitor={mockMonitor}
+        apiClient={mockApiClient as never}
+        onClose={jest.fn()}
+        onDelete={jest.fn()}
+        onClone={jest.fn()}
+      />
+    );
+    expect(queryByTestId('monitorDetailFlyoutSloBacklink')).not.toBeInTheDocument();
+  });
+
+  it('renders the SLO backlink with slo_name when present', () => {
+    const { getByTestId } = render(
+      <MonitorDetailFlyout
+        monitor={{
+          ...mockMonitor,
+          labels: { slo_id: 'slo-abc', slo_name: 'api-availability' },
+        }}
+        apiClient={mockApiClient as never}
+        onClose={jest.fn()}
+        onDelete={jest.fn()}
+        onClone={jest.fn()}
+      />
+    );
+    const link = getByTestId('monitorDetailFlyoutSloBacklink');
+    expect(link).toBeInTheDocument();
+    expect(link).toHaveTextContent('View SLO: api-availability');
+  });
+
+  it('falls back to slo_id when slo_name is absent', () => {
+    const { getByTestId } = render(
+      <MonitorDetailFlyout
+        monitor={{ ...mockMonitor, labels: { slo_id: 'slo-legacy' } }}
+        apiClient={mockApiClient as never}
+        onClose={jest.fn()}
+        onDelete={jest.fn()}
+        onClone={jest.fn()}
+      />
+    );
+    expect(getByTestId('monitorDetailFlyoutSloBacklink')).toHaveTextContent('View SLO: slo-legacy');
+  });
+
+  it('navigates to the SLO detail page when the backlink is clicked', () => {
+    const { getByTestId } = render(
+      <MonitorDetailFlyout
+        monitor={{
+          ...mockMonitor,
+          labels: { slo_id: 'slo abc/123', slo_name: 'payments-latency' },
+        }}
+        apiClient={mockApiClient as never}
+        onClose={jest.fn()}
+        onDelete={jest.fn()}
+        onClone={jest.fn()}
+      />
+    );
+    fireEvent.click(getByTestId('monitorDetailFlyoutSloBacklink'));
+    expect(mockNavigateToApp).toHaveBeenCalledWith('observability-apm-slo', {
+      path: `#/slos/${encodeURIComponent('slo abc/123')}`,
+    });
   });
 });

@@ -32,6 +32,8 @@ import { usePromQLChartData } from '../../shared/hooks/use_promql_chart_data';
 import { TimeRange } from '../../common/types/service_types';
 import type { BurnRateConfig, Objective, SloDocument } from '../../../../../common/slo/slo_types';
 import { buildErrorRatioExprForWindow } from './slo_query_builders';
+import { coreRefs } from '../../../../framework/core_refs';
+import { observabilityAlertingID } from '../../../../../common/constants/shared';
 
 export interface SloBurnRatePanelProps {
   slo: SloDocument;
@@ -236,6 +238,25 @@ const TierCard: React.FC<TierCardProps> = ({
 
   const waiting = collapseWhenNoData && health === 'no_data' && !loading;
 
+  // Deep-link into Alert Manager filtered to this SLO's `slo_id` + this
+  // tier's `slo_burn_rate_multiplier` so operators land on the single rule
+  // that corresponds to this card. Gated on `createAlarm` (tier deploys an
+  // alerting rule) AND `mode !== 'shadow'` (shadow SLOs skip alert rules
+  // entirely). `tier.burnRateMultiplier` is matched against the label as
+  // written by the rule generator — integers render as "14", decimals as
+  // "14.4", etc. (see common/slo/slo_promql_generator.ts).
+  const deployAlarm = tier.createAlarm && slo.spec.mode !== 'shadow';
+  const handleViewInAlertManager = () => {
+    const params = new URLSearchParams({
+      slo_id: slo.id,
+      slo_burn_rate_multiplier: String(tier.burnRateMultiplier),
+    });
+    coreRefs?.application?.navigateToApp(observabilityAlertingID, {
+      path: `#/rules?${params.toString()}`,
+    });
+    window.dispatchEvent(new HashChangeEvent('hashchange'));
+  };
+
   return (
     <EuiPanel
       paddingSize="s"
@@ -325,6 +346,17 @@ const TierCard: React.FC<TierCardProps> = ({
               threshold {formatPct(threshold)} · for {tier.forDuration}
             </EuiText>
           </EuiToolTip>
+          {deployAlarm && (
+            <>
+              <EuiSpacer size="xs" />
+              <EuiLink
+                onClick={handleViewInAlertManager}
+                data-test-subj={`slosBurnrateTierViewInAlertManager-${tier.shortWindow}-${tier.longWindow}`}
+              >
+                View in Alert Manager ↗
+              </EuiLink>
+            </>
+          )}
         </>
       )}
     </EuiPanel>

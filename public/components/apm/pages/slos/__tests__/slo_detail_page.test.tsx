@@ -28,6 +28,9 @@ jest.mock('../slo_visualizations', () => ({
 jest.mock('../slo_metadata_panel', () => ({
   SloMetadataPanel: () => <div data-test-subj="slosMetadataPanelStub" />,
 }));
+jest.mock('../slo_alerts_panel', () => ({
+  SloAlertsPanel: () => <div data-test-subj="slosAlertsPanelStub" />,
+}));
 
 type FullDoc = SloDocument & { liveStatus: SloLiveStatus };
 

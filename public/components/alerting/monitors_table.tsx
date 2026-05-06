@@ -112,6 +112,13 @@ interface MonitorsTableProps {
   maxDatasources: number;
   /** Callback fired when user tries to exceed `maxDatasources`. */
   onDatasourceCapReached: () => void;
+  /**
+   * Label filters to seed the filter state with on mount. Populated by the
+   * parent `AlarmsPage` from URL query params so external deep links (e.g.
+   * `#/rules?slo_id=<id>`) can land pre-filtered. One-way URL → state;
+   * subsequent in-page mutations do NOT round-trip back to the URL.
+   */
+  initialLabelFilters?: Record<string, string[]>;
 }
 
 // ============================================================================
@@ -427,9 +434,16 @@ export const MonitorsTable: React.FC<MonitorsTableProps> = ({
   onDatasourceChange,
   maxDatasources,
   onDatasourceCapReached,
+  initialLabelFilters,
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
-  const [filters, setFilters] = useState<FilterState>(emptyFilters());
+  const [filters, setFilters] = useState<FilterState>(() => {
+    const base = emptyFilters();
+    if (initialLabelFilters && Object.keys(initialLabelFilters).length > 0) {
+      base.labels = { ...initialLabelFilters };
+    }
+    return base;
+  });
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [visibleColumns, setVisibleColumns] = useState<Set<ColumnId>>(new Set(DEFAULT_VISIBLE));
   const [savedSearches, setSavedSearches] = useState<SavedSearch[]>([]);

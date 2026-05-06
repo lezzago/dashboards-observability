@@ -7,7 +7,8 @@
  * Alert Manager UI — single-datasource selection with server-side pagination.
  * Prometheus datasources are decomposed into selectable workspaces.
  */
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import { useLocation } from 'react-router-dom';
 import { EuiLink, EuiSpacer, EuiTab, EuiTabs, EuiCallOut } from '@elastic/eui';
 import { toMountPoint } from '../../../../../src/plugins/opensearch_dashboards_react/public';
 import { useToast } from '../common/toast';
@@ -53,6 +54,11 @@ interface AlarmsPageProps {
   defaultDatasources: string[];
   /** Cap on concurrently selected datasources (from uiSettings). */
   maxDatasources: number;
+  /**
+   * Tab to open on first mount (driven by URL path in the HashRouter at
+   * `home.tsx`). When undefined, defaults to 'alerts'.
+   */
+  initialTab?: TabId;
 }
 
 // Persist selection by datasource NAME. The alerting plugin reassigns `ds-N`
@@ -132,8 +138,29 @@ export const AlarmsPage: React.FC<AlarmsPageProps> = ({
   apiClient,
   defaultDatasources,
   maxDatasources,
+  initialTab,
 }) => {
-  const [activeTab, setActiveTab] = useState<TabId>('alerts');
+  const location = useLocation();
+
+  // Parse URL query params into an initial label-filter map. Every param
+  // (no reserved keys today) is treated as a label=value filter and
+  // forwarded to the rules tab's MonitorsTable. One-way URL → state: the
+  // page does not round-trip mutations back to the URL, so subsequent
+  // in-page filter changes don't stomp the user's bookmarked link.
+  const initialLabelFilters = useMemo<Record<string, string[]>>(() => {
+    if (!location?.search) return {};
+    const params = new URLSearchParams(location.search);
+    const out: Record<string, string[]> = {};
+    params.forEach((value, key) => {
+      if (!key || value === '') return;
+      // Single value per key, one key per visit is enough to close the
+      // audit. Callers using the same key twice get the last value.
+      out[key] = [value];
+    });
+    return out;
+  }, [location?.search]);
+
+  const [activeTab, setActiveTab] = useState<TabId>(initialTab ?? 'alerts');
   const [datasources, setDatasources] = useState<Datasource[]>([]);
   const [selectedDsIds, setSelectedDsIds] = useState<string[]>([]);
   const [dataLoading, setDataLoading] = useState(false);
@@ -781,6 +808,7 @@ export const AlarmsPage: React.FC<AlarmsPageProps> = ({
           onDelete={handleDeleteRules}
           onClone={handleCloneRule}
           onImport={handleImportMonitors}
+          initialLabelFilters={initialLabelFilters}
           // TODO(alert-manager): Restore Create Monitor button once creation flow is ready
           /* onCreateMonitor={(type) => {
             if (type === 'logs') {
