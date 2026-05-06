@@ -35,7 +35,7 @@ import {
 } from '@elastic/eui';
 import { i18n } from '@osd/i18n';
 import type { SloHealthState, SloSummary } from '../../../../../common/slo/slo_types';
-import { formatPct } from '../../../../../common/slo/format';
+import { formatPct, SLO_PRECISION, TABULAR_NUMS_STYLE } from '../../../../../common/slo/format';
 import { getSloHealthColor } from '../../../../../common/slo/state';
 import { SloHealthAccessError, SloHealthBucket } from '../slos/slo_health_summary';
 import { ChipRow } from '../slos/slo_health_chip_row';
@@ -244,7 +244,7 @@ function worstObjectiveCurrent(slo: SloSummary): string {
     o.errorBudgetRemaining < acc.errorBudgetRemaining ? o : acc
   );
   if (worst.currentValueUnit === 'ratio') {
-    return formatPct(Math.max(0, worst.currentValue), { decimals: 2 });
+    return formatPct(Math.max(0, worst.currentValue), { decimals: SLO_PRECISION.attainment });
   }
   if (worst.currentValueUnit === 'seconds') {
     return `${worst.currentValue.toFixed(3)}s`;
@@ -253,7 +253,7 @@ function worstObjectiveCurrent(slo: SloSummary): string {
 }
 
 function worstTargetLabel(slo: SloSummary): string {
-  return `${(slo.worstTarget * 100).toFixed(slo.worstTarget >= 0.999 ? 2 : 1)}%`;
+  return formatPct(slo.worstTarget, { decimals: SLO_PRECISION.target });
 }
 
 // States where the SLO isn't producing a meaningful "current" value. Rendering
@@ -325,7 +325,11 @@ export const ServiceSloTab: React.FC<ServiceSloTabProps> = ({
       },
       {
         name: t.colTarget,
-        render: (row: SloSummary) => <EuiText size="s">{worstTargetLabel(row)}</EuiText>,
+        render: (row: SloSummary) => (
+          <EuiText size="s">
+            <span style={TABULAR_NUMS_STYLE}>{worstTargetLabel(row)}</span>
+          </EuiText>
+        ),
       },
       {
         name: t.colCurrent,
@@ -342,7 +346,11 @@ export const ServiceSloTab: React.FC<ServiceSloTabProps> = ({
               </EuiBadge>
             );
           }
-          return <EuiText size="s">{worstObjectiveCurrent(row)}</EuiText>;
+          return (
+            <EuiText size="s">
+              <span style={TABULAR_NUMS_STYLE}>{worstObjectiveCurrent(row)}</span>
+            </EuiText>
+          );
         },
       },
       {

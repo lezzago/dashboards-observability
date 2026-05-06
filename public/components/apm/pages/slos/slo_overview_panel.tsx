@@ -32,7 +32,7 @@ import {
 } from '@elastic/eui';
 import { euiThemeVars } from '@osd/ui-shared-deps/theme';
 import type { SloHealthState, SloSummary } from '../../../../../common/slo/slo_types';
-import { formatPct } from '../../../../../common/slo/format';
+import { formatPct, SLO_PRECISION, TABULAR_NUMS_STYLE } from '../../../../../common/slo/format';
 
 export interface SloOverviewPanelProps {
   items: SloSummary[];
@@ -111,7 +111,7 @@ const MiniBudgetBar: React.FC<{ remaining: number }> = ({ remaining }) => {
  * filter; the active tile gets a tinted background.
  */
 const KpiCell: React.FC<{
-  value: number | string;
+  value: React.ReactNode;
   label: string;
   accent: string;
   tooltip?: string;
@@ -448,7 +448,13 @@ export const SloOverviewPanel: React.FC<SloOverviewPanelProps> = ({
         >
           <KpiCell
             value={
-              stats.reportingCount > 0 ? formatPct(stats.avgBudgetRemaining, { decimals: 1 }) : '—'
+              stats.reportingCount > 0 ? (
+                <span style={TABULAR_NUMS_STYLE}>
+                  {formatPct(stats.avgBudgetRemaining, { decimals: SLO_PRECISION.budget })}
+                </span>
+              ) : (
+                '—'
+              )
             }
             label={stats.reportingCount > 0 ? 'Aggregate budget' : 'No reporting SLOs'}
             accent={

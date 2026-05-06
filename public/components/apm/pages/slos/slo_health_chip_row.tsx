@@ -17,6 +17,7 @@ import React from 'react';
 import { EuiFlexGroup, EuiFlexItem, EuiHealth } from '@elastic/eui';
 import { i18n } from '@osd/i18n';
 import type { SloHealthBucket } from './slo_health_summary';
+import { TABULAR_NUMS_STYLE } from '../../../../../common/slo/format';
 
 export interface ChipSpec {
   key: 'breached' | 'warning' | 'noData' | 'ok' | 'disabled';
@@ -106,7 +107,7 @@ export const ChipRow: React.FC<{ aggregate: SloHealthBucket }> = ({ aggregate })
       {specs.map((spec) => (
         <EuiFlexItem key={spec.key} grow={false}>
           <EuiHealth color={spec.color} data-test-subj={`sloHealthPanelChip-${spec.key}`}>
-            {spec.label(spec.count)}
+            <span style={TABULAR_NUMS_STYLE}>{spec.label(spec.count)}</span>
           </EuiHealth>
         </EuiFlexItem>
       ))}

@@ -19,6 +19,7 @@ import {
   EuiEmptyPrompt,
   EuiFlexGroup,
   EuiFlexItem,
+  EuiHealth,
   EuiIcon,
   EuiLoadingSpinner,
   EuiPage,
@@ -27,6 +28,7 @@ import {
   EuiPageContentBody,
   EuiPanel,
   EuiSpacer,
+  EuiStat,
   EuiText,
 } from '@elastic/eui';
 import { euiThemeVars } from '@osd/ui-shared-deps/theme';
@@ -44,8 +46,8 @@ import type {
   SloLiveStatus,
   SloSummary,
 } from '../../../../../common/slo/slo_types';
-import { getSloHealthColor } from '../../../../../common/slo/state';
-import { formatPct } from '../../../../../common/slo/format';
+import { getSloHealthColor, getSloHealthLabel } from '../../../../../common/slo/state';
+import { formatPct, SLO_PRECISION, TABULAR_NUMS_STYLE } from '../../../../../common/slo/format';
 import { templateIconFor } from './template_icons';
 
 export interface SloDetailPageProps {
@@ -63,11 +65,6 @@ type FullDoc = SloDocument & {
    */
   recordingFingerprintRefcounts?: Record<string, number>;
 };
-
-/** Strip trailing zeros from a target/attainment percentage for compact rendering. */
-function formatTightPct(value: number, decimals = 3): string {
-  return formatPct(value, { decimals }).replace(/\.?0+%$/, '%');
-}
 
 function describeWindow(slo: SloDocument): string {
   return slo.spec.window.type === 'rolling'
@@ -107,11 +104,12 @@ interface DetailHeaderProps {
 }
 
 /**
- * Detail page header. Promotes health to the left edge as a coloured dot,
- * followed by name + a compact metadata strip (template icon · SLI leaf type ·
- * attainment/target · window). Badges (Enabled / mode) only render when the
- * SLO deviates from the majority defaults — matches the listing's majority-
- * value trait logic so operators aren't distracted by "Enabled" on every page.
+ * Detail page header. Left edge: EuiHealth (colored dot + state label — VD4
+ * safe). Middle: name + a compact metadata strip (template icon · SLI leaf
+ * type · window). Right edge: EuiStat hero promoting attainment with a
+ * target-delta subtitle (VD1 + VD15). Badges (Disabled / shadow) only render
+ * when the SLO deviates from the majority defaults so operators aren't
+ * distracted by "Enabled" on every page.
  *
  * Summary + SLI details nest inside a pre-collapsed accordion so the header
  * stays compact while keeping the descriptive config one click away — the
@@ -132,38 +130,37 @@ const DetailHeader: React.FC<DetailHeaderProps> = ({
     doc.liveStatus.objectives.find((o) => o.objectiveName === primaryObjective.name)?.attainment ??
     doc.liveStatus.objectives[0]?.attainment ??
     null;
-  const healthHex = (() => {
-    switch (getSloHealthColor(doc.liveStatus.state)) {
-      case 'danger':
-        return euiThemeVars.euiColorDanger;
-      case 'warning':
-        return euiThemeVars.euiColorWarning;
-      case 'success':
-        return euiThemeVars.euiColorSuccess;
-      case 'subdued':
-        return euiThemeVars.euiColorMediumShade;
-      default:
-        return euiThemeVars.euiColorMediumShade;
-    }
-  })();
+  const healthColor = getSloHealthColor(doc.liveStatus.state);
+  const healthLabel = getSloHealthLabel(doc.liveStatus.state);
+  const targetLabel = formatPct(primaryObjective.target, { decimals: SLO_PRECISION.target });
+  const attainmentLabel =
+    attainment !== null ? formatPct(attainment, { decimals: SLO_PRECISION.attainment }) : '—';
+
+  // Delta from target, in percentage points. Positive = above target (good);
+  // negative = below. Only rendered when attainment is present — a null
+  // attainment means the SLO isn't producing samples yet (no delta to show).
+  const attainmentDelta = attainment !== null ? (attainment - primaryObjective.target) * 100 : null;
+  const attainmentStatColor =
+    attainment === null ? 'subdued' : attainment >= primaryObjective.target ? 'success' : 'danger';
+  const deltaColor =
+    attainmentDelta === null
+      ? euiThemeVars.euiTextSubduedColor
+      : attainmentDelta >= 0
+      ? euiThemeVars.euiColorSuccessText
+      : euiThemeVars.euiColorDangerText;
+  const deltaSign = attainmentDelta !== null && attainmentDelta >= 0 ? '+' : '';
 
   return (
     <EuiPanel data-test-subj="slosDetailHeader">
-      <EuiFlexGroup alignItems="flexStart" gutterSize="m" responsive={false}>
+      <EuiFlexGroup alignItems="center" gutterSize="m" responsive={false}>
         <EuiFlexItem grow={false}>
-          <span
-            aria-label={`Health: ${doc.liveStatus.state}`}
-            title={doc.liveStatus.state}
+          <EuiHealth
+            color={healthColor}
             data-test-subj="slosDetailHealthDot"
-            style={{
-              display: 'inline-block',
-              width: 28,
-              height: 28,
-              borderRadius: '50%',
-              background: healthHex,
-              marginTop: 4,
-            }}
-          />
+            aria-label={`Health: ${healthLabel}`}
+          >
+            <span style={{ fontWeight: 600 }}>{healthLabel}</span>
+          </EuiHealth>
         </EuiFlexItem>
         <EuiFlexItem>
           <EuiText size="m">
@@ -185,17 +182,6 @@ const DetailHeader: React.FC<DetailHeaderProps> = ({
                 </EuiText>
               </EuiFlexItem>
             )}
-            <EuiFlexItem grow={false}>
-              <EuiText size="s" color="subdued">
-                ·
-              </EuiText>
-            </EuiFlexItem>
-            <EuiFlexItem grow={false}>
-              <EuiText size="s" color="subdued">
-                attainment <strong>{attainment !== null ? formatTightPct(attainment) : '—'}</strong>{' '}
-                / target <strong>{formatTightPct(primaryObjective.target)}</strong>
-              </EuiText>
-            </EuiFlexItem>
             <EuiFlexItem grow={false}>
               <EuiText size="s" color="subdued">
                 ·
@@ -233,6 +219,36 @@ const DetailHeader: React.FC<DetailHeaderProps> = ({
             </EuiBadge>
           </EuiFlexItem>
         )}
+        <EuiFlexItem grow={false}>
+          <div style={{ textAlign: 'right', minWidth: 140 }}>
+            <EuiStat
+              title={<span style={TABULAR_NUMS_STYLE}>{attainmentLabel}</span>}
+              titleSize="l"
+              titleColor={attainmentStatColor}
+              description="Attainment"
+              reverse
+              textAlign="right"
+              data-test-subj="slosDetailAttainmentHero"
+            />
+            <EuiText
+              size="xs"
+              color="subdued"
+              textAlign="right"
+              data-test-subj="slosDetailAttainmentTargetDelta"
+            >
+              <span style={TABULAR_NUMS_STYLE}>Target {targetLabel}</span>
+              {attainmentDelta !== null && (
+                <>
+                  {' · '}
+                  <span style={{ ...TABULAR_NUMS_STYLE, color: deltaColor, fontWeight: 600 }}>
+                    {deltaSign}
+                    {attainmentDelta.toFixed(SLO_PRECISION.attainment)} pp
+                  </span>
+                </>
+              )}
+            </EuiText>
+          </div>
+        </EuiFlexItem>
       </EuiFlexGroup>
 
       <EuiSpacer size="s" />
@@ -294,7 +310,14 @@ interface ObjectiveRow {
 
 const OBJECTIVE_COLUMNS: Array<EuiBasicTableColumn<ObjectiveRow>> = [
   { field: 'displayName', name: 'Name', width: '30%' },
-  { field: 'target', name: 'Target', width: '15%', render: (t: number) => formatTightPct(t) },
+  {
+    field: 'target',
+    name: 'Target',
+    width: '15%',
+    render: (t: number) => (
+      <span style={TABULAR_NUMS_STYLE}>{formatPct(t, { decimals: SLO_PRECISION.target })}</span>
+    ),
+  },
   { field: 'threshold', name: 'Threshold', width: '20%' },
   { field: 'alertsEnabled', name: 'Alerts enabled', width: '20%' },
   { field: 'rules', name: 'Rules', width: '15%' },

@@ -48,7 +48,7 @@ import {
   buildGoodEventsCountQuery,
   buildTotalEventsCountQuery,
 } from './slo_query_builders';
-import { formatPct } from '../../../../../common/slo/format';
+import { formatPct, SLO_PRECISION, TABULAR_NUMS_STYLE } from '../../../../../common/slo/format';
 
 export interface SloBudgetPanelProps {
   slo: SloDocument;
@@ -446,11 +446,16 @@ export const SloBudgetPanel: React.FC<SloBudgetPanelProps> = ({
             <h4>Error budget</h4>
           </EuiText>
           <EuiText size="xs" color="subdued">
-            {slo.spec.window.type === 'rolling'
-              ? `Rolling ${slo.spec.window.duration} window — target ${formatPct(target, {
-                  decimals: 3,
-                }).replace(/\.?0+%$/, '%')}`
-              : `Calendar ${slo.spec.window.period} window`}
+            {slo.spec.window.type === 'rolling' ? (
+              <>
+                Rolling {slo.spec.window.duration} window — target{' '}
+                <span style={TABULAR_NUMS_STYLE}>
+                  {formatPct(target, { decimals: SLO_PRECISION.target })}
+                </span>
+              </>
+            ) : (
+              `Calendar ${slo.spec.window.period} window`
+            )}
           </EuiText>
         </EuiFlexItem>
       </EuiFlexGroup>
@@ -468,11 +473,19 @@ export const SloBudgetPanel: React.FC<SloBudgetPanelProps> = ({
                 <span>Budget remaining</span>
               </EuiToolTip>
             }
-            title={formatPct(remaining, { decimals: 1 })}
+            title={
+              <span style={TABULAR_NUMS_STYLE}>
+                {formatPct(remaining, { decimals: SLO_PRECISION.budget })}
+              </span>
+            }
             data-test-subj="slosBudgetRemaining"
           />
           <EuiText size="xs" color="subdued">
-            budget {formatPct(errorBudget, { decimals: 3 }).replace(/\.?0+%$/, '%')} total
+            budget{' '}
+            <span style={TABULAR_NUMS_STYLE}>
+              {formatPct(errorBudget, { decimals: SLO_PRECISION.budget })}
+            </span>{' '}
+            total
           </EuiText>
         </EuiFlexItem>
 
@@ -486,11 +499,13 @@ export const SloBudgetPanel: React.FC<SloBudgetPanelProps> = ({
               </EuiToolTip>
             }
             title={
-              timeLeftMs === null
-                ? '—'
-                : timeLeftMs === 0
-                ? 'exhausted'
-                : formatDurationMs(timeLeftMs)
+              <span style={TABULAR_NUMS_STYLE}>
+                {timeLeftMs === null
+                  ? '—'
+                  : timeLeftMs === 0
+                  ? 'exhausted'
+                  : formatDurationMs(timeLeftMs)}
+              </span>
             }
             titleColor={
               timeLeftMs !== null && timeLeftMs < 3_600_000
@@ -516,14 +531,17 @@ export const SloBudgetPanel: React.FC<SloBudgetPanelProps> = ({
               </EuiToolTip>
             }
             title={
-              <span style={{ color: attainmentColor }}>
-                {formatPct(attainment, { decimals: 3 }).replace(/\.?0+%$/, '%')}
+              <span style={{ color: attainmentColor, ...TABULAR_NUMS_STYLE }}>
+                {formatPct(attainment, { decimals: SLO_PRECISION.attainment })}
               </span>
             }
             data-test-subj="slosBudgetAttainment"
           />
           <EuiText size="xs" color="subdued">
-            target {formatPct(target, { decimals: 3 }).replace(/\.?0+%$/, '%')}
+            target{' '}
+            <span style={TABULAR_NUMS_STYLE}>
+              {formatPct(target, { decimals: SLO_PRECISION.target })}
+            </span>
           </EuiText>
         </EuiFlexItem>
 
@@ -537,7 +555,7 @@ export const SloBudgetPanel: React.FC<SloBudgetPanelProps> = ({
               </EuiToolTip>
             }
             title={
-              <span style={{ color: eventsColor }}>
+              <span style={{ color: eventsColor, ...TABULAR_NUMS_STYLE }}>
                 {eventsAvailable ? (
                   <>
                     {formatCount(goodEvents)} / {formatCount(totalEvents)}
@@ -550,9 +568,13 @@ export const SloBudgetPanel: React.FC<SloBudgetPanelProps> = ({
             data-test-subj="slosBudgetEvents"
           />
           <EuiText size="xs" color="subdued">
-            {eventsAvailable
-              ? `${formatPct(eventsRatio as number, { decimals: 2 })}`
-              : 'waiting for samples'}
+            {eventsAvailable ? (
+              <span style={TABULAR_NUMS_STYLE}>
+                {formatPct(eventsRatio as number, { decimals: SLO_PRECISION.eventsRatio })}
+              </span>
+            ) : (
+              'waiting for samples'
+            )}
           </EuiText>
         </EuiFlexItem>
       </EuiFlexGroup>
@@ -560,7 +582,10 @@ export const SloBudgetPanel: React.FC<SloBudgetPanelProps> = ({
       <EuiSpacer size="m" />
 
       <EuiText size="xs" color="subdued">
-        <strong>Budget consumed</strong> — {formatPct(Math.max(0, 1 - remaining), { decimals: 1 })}{' '}
+        <strong>Budget consumed</strong> —{' '}
+        <span style={TABULAR_NUMS_STYLE}>
+          {formatPct(Math.max(0, 1 - remaining), { decimals: SLO_PRECISION.budget })}
+        </span>{' '}
         of allowed
       </EuiText>
       <EuiSpacer size="xs" />
