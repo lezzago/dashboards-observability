@@ -147,9 +147,19 @@ export const AlarmsPage: React.FC<AlarmsPageProps> = ({
   // forwarded to the rules tab's MonitorsTable. One-way URL → state: the
   // page does not round-trip mutations back to the URL, so subsequent
   // in-page filter changes don't stomp the user's bookmarked link.
+  //
+  // Extract the query string from `window.location.hash` rather than
+  // `useLocation().search`: this app runs under a HashRouter, and
+  // react-router-dom v5 parses `#/rules?slo_id=X` as
+  // `{ pathname: '/rules', search: '' }` — the `?...` segment lives inside
+  // the hash, not in `window.location.search`. Using `location.search`
+  // silently dropped every deep-link filter.
   const initialLabelFilters = useMemo<Record<string, string[]>>(() => {
-    if (!location?.search) return {};
-    const params = new URLSearchParams(location.search);
+    void location; // keep the dep stable across hash-only navigations
+    const hash = typeof window !== 'undefined' ? window.location.hash : '';
+    const q = hash.indexOf('?');
+    if (q < 0) return {};
+    const params = new URLSearchParams(hash.slice(q + 1));
     const out: Record<string, string[]> = {};
     params.forEach((value, key) => {
       if (!key || value === '') return;
@@ -158,7 +168,7 @@ export const AlarmsPage: React.FC<AlarmsPageProps> = ({
       out[key] = [value];
     });
     return out;
-  }, [location?.search]);
+  }, [location?.search, location?.pathname, location?.hash]);
 
   const [activeTab, setActiveTab] = useState<TabId>(initialTab ?? 'alerts');
   const [datasources, setDatasources] = useState<Datasource[]>([]);
