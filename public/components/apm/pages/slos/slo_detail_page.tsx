@@ -16,6 +16,7 @@ import {
   EuiConfirmModal,
   EuiCopy,
   EuiDescriptionList,
+  EuiDescriptionListProps,
   EuiEmptyPrompt,
   EuiFlexGroup,
   EuiFlexItem,
@@ -100,8 +101,8 @@ function iconSummaryFromDoc(doc: SloDocument): SloSummary {
 interface DetailHeaderProps {
   doc: FullDoc;
   primaryObjective: Objective;
-  summaryListItems: Array<{ title: React.ReactNode; description: React.ReactNode }>;
-  sliListItems: Array<{ title: React.ReactNode; description: React.ReactNode }>;
+  summaryListItems: NonNullable<EuiDescriptionListProps['listItems']>;
+  sliListItems: NonNullable<EuiDescriptionListProps['listItems']>;
 }
 
 /**
@@ -583,7 +584,7 @@ export const SloDetailPage: React.FC<SloDetailPageProps> = ({
       }, 0)
     : 0;
 
-  const summaryListItems: Array<{ title: React.ReactNode; description: React.ReactNode }> = [
+  const summaryListItems: NonNullable<EuiDescriptionListProps['listItems']> = [
     { title: 'ID', description: doc.id },
     { title: 'Datasource', description: doc.spec.datasourceId },
     { title: 'Service', description: doc.spec.service },
@@ -592,7 +593,7 @@ export const SloDetailPage: React.FC<SloDetailPageProps> = ({
     { title: 'Window', description: describeWindow(doc) },
   ];
 
-  const sliListItems: Array<{ title: React.ReactNode; description: React.ReactNode }> =
+  const sliListItems: NonNullable<EuiDescriptionListProps['listItems']> =
     sli && sli.definition.backend === 'prometheus'
       ? [
           { title: 'Backend', description: sli.definition.backend },

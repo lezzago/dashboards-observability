@@ -49,6 +49,7 @@ const STATE_DISPLAY: Record<SloHealthState, { label: string; color: string }> = 
   no_data: { label: 'No data', color: euiThemeVars.euiColorMediumShade },
   stale: { label: 'Stale', color: euiThemeVars.euiColorLightShade },
   disabled: { label: 'Disabled', color: euiThemeVars.euiColorDarkShade },
+  rules_missing: { label: 'Rules missing', color: euiThemeVars.euiColorDanger },
 };
 
 /** Pick the worst objective's error-budget remaining for leaderboard ranking. */
