@@ -52,3 +52,23 @@ describe('wizard_sections', () => {
     }
   });
 });
+
+describe('WIZARD_SECTIONS order drift guard', () => {
+  // Keep in sync with `visibleSectionIds` in slo_wizard_page.tsx. When nav
+  // anchor order and scroll order diverge, the left-rail nav points one way
+  // and the physical scroll column goes the other — a past-audit regression.
+  it('matches the expected section order', () => {
+    expect(WIZARD_SECTIONS.map((s) => s.id)).toEqual([
+      'identity',
+      'window',
+      'owner',
+      'sli',
+      'promql',
+      'objectives',
+      'advanced',
+      'exclusions',
+      'labels',
+      'rulesPreview',
+    ]);
+  });
+});
