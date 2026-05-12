@@ -121,8 +121,11 @@ const SloHealthCell: React.FC<{ row: SloSummary }> = ({ row }) => {
   // For SLOs that aren't producing samples, `worstBudgetRemaining` falls back
   // to 1 (100%), which paints a full green bar and reads as "healthy" at a
   // glance. Suppress the budget text + bar in those states — the state chip
-  // already carries the correct signal.
-  const isReporting = state !== 'no_data' && state !== 'stale' && state !== 'disabled';
+  // already carries the correct signal. `rules_missing` folds into the same
+  // category: the ruler has no samples, so the 100% fallback is just as
+  // misleading as in `no_data`.
+  const isReporting =
+    state !== 'no_data' && state !== 'stale' && state !== 'disabled' && state !== 'rules_missing';
   const remaining = worstBudgetRemaining(row);
   const overBudget = remaining < 0;
   const budgetLabel = overBudget

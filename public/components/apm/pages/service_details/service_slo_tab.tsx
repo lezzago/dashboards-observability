@@ -163,6 +163,10 @@ const t = {
   currentDisabled: i18n.translate('observability.apm.serviceDetails.sloTab.current.disabled', {
     defaultMessage: 'Disabled',
   }),
+  currentRulesMissing: i18n.translate(
+    'observability.apm.serviceDetails.sloTab.current.rulesMissing',
+    { defaultMessage: 'Rules missing' }
+  ),
   stateLabel: (state: SloHealthState): string => {
     const labels: Record<SloHealthState, string> = {
       breached: i18n.translate('observability.apm.serviceDetails.sloTab.state.breached', {
@@ -264,6 +268,7 @@ function currentPlaceholderLabel(state: SloHealthState): string | null {
   if (state === 'no_data') return t.currentAwaitingData;
   if (state === 'stale') return t.currentStale;
   if (state === 'disabled') return t.currentDisabled;
+  if (state === 'rules_missing') return t.currentRulesMissing;
   return null;
 }
 
