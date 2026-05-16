@@ -191,57 +191,44 @@ describe('MultiBackendAlertService — routing & list', () => {
     );
   });
 
-  it('range triggers getHistoricalAlerts on the Prom backend', async () => {
+  it('range on Prom backend uses legacy /api/v1/alerts and surfaces current-only fallback', async () => {
+    // Phase 1 dropped historical episode reconstruction from the alerts list.
+    // The unified path now always calls `promBackend.getAlerts` and tags the
+    // result with the `prometheus-alerts-current-only` fallback for the UI
+    // callout.
     mockOsBackend.getAlerts.mockResolvedValueOnce({
       alerts: [],
       totalAlerts: 0,
       truncated: false,
     });
-    mockPromBackend.getHistoricalAlerts.mockResolvedValueOnce({ alerts: [] });
+    mockPromBackend.getAlerts.mockResolvedValueOnce([]);
     const resolver = jest.fn(async () => ({} as never));
-    await svc.getUnifiedAlerts(resolver, {
+    const response = await svc.getUnifiedAlerts(resolver, {
       startTime: 'now-1h',
       endTime: 'now',
     });
-    expect(mockPromBackend.getHistoricalAlerts).toHaveBeenCalled();
-    // Legacy getAlerts must NOT be called on the Prom backend when range is set.
-    expect(mockPromBackend.getAlerts).not.toHaveBeenCalled();
+    expect(mockPromBackend.getAlerts).toHaveBeenCalled();
+    // Historical reconstruction is no longer invoked from the alerts list.
+    expect(mockPromBackend.getHistoricalAlerts).not.toHaveBeenCalled();
+    const promStatus = response.datasourceStatus.find((s) => s.datasourceId === 'ds-prom');
+    expect(promStatus?.fallback).toBe('prometheus-alerts-current-only');
   });
 
-  it('endTime "now" resolves endIsNow=true (live merge enabled)', async () => {
+  it('past-only window also tags the Prom result with current-only fallback', async () => {
     mockOsBackend.getAlerts.mockResolvedValueOnce({
       alerts: [],
       totalAlerts: 0,
       truncated: false,
     });
-    mockPromBackend.getHistoricalAlerts.mockResolvedValueOnce({ alerts: [] });
+    mockPromBackend.getAlerts.mockResolvedValueOnce([]);
     const resolver = jest.fn(async () => ({} as never));
-    await svc.getUnifiedAlerts(resolver, {
-      startTime: 'now-1h',
-      endTime: 'now',
-    });
-    // endIsNow is the 6th positional arg (after client, ds, startSec, endSec, step).
-    const callArgs = mockPromBackend.getHistoricalAlerts.mock.calls[0];
-    expect(callArgs[5]).toBe(true);
-  });
-
-  it('past-only window (endTime "now-1h") resolves endIsNow=false (no live merge)', async () => {
-    // Regression: \bnow\b regex used to match "now-1h" and incorrectly merge
-    // currently-firing alerts into a window that ended an hour ago. The fix
-    // compares the resolved endMs against Date.now() with a tolerance.
-    mockOsBackend.getAlerts.mockResolvedValueOnce({
-      alerts: [],
-      totalAlerts: 0,
-      truncated: false,
-    });
-    mockPromBackend.getHistoricalAlerts.mockResolvedValueOnce({ alerts: [] });
-    const resolver = jest.fn(async () => ({} as never));
-    await svc.getUnifiedAlerts(resolver, {
+    const response = await svc.getUnifiedAlerts(resolver, {
       startTime: 'now-2h',
       endTime: 'now-1h',
     });
-    const callArgs = mockPromBackend.getHistoricalAlerts.mock.calls[0];
-    expect(callArgs[5]).toBe(false);
+    expect(mockPromBackend.getHistoricalAlerts).not.toHaveBeenCalled();
+    const promStatus = response.datasourceStatus.find((s) => s.datasourceId === 'ds-prom');
+    expect(promStatus?.fallback).toBe('prometheus-alerts-current-only');
   });
 
   it('undefined range ⇒ legacy path for both backends', async () => {
@@ -266,7 +253,7 @@ describe('MultiBackendAlertService — routing & list', () => {
       totalAlerts: 0,
       truncated: true,
     });
-    mockPromBackend.getHistoricalAlerts.mockResolvedValueOnce({ alerts: [] });
+    mockPromBackend.getAlerts.mockResolvedValueOnce([]);
     const resolver = jest.fn(async () => ({} as never));
     const response = await svc.getUnifiedAlerts(resolver, {
       startTime: 'now-1h',
@@ -303,10 +290,7 @@ describe('MultiBackendAlertService — routing & list', () => {
       totalAlerts: 0,
       truncated: false,
     });
-    mockPromBackend.getHistoricalAlerts.mockResolvedValueOnce({
-      alerts: [],
-      fallback: 'prometheus-alerts-current-only',
-    });
+    mockPromBackend.getAlerts.mockResolvedValueOnce([]);
     const resolver = jest.fn(async () => ({} as never));
     const response = await svc.getUnifiedAlerts(resolver, {
       startTime: 'now-1h',

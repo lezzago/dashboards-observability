@@ -7,7 +7,7 @@
  * Alert Detail Flyout — drill-down view for a single alert
  * showing full context, labels, annotations, and actions.
  */
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useCallback, useMemo } from 'react';
 import {
   EuiFlyout,
   EuiFlyoutHeader,
@@ -29,6 +29,7 @@ import {
   EuiIcon,
   EuiToolTip,
   EuiLink,
+  EuiLoadingContent,
 } from '@elastic/eui';
 import { UnifiedAlert, UnifiedAlertSummary, Datasource } from '../../../common/types/alerting';
 import { AlertingOpenSearchService } from './query_services/alerting_opensearch_service';
@@ -61,22 +62,25 @@ export const AlertDetailFlyout: React.FC<AlertDetailFlyoutProps> = ({
 }) => {
   const osService = useMemo(() => new AlertingOpenSearchService(), []);
   const [detailData, setDetailData] = useState<UnifiedAlert | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
 
-  // Fetch full detail (with raw data) from the API when flyout opens
-  useEffect(() => {
-    let cancelled = false;
+  // Detail (raw alert data) is fetched only when the user expands the Raw
+  // Alert Data accordion — opening the flyout makes zero network calls.
+  // Prom returns null from the detail endpoint (no full scan); the accordion
+  // falls back to the summary's labels/annotations.
+  const fetchDetailIfNeeded = useCallback(() => {
+    if (detailData || detailLoading) return;
+    setDetailLoading(true);
     osService
-      .getAlertDetail(alert.datasourceId, alert.id)
+      .getAlertDetail(alert.datasourceId, alert.id, alert.monitorId)
       .then((data: UnifiedAlert) => {
-        if (!cancelled && data) setDetailData(data);
+        if (data) setDetailData(data);
       })
       .catch((err: unknown) => {
         console.error('Failed to load alert details:', err);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [alert.datasourceId, alert.id, osService]);
+      })
+      .finally(() => setDetailLoading(false));
+  }, [alert.datasourceId, alert.id, alert.monitorId, detailData, detailLoading, osService]);
 
   // Merge detail data over summary — detail has `raw` and potentially richer labels
   const alertData = detailData ? { ...alert, ...detailData } : alert;
@@ -331,10 +335,17 @@ export const AlertDetailFlyout: React.FC<AlertDetailFlyoutProps> = ({
           buttonContent={<strong>Raw Alert Data</strong>}
           initialIsOpen={false}
           paddingSize="m"
+          onToggle={(isOpen) => {
+            if (isOpen) fetchDetailIfNeeded();
+          }}
         >
-          <EuiCodeBlock language="json" fontSize="s" paddingSize="m" isCopyable>
-            {JSON.stringify(detailData?.raw ?? alert, null, 2)}
-          </EuiCodeBlock>
+          {detailLoading ? (
+            <EuiLoadingContent lines={6} />
+          ) : (
+            <EuiCodeBlock language="json" fontSize="s" paddingSize="m" isCopyable>
+              {JSON.stringify(detailData?.raw ?? alert, null, 2)}
+            </EuiCodeBlock>
+          )}
         </EuiAccordion>
 
         <EuiSpacer size="m" />

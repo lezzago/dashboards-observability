@@ -133,6 +133,11 @@ describe('MultiBackendAlertService — mutations + detail', () => {
     expect(result!.id).toBe(sampleOSMonitor.id);
     expect(result!.raw).toBeDefined();
     expect(Array.isArray(result!.alertHistory)).toBe(true);
+    // History fetch is scoped to this monitor (no full-cluster scan).
+    expect(mockOsBackend.getAlerts).toHaveBeenCalledWith(
+      mockClient,
+      expect.objectContaining({ monitorId: sampleOSMonitor.id })
+    );
   });
 
   // ---- getAlertDetail ----
@@ -145,5 +150,38 @@ describe('MultiBackendAlertService — mutations + detail', () => {
     const result = await svc.getAlertDetail(mockClient, 'ds-os', sampleOSAlert.id);
     expect(result).not.toBeNull();
     expect(result!.raw).toBe(sampleOSAlert);
+  });
+
+  it('getAlertDetail forwards monitorId to scope the OS getAlerts call', async () => {
+    mockOsBackend.getAlerts.mockResolvedValueOnce({ alerts: [sampleOSAlert], totalAlerts: 1 });
+    await svc.getAlertDetail(mockClient, 'ds-os', sampleOSAlert.id, sampleOSAlert.monitor_id);
+    expect(mockOsBackend.getAlerts).toHaveBeenCalledWith(
+      mockClient,
+      expect.objectContaining({ monitorId: sampleOSAlert.monitor_id })
+    );
+  });
+
+  it('getAlertDetail without monitorId preserves the legacy unscoped path', async () => {
+    mockOsBackend.getAlerts.mockResolvedValueOnce({ alerts: [sampleOSAlert], totalAlerts: 1 });
+    await svc.getAlertDetail(mockClient, 'ds-os', sampleOSAlert.id);
+    // Backward compat: no options arg passed when monitorId is absent.
+    expect(mockOsBackend.getAlerts).toHaveBeenCalledWith(mockClient, undefined);
+  });
+
+  it('getAlertDetail returns null for Prometheus datasources (no full scan)', async () => {
+    const result = await svc.getAlertDetail(mockClient, 'ds-prom', 'ds-prom-X-i');
+    expect(result).toBeNull();
+    expect(mockPromBackend.getAlerts).not.toHaveBeenCalled();
+  });
+
+  it('getRuleDetail does not call runMonitor as a dry-run preview fallback', async () => {
+    mockOsBackend.getMonitor.mockResolvedValueOnce(sampleOSMonitor);
+    mockOsBackend.getAlerts.mockResolvedValueOnce({ alerts: [], totalAlerts: 0 });
+    mockOsBackend.getDestinations.mockResolvedValueOnce([]);
+    mockOsBackend.searchQuery.mockResolvedValueOnce({
+      aggregations: { time_buckets: { buckets: [] } },
+    });
+    await svc.getRuleDetail(mockClient, 'ds-os', sampleOSMonitor.id);
+    expect(mockOsBackend.runMonitor).not.toHaveBeenCalled();
   });
 });

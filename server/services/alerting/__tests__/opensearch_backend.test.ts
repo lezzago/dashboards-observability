@@ -324,6 +324,16 @@ describe('HttpOpenSearchBackend', () => {
       expect(request).toHaveBeenCalledTimes(100);
     });
 
+    it('appends monitorId query param when provided', async () => {
+      const { client, request } = makeClient([{ body: { totalAlerts: 0, alerts: [] } }]);
+      await backend.getAlerts(client, { monitorId: 'mon 1/with-special?chars' });
+      expect(request).toHaveBeenCalledTimes(1);
+      const path = (request.mock.calls[0][0] as { path: string }).path;
+      expect(path).toMatch(
+        /^\/_plugins\/_alerting\/monitors\/alerts\?size=100&startIndex=0&monitorId=mon%201%2Fwith-special%3Fchars$/
+      );
+    });
+
     it('caps at 1000 overlapping alerts and sets truncated:true', async () => {
       // Construct 1001 alerts, all overlapping the window. The helper
       // returns up to PAGE_SIZE (100) per call; we need 11 pages to yield

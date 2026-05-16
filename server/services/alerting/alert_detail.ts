@@ -32,15 +32,10 @@ import {
   osAlertToUnified,
   osMonitorToUnifiedRuleSummary,
   osStateToUnified,
-  promAlertToUnified,
   promRuleToUnified,
   promStateToUnified,
 } from './alert_utils';
-import {
-  extractOSPreviewData,
-  fetchOSPreviewTimeSeries,
-  fetchPromPreviewData,
-} from './alert_preview';
+import { fetchOSPreviewTimeSeries, fetchPromPreviewData } from './alert_preview';
 
 /**
  * Get full detail for a single rule/monitor. Fetches real metadata from
@@ -80,9 +75,8 @@ export async function getOSRuleDetail(
   // Fetch real alert history for this monitor
   let alertHistory: AlertHistoryEntry[] = [];
   try {
-    const { alerts } = await osBackend.getAlerts(client);
-    const monitorAlerts = alerts.filter((a) => a.monitor_id === monitorId).slice(0, 20);
-    alertHistory = monitorAlerts.map((a) => ({
+    const { alerts } = await osBackend.getAlerts(client, { monitorId });
+    alertHistory = alerts.slice(0, 20).map((a) => ({
       timestamp: new Date(a.start_time).toISOString(),
       state: osStateToUnified(a.state),
       value: a.severity,
@@ -141,15 +135,6 @@ export async function getOSRuleDetail(
     conditionPreviewData = await fetchOSPreviewTimeSeries(osBackend, client, ds, monitor);
   } catch {
     // Preview data fetch is best-effort
-  }
-  // Fallback: try dry-run execution if time-series extraction produced nothing
-  if (conditionPreviewData.length === 0) {
-    try {
-      const execResult = await osBackend.runMonitor(client, monitorId, true);
-      conditionPreviewData = extractOSPreviewData(execResult);
-    } catch {
-      // Dry run is best-effort — some monitors may not support it
-    }
   }
 
   return {
@@ -226,6 +211,17 @@ export async function getPromRuleDetail(
 
 /**
  * Get full detail for a single alert including raw backend data.
+ *
+ * `monitorId` (optional) scopes the OS lookup to one monitor's alerts via
+ * the `monitorId` query param on `_plugins/_alerting/monitors/alerts`. The
+ * unified flyout already has it on the summary; passing it avoids the
+ * full-cluster scan that this function used to do. Without it, the
+ * legacy unscoped path is preserved for any direct-API consumer.
+ *
+ * For Prometheus we no longer scan every firing alert to find one — the
+ * matrix is unbounded by alert cardinality and the flyout already has the
+ * labels/annotations it needs. Returns `null` so the client renders the
+ * Raw Alert Data accordion from the summary's labels/annotations.
  */
 export async function getAlertDetail(
   datasourceService: DatasourceService,
@@ -233,26 +229,20 @@ export async function getAlertDetail(
   promBackend: PrometheusBackend | undefined,
   client: AlertingOSClient,
   dsId: string,
-  alertId: string
+  alertId: string,
+  monitorId?: string
 ): Promise<UnifiedAlert | null> {
   const ds = await datasourceService.get(dsId);
   if (!ds) return null;
 
   if (ds.type === 'opensearch' && osBackend) {
-    const { alerts } = await osBackend.getAlerts(client);
+    const { alerts } = await osBackend.getAlerts(client, monitorId ? { monitorId } : undefined);
     const alert = alerts.find((a) => a.id === alertId);
     if (!alert) return null;
     const summary = osAlertToUnified(alert, ds!.id);
     return { ...summary, raw: alert };
   } else if (ds.type === 'prometheus' && promBackend) {
-    const promAlerts = await promBackend.getAlerts(client, ds);
-    const resolvedId = ds!.id;
-    const alert = promAlerts.find(
-      (a) => `${resolvedId}-${a.labels.alertname}-${a.labels.instance || ''}` === alertId
-    );
-    if (!alert) return null;
-    const summary = promAlertToUnified(alert, resolvedId);
-    return { ...summary, raw: alert };
+    return null;
   }
   return null;
 }

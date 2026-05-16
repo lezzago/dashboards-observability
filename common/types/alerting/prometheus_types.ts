@@ -245,12 +245,17 @@ export interface PrometheusBackend {
   ): Promise<PromTimeSeriesPoint[]>;
 
   /**
+   * @deprecated for unified list use — Phase 1 stopped routing the alerts
+   * table through this method because the matrix series count is unbounded
+   * by alert cardinality and trips Cortex/AMP `-querier.max-samples` at
+   * scale. Phase 2 will repurpose this for the dedicated timeline endpoint
+   * with a bounded `sum by(severity)` query.
+   *
    * Reconstruct historical alert episodes from the `ALERTS` metric's range
    * matrix. Optional on the interface because only backends that can route
    * PromQL range queries (today: `DirectQueryPrometheusBackend`) support it.
-   * `MultiBackendAlertService.fetchAlertsRaw` checks for the method before
-   * calling, so alternate backends can omit it and degrade cleanly to the
-   * legacy `getAlerts` path.
+   * The unified alerts list no longer calls this; alternate backends may
+   * still omit it.
    *
    * Parameters:
    *   - `endIsNow`: the caller (service layer) indicates whether the

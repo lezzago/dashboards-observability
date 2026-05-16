@@ -38,7 +38,7 @@ import {
   UnifiedRule,
   UnifiedRuleSummary,
 } from '../../../common/types/alerting';
-import { parseDateMathMs, computeStep } from '../../../common/services/alerting';
+import { parseDateMathMs } from '../../../common/services/alerting';
 import { TimeoutError } from './timeout_error';
 import {
   getAlertDetail as getAlertDetailImpl,
@@ -504,7 +504,8 @@ export class MultiBackendAlertService {
   async getAlertDetail(
     client: AlertingOSClient,
     dsId: string,
-    alertId: string
+    alertId: string,
+    monitorId?: string
   ): Promise<UnifiedAlert | null> {
     return getAlertDetailImpl(
       this.datasourceService,
@@ -512,7 +513,8 @@ export class MultiBackendAlertService {
       this.promBackend,
       client,
       dsId,
-      alertId
+      alertId,
+      monitorId
     );
   }
 
@@ -612,14 +614,17 @@ export class MultiBackendAlertService {
    *                            with interval-overlap filter + 1000-alert cap.
    *                            Propagates `truncated` for the UI callout.
    *   - OpenSearch + no range⇒ legacy `osBackend.getAlerts(client)` (no filter).
-   *   - Prometheus + range   ⇒ `promBackend.getHistoricalAlerts(...)` which
-   *                            reconstructs episodes via range queries against
-   *                            the `ALERTS` metric. Propagates `fallback` when
-   *                            the matrix is empty AND the range includes `now`
-   *                            (in which case the backend falls back to the
-   *                            legacy current-only API).
-   *   - Prometheus + no range⇒ legacy `promBackend.getAlerts(...)`
-   *                            (current-active only).
+   *   - Prometheus (any)     ⇒ legacy `promBackend.getAlerts(...)` (current-
+   *                            firing only). Range matrix reconstruction was
+   *                            removed because its series count is unbounded
+   *                            by alert cardinality and trips Cortex/AMP's
+   *                            `-querier.max-samples` at scale. The
+   *                            `prometheus-alerts-current-only` callout in
+   *                            the UI tells the user the table is "now",
+   *                            not the picked window. The dedicated timeline
+   *                            chart endpoint (Phase 2) will own the
+   *                            historical view with a bounded-cardinality
+   *                            query (`sum by(severity)`).
    */
   private async fetchAlertsRaw(
     client: AlertingOSClient,
@@ -642,40 +647,11 @@ export class MultiBackendAlertService {
     }
 
     if (ds.type === 'prometheus' && this.promBackend) {
-      if (range) {
-        // Historical reconstruction — only available on backends that
-        // implement the optional `getHistoricalAlerts` method
-        // (`DirectQueryPrometheusBackend` today). The check is type-safe
-        // because `getHistoricalAlerts?` is declared on the
-        // `PrometheusBackend` interface — a rename or signature change
-        // now produces a compile error rather than a silent duck-type miss.
-        if (typeof this.promBackend.getHistoricalAlerts === 'function') {
-          const startSec = Math.floor(range.startMs / 1000);
-          const endSec = Math.floor(range.endMs / 1000);
-          const step = computeStep(startSec, endSec);
-          const historical = await this.promBackend.getHistoricalAlerts(
-            client,
-            ds,
-            startSec,
-            endSec,
-            step,
-            range.endIsNow
-          );
-          return {
-            alerts: historical.alerts,
-            fallback: historical.fallback,
-            error: historical.error,
-          };
-        }
-        // No historical support ⇒ emulate by falling back to legacy with a banner.
-        const alerts = await this.promBackend.getAlerts(client, ds);
-        return {
-          alerts: alerts.map((a) => promAlertToUnified(a, ds.id)),
-          fallback: 'prometheus-alerts-current-only',
-        };
-      }
       const alerts = await this.promBackend.getAlerts(client, ds);
-      return { alerts: alerts.map((a) => promAlertToUnified(a, ds.id)) };
+      const mapped = alerts.map((a) => promAlertToUnified(a, ds.id));
+      return range
+        ? { alerts: mapped, fallback: 'prometheus-alerts-current-only' }
+        : { alerts: mapped };
     }
 
     return { alerts: [] };

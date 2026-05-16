@@ -4,7 +4,7 @@
  */
 
 import React from 'react';
-import { fireEvent, render } from '@testing-library/react';
+import { fireEvent, render, waitFor } from '@testing-library/react';
 
 // Flyout doesn't use echarts directly, but some transitive imports from
 // shared_constants / child components can reach it — stub for safety.
@@ -22,15 +22,15 @@ global.ResizeObserver = jest.fn().mockImplementation(() => ({
   unobserve: jest.fn(),
 }));
 
-// Post-Phase 4: AlertDetailFlyout instantiates AlertingOpenSearchService
-// internally via `useMemo(() => new AlertingOpenSearchService(), [])` and
-// calls `getAlertDetail(dsId, alertId)` on mount. Mock the class so the
-// constructor returns a stubbed instance with `getAlertDetail` resolving to
-// `null` — the flyout falls back to the alert summary in that case, which
-// is exactly what these render tests exercise.
+// AlertDetailFlyout instantiates AlertingOpenSearchService internally via
+// `useMemo(() => new AlertingOpenSearchService(), [])`. Phase 1 made the
+// detail fetch lazy — it only fires when the user expands the Raw Alert
+// Data accordion. The mock is hoisted into a module-level shared instance
+// so individual tests can read `mockGetAlertDetail.mock.calls`.
+const mockGetAlertDetail = jest.fn().mockResolvedValue(null);
 jest.mock('../query_services/alerting_opensearch_service', () => ({
   AlertingOpenSearchService: jest.fn().mockImplementation(() => ({
-    getAlertDetail: jest.fn().mockResolvedValue(null),
+    getAlertDetail: mockGetAlertDetail,
   })),
 }));
 
@@ -62,6 +62,37 @@ const datasources: Datasource[] = [
 ];
 
 describe('AlertDetailFlyout', () => {
+  beforeEach(() => {
+    mockGetAlertDetail.mockClear();
+  });
+
+  it('does not fetch alert detail on mount (lazy-loaded with the Raw Alert Data accordion)', () => {
+    render(
+      <AlertDetailFlyout
+        alert={baseAlert}
+        datasources={datasources}
+        onClose={jest.fn()}
+        onAcknowledge={jest.fn()}
+      />
+    );
+    expect(mockGetAlertDetail).not.toHaveBeenCalled();
+  });
+
+  it('fetches alert detail when the Raw Alert Data accordion is expanded, forwarding monitorId', async () => {
+    const alertWithMonitor: UnifiedAlertSummary = { ...baseAlert, monitorId: 'mon-7' };
+    const { getByText } = render(
+      <AlertDetailFlyout
+        alert={alertWithMonitor}
+        datasources={datasources}
+        onClose={jest.fn()}
+        onAcknowledge={jest.fn()}
+      />
+    );
+    fireEvent.click(getByText('Raw Alert Data'));
+    await waitFor(() => expect(mockGetAlertDetail).toHaveBeenCalledTimes(1));
+    expect(mockGetAlertDetail).toHaveBeenCalledWith('ds-prom', 'alert-42', 'mon-7');
+  });
+
   it('smoke renders with the alert name, severity, and datasource label', () => {
     const { getByText, getAllByText } = render(
       <AlertDetailFlyout

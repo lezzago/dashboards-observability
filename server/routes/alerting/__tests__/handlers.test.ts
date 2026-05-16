@@ -95,6 +95,12 @@ describe('handlers', () => {
     expect(result.status).toBe(404);
   });
 
+  it('handleGetAlertDetail forwards monitorId to the service', async () => {
+    mockAlertSvc.getAlertDetail.mockResolvedValueOnce({ id: 'a-1' });
+    await handleGetAlertDetail(mockAlertSvc as never, mockClient, 'ds-1', 'a-1', 'mon-42');
+    expect(mockAlertSvc.getAlertDetail).toHaveBeenCalledWith(mockClient, 'ds-1', 'a-1', 'mon-42');
+  });
+
   it('handleGetRuleDetail returns 404 when not found', async () => {
     mockAlertSvc.getRuleDetail.mockResolvedValueOnce(null);
     const result = await handleGetRuleDetail(mockAlertSvc as never, mockClient, 'ds-1', 'nope');
