@@ -271,4 +271,86 @@ describe('handlers', () => {
       endTime: undefined,
     });
   });
+
+  // ---- Phase 4 — paginated listings ----
+
+  it('handleGetUnifiedAlerts dispatches to legacy ProgressiveResponse when page is absent', async () => {
+    mockAlertSvc.getUnifiedAlerts.mockResolvedValueOnce({ results: [] });
+    const resolver = jest.fn();
+    const result = await handleGetUnifiedAlerts(mockAlertSvc as never, resolver, {
+      dsIds: 'a,b',
+    });
+    expect(mockAlertSvc.getUnifiedAlerts).toHaveBeenCalled();
+    expect((mockAlertSvc as { getPaginatedAlerts?: jest.Mock }).getPaginatedAlerts).toBeUndefined();
+    expect(result.status).toBe(200);
+  });
+
+  it('handleGetUnifiedAlerts dispatches to getPaginatedAlerts when page is present', async () => {
+    const getPaginatedAlerts = jest.fn().mockResolvedValueOnce({
+      results: [],
+      total: 0,
+      page: 1,
+      pageSize: 20,
+      hasMore: false,
+    });
+    const svc = { ...mockAlertSvc, getPaginatedAlerts };
+    const resolver = jest.fn();
+    const result = await handleGetUnifiedAlerts(svc as never, resolver, {
+      dsIds: 'a,b',
+      page: '1',
+      pageSize: '20',
+      severity: 'critical,high',
+      labels: JSON.stringify({ env: ['prod'] }),
+    });
+    expect(getPaginatedAlerts).toHaveBeenCalledWith(
+      resolver,
+      expect.objectContaining({
+        page: 1,
+        pageSize: 20,
+        severity: ['critical', 'high'],
+        labels: { env: ['prod'] },
+      })
+    );
+    expect(result.status).toBe(200);
+    expect(result.body).toMatchObject({ total: 0, page: 1 });
+  });
+
+  it('handleGetUnifiedAlerts parses noCache=1 to true', async () => {
+    const getPaginatedAlerts = jest.fn().mockResolvedValueOnce({
+      results: [],
+      total: 0,
+      page: 1,
+      pageSize: 20,
+      hasMore: false,
+    });
+    const svc = { ...mockAlertSvc, getPaginatedAlerts };
+    await handleGetUnifiedAlerts(svc as never, jest.fn(), {
+      page: '1',
+      pageSize: '20',
+      noCache: '1',
+    });
+    expect(getPaginatedAlerts).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ noCache: true })
+    );
+  });
+
+  it('handleGetUnifiedAlerts ignores invalid labels JSON without throwing', async () => {
+    const getPaginatedAlerts = jest.fn().mockResolvedValueOnce({
+      results: [],
+      total: 0,
+      page: 1,
+      pageSize: 20,
+      hasMore: false,
+    });
+    const svc = { ...mockAlertSvc, getPaginatedAlerts };
+    const result = await handleGetUnifiedAlerts(svc as never, jest.fn(), {
+      page: '1',
+      pageSize: '20',
+      labels: 'not-json',
+    });
+    expect(result.status).toBe(200);
+    const passed = getPaginatedAlerts.mock.calls[0][1];
+    expect(passed.labels).toBeUndefined();
+  });
 });

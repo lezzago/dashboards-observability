@@ -275,6 +275,27 @@ export function registerAlertingRoutes(router: IRouter, deps: AlertingRoutesDeps
     getAlertingClient(ctx as AlertingHandlerContext, dsId)
   );
 
+  // Phase 4 — additive query params for paginated + filtered listings.
+  // Existing `dsIds`/`timeout`/`maxResults`/`startTime`/`endTime` keep
+  // their semantics; when `page` is absent the handler returns the
+  // legacy ProgressiveResponse shape.
+  const paginationQuery = {
+    page: schema.maybe(schema.string()),
+    pageSize: schema.maybe(schema.string()),
+    sort: schema.maybe(schema.string()),
+    severity: schema.maybe(schema.string()),
+    state: schema.maybe(schema.string()),
+    backend: schema.maybe(schema.string()),
+    labels: schema.maybe(schema.string()),
+    search: schema.maybe(schema.string()),
+    noCache: schema.maybe(schema.string()),
+  };
+  const ruleListingExtraQuery = {
+    monitorType: schema.maybe(schema.string()),
+    healthStatus: schema.maybe(schema.string()),
+    createdBy: schema.maybe(schema.string()),
+  };
+
   // Unified view routes
   router.get(
     {
@@ -285,6 +306,7 @@ export function registerAlertingRoutes(router: IRouter, deps: AlertingRoutesDeps
             dsIds: schema.maybe(schema.string()),
             timeout: schema.maybe(schema.string()),
             maxResults: schema.maybe(schema.string()),
+            ...paginationQuery,
             ...timeRangeQuery,
           },
           timeRangeObjectOptions
@@ -302,6 +324,15 @@ export function registerAlertingRoutes(router: IRouter, deps: AlertingRoutesDeps
           maxResults: req.query.maxResults,
           startTime: req.query.startTime,
           endTime: req.query.endTime,
+          page: req.query.page,
+          pageSize: req.query.pageSize,
+          sort: req.query.sort,
+          severity: req.query.severity,
+          state: req.query.state,
+          backend: req.query.backend,
+          labels: req.query.labels,
+          search: req.query.search,
+          noCache: req.query.noCache,
         }
       );
       return res.ok({ body: result.body });
@@ -366,6 +397,8 @@ export function registerAlertingRoutes(router: IRouter, deps: AlertingRoutesDeps
           dsIds: schema.maybe(schema.string()),
           timeout: schema.maybe(schema.string()),
           maxResults: schema.maybe(schema.string()),
+          ...paginationQuery,
+          ...ruleListingExtraQuery,
         }),
       },
     },
@@ -378,6 +411,18 @@ export function registerAlertingRoutes(router: IRouter, deps: AlertingRoutesDeps
           dsIds: req.query.dsIds,
           timeout: req.query.timeout,
           maxResults: req.query.maxResults,
+          page: req.query.page,
+          pageSize: req.query.pageSize,
+          sort: req.query.sort,
+          severity: req.query.severity,
+          state: req.query.state,
+          backend: req.query.backend,
+          labels: req.query.labels,
+          search: req.query.search,
+          monitorType: req.query.monitorType,
+          healthStatus: req.query.healthStatus,
+          createdBy: req.query.createdBy,
+          noCache: req.query.noCache,
         }
       );
       return res.ok({ body: result.body });

@@ -24,7 +24,7 @@
  *   - `AlertManagerStartTime` — date-math string for picker start.
  *   - `AlertManagerEndTime`   — date-math string for picker end.
  */
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
   EuiLink,
   EuiSpacer,
@@ -58,6 +58,8 @@ import { useAlerts } from './hooks/use_alerts';
 import { useAlertsTimeline } from './hooks/use_alerts_timeline';
 import { useMonitorMutations } from './hooks/use_monitor_mutations';
 import type { AlertsDashboardFilterSnapshot } from './alerts_dashboard';
+import type { MonitorsTableFilterSnapshot } from './monitors_table';
+import { mapAlertFilters, mapRuleFilters, resolveBackendDsIds } from './filter_mapping';
 import { coreRefs } from '../../framework/core_refs';
 import { setNavBreadCrumbs } from '../../../common/utils/set_nav_bread_crumbs';
 import { observabilityID, observabilityTitle } from '../../../common/constants/shared';
@@ -252,24 +254,14 @@ export const AlarmsPage: React.FC<AlarmsPageProps> = ({
     persistTimeRange(DEFAULT_START_TIME, DEFAULT_END_TIME);
   }, [rangeParseFailed]);
 
-  // ---- Alerts data (migrated off inline fetchAlerts onto useAlerts) ----
-  const { data: alertsData, isLoading: alertsLoading, error: alertsError } = useAlerts({
-    dsIds: selectedDsIds,
-    startTime,
-    endTime,
-    refreshToken,
-  });
-
-  // ---- Alerts timeline (Phase 2: dedicated server-side aggregation) ----
+  // ---- Alerts filter snapshot (Phase 2/4) ----
   //
-  // The timeline chart consumes a separate hook so it can apply the same
-  // filter state the table reflects without ever scanning the alerts list.
-  // Filter state lives inside `AlertsDashboard` (Option B in PHASE_2.md);
+  // Filter state lives inside `AlertsDashboard` (Option B from PHASE_2.md);
   // we mirror it into local state via the `onFilterChange` callback so the
-  // hook's deps are stable strings.
-  const [timelineFilterSnapshot, setTimelineFilterSnapshot] = useState<
-    AlertsDashboardFilterSnapshot
-  >({
+  // alerts hook AND the timeline hook receive the same shape. Phase 4
+  // routes the same filter set through `mapAlertFilters` so chart and
+  // table never diverge.
+  const [alertsFilterSnapshot, setAlertsFilterSnapshot] = useState<AlertsDashboardFilterSnapshot>({
     severity: [],
     state: [],
     backend: [],
@@ -278,47 +270,44 @@ export const AlarmsPage: React.FC<AlarmsPageProps> = ({
     stateCard: 'all',
   });
 
-  const timelineSeverity = useMemo(() => {
-    // Panel-filter list wins over the stat-card single-select.
-    if (timelineFilterSnapshot.severity.length > 0) return timelineFilterSnapshot.severity;
-    if (timelineFilterSnapshot.severityCard === 'medium') return ['medium', 'low', 'info'];
-    if (timelineFilterSnapshot.severityCard !== 'all') return [timelineFilterSnapshot.severityCard];
-    return undefined;
-  }, [timelineFilterSnapshot.severity, timelineFilterSnapshot.severityCard]);
+  const alertsFilterParams = useMemo(() => mapAlertFilters(alertsFilterSnapshot), [
+    alertsFilterSnapshot,
+  ]);
 
-  const timelineState = useMemo(() => {
-    if (timelineFilterSnapshot.state.length > 0) return timelineFilterSnapshot.state;
-    if (timelineFilterSnapshot.stateCard !== 'all') return [timelineFilterSnapshot.stateCard];
-    return undefined;
-  }, [timelineFilterSnapshot.state, timelineFilterSnapshot.stateCard]);
+  // Backend filter resolves to a narrowed dsIds set client-side; the
+  // server-side endpoint receives `dsIds` not `backend`.
+  const alertsTimelineDsIds = useMemo(
+    () => resolveBackendDsIds(selectedDsIds, alertsFilterSnapshot.backend, datasources),
+    [selectedDsIds, datasources, alertsFilterSnapshot.backend]
+  );
 
-  const timelineLabels = useMemo(() => {
-    const filtered: Record<string, string[]> = {};
-    for (const [k, vs] of Object.entries(timelineFilterSnapshot.labels)) {
-      if (vs.length > 0) filtered[k] = vs;
-    }
-    return Object.keys(filtered).length > 0 ? filtered : undefined;
-  }, [timelineFilterSnapshot.labels]);
-
-  // Backend filter intersects with the dashboard-level datasource selection.
-  // When the user selects a "backend" facet (e.g. only "prometheus"), narrow
-  // the timeline's dsIds accordingly.
-  const timelineDsIds = useMemo(() => {
-    if (timelineFilterSnapshot.backend.length === 0) return selectedDsIds;
-    const backends = new Set(timelineFilterSnapshot.backend);
-    return selectedDsIds.filter((id) => {
-      const ds = datasources.find((d) => d.id === id);
-      return ds ? backends.has(ds.type) : true;
-    });
-  }, [selectedDsIds, datasources, timelineFilterSnapshot.backend]);
-
-  const { data: timelineData, isLoading: timelineLoading } = useAlertsTimeline({
-    dsIds: timelineDsIds,
+  // ---- Alerts data (Phase 4 — server-side filter pushdown + pagination) ----
+  //
+  // We pass `page=1, pageSize=200` so the listing endpoint dispatches to
+  // the paginated path (filter pushdown, 30s cache) but the in-page
+  // EuiInMemoryTable continues to paginate client-side over the
+  // filter-narrowed page. The dashboard's existing pagination UX is
+  // unchanged; the data feeding it is now filter-narrowed at the
+  // backend.
+  const { data: alertsData, isLoading: alertsLoading, error: alertsError } = useAlerts({
+    dsIds: alertsTimelineDsIds,
     startTime,
     endTime,
-    severity: timelineSeverity,
-    state: timelineState,
-    labels: timelineLabels,
+    refreshToken,
+    page: 1,
+    pageSize: 200,
+    severity: alertsFilterParams.severity,
+    state: alertsFilterParams.state,
+    labels: alertsFilterParams.labels,
+  });
+
+  const { data: timelineData, isLoading: timelineLoading } = useAlertsTimeline({
+    dsIds: alertsTimelineDsIds,
+    startTime,
+    endTime,
+    severity: alertsFilterParams.severity,
+    state: alertsFilterParams.state,
+    labels: alertsFilterParams.labels,
     refreshToken,
   });
 
@@ -366,22 +355,37 @@ export const AlarmsPage: React.FC<AlarmsPageProps> = ({
       return changed ? next : prev;
     });
   }, [rawAlerts]);
+  // PaginatedResponse exposes `warnings`; legacy ProgressiveResponse
+  // surfaces per-datasource `datasourceStatus`. Normalize to a single
+  // shape for the banner / truncation indicators.
   const alertsWarnings = useMemo(() => {
-    const failed = (alertsData?.datasourceStatus || []).filter((s) => s.status === 'error');
-    return failed.map((s) => ({
-      datasourceName: s.datasourceName,
-      error: s.error || 'Unknown error',
-    }));
+    if (!alertsData) return [];
+    if ('warnings' in alertsData && alertsData.warnings) {
+      return alertsData.warnings.map((w) => ({
+        datasourceName: w.datasourceName,
+        error: w.error,
+      }));
+    }
+    if ('datasourceStatus' in alertsData) {
+      return alertsData.datasourceStatus
+        .filter((s) => s.status === 'error')
+        .map((s) => ({
+          datasourceName: s.datasourceName,
+          error: s.error || 'Unknown error',
+        }));
+    }
+    return [];
   }, [alertsData]);
-  // Backend hints surfaced through the dashboard banner props.
-  const alertsTruncated = (alertsData?.datasourceStatus || []).some((s) => s.truncated);
-  const alertsFallbackHints = useMemo(
-    () =>
-      (alertsData?.datasourceStatus || [])
-        .filter((s) => s.fallback)
-        .map((s) => ({ datasourceName: s.datasourceName, fallback: s.fallback! })),
-    [alertsData]
-  );
+  const alertsTruncated =
+    alertsData && 'datasourceStatus' in alertsData
+      ? alertsData.datasourceStatus.some((s) => s.truncated)
+      : false;
+  const alertsFallbackHints = useMemo(() => {
+    if (!alertsData || !('datasourceStatus' in alertsData)) return [];
+    return alertsData.datasourceStatus
+      .filter((s) => s.fallback)
+      .map((s) => ({ datasourceName: s.datasourceName, fallback: s.fallback! }));
+  }, [alertsData]);
   const alertsErrorMessage =
     alertsError instanceof Error ? alertsError.message : alertsError ? String(alertsError) : null;
 
@@ -395,6 +399,32 @@ export const AlarmsPage: React.FC<AlarmsPageProps> = ({
   const [rulesTotal, setRulesTotal] = useState(-1); // -1 = not yet loaded
   const [rulesPage, setRulesPage] = useState(1);
   const [rulesPageSize] = useState(DEFAULT_PAGE_SIZE);
+
+  // Phase 4 — rules table filter snapshot mirrored upward via `onFilterChange`.
+  // Same pattern as the alerts dashboard — keeps server-side filter
+  // pushdown consistent with the table.
+  const [rulesFilterSnapshot, setRulesFilterSnapshot] = useState<MonitorsTableFilterSnapshot>({
+    status: [],
+    severity: [],
+    monitorType: [],
+    healthStatus: [],
+    createdBy: [],
+    destinations: [],
+    backend: [],
+    labels: {},
+  });
+  // mapRuleFilters expects the typed FilterState shape; the snapshot is
+  // structurally identical but typed as plain string[] arrays. Cast at
+  // the boundary — the runtime values came straight from the typed
+  // FilterState in MonitorsTable.
+  const rulesFilterParams = useMemo(
+    () => mapRuleFilters((rulesFilterSnapshot as unknown) as Parameters<typeof mapRuleFilters>[0]),
+    [rulesFilterSnapshot]
+  );
+  const rulesDsIds = useMemo(
+    () => resolveBackendDsIds(selectedDsIds, rulesFilterSnapshot.backend, datasources),
+    [selectedDsIds, datasources, rulesFilterSnapshot.backend]
+  );
 
   const [deletedRuleIds, setDeletedRuleIds] = useState<Set<string>>(new Set());
   const [showCreateMonitor, setShowCreateMonitor] = useState(false);
@@ -508,7 +538,13 @@ export const AlarmsPage: React.FC<AlarmsPageProps> = ({
   // triggers a refetch through the hook's effect.
 
   const fetchRules = useCallback(
-    async (dsIds: string[], _page: number, _pageSize: number) => {
+    async (
+      dsIds: string[],
+      page: number,
+      pageSize: number,
+      filterParams: ReturnType<typeof mapRuleFilters>,
+      forceFresh: boolean
+    ) => {
       if (dsIds.length === 0) {
         setRules([]);
         setRulesTotal(0);
@@ -518,17 +554,45 @@ export const AlarmsPage: React.FC<AlarmsPageProps> = ({
       setError(null);
       setRulesWarnings([]);
       try {
-        const res = await osService.listRules({ dsIds });
+        const res = await osService.listRules({
+          dsIds,
+          page,
+          pageSize,
+          // `status` is wire-modeled as the unified `state` param so the
+          // server hands a single field through `applyRuleFilters` for
+          // both alerts (alert state) and rules (monitor status).
+          state: filterParams.status,
+          severity: filterParams.severity,
+          monitorType: filterParams.monitorType,
+          healthStatus: filterParams.healthStatus,
+          createdBy: filterParams.createdBy,
+          labels: filterParams.labels,
+          noCache: forceFresh ? true : undefined,
+        });
         setRules(res.results || []);
-        setRulesTotal((res.results || []).length);
-        const failedStatuses = (res.datasourceStatus || []).filter((s) => s.status === 'error');
-        if (failedStatuses.length > 0) {
+        // PaginatedResponse carries `total`; legacy ProgressiveResponse does not.
+        if ('total' in res) {
+          setRulesTotal(res.total);
+        } else {
+          setRulesTotal((res.results || []).length);
+        }
+        if ('warnings' in res && res.warnings) {
           setRulesWarnings(
-            failedStatuses.map((s) => ({
-              datasourceName: s.datasourceName,
-              error: s.error || 'Unknown error',
+            res.warnings.map((w) => ({
+              datasourceName: w.datasourceName,
+              error: w.error,
             }))
           );
+        } else if ('datasourceStatus' in res) {
+          const failedStatuses = (res.datasourceStatus || []).filter((s) => s.status === 'error');
+          if (failedStatuses.length > 0) {
+            setRulesWarnings(
+              failedStatuses.map((s) => ({
+                datasourceName: s.datasourceName,
+                error: s.error || 'Unknown error',
+              }))
+            );
+          }
         }
       } catch (e: unknown) {
         setError(e instanceof Error ? e.message : 'Failed to fetch rules');
@@ -539,17 +603,29 @@ export const AlarmsPage: React.FC<AlarmsPageProps> = ({
     [osService]
   );
 
-  // Rules fetch effect (alerts effect removed — `useAlerts` hook drives that flow).
+  // Track previous refreshToken so a bump triggers a no-cache refetch
+  // exactly once per click — same shape as `useAlerts`.
+  const rulesPrevRefreshTokenRef = useRef(refreshToken);
+  const rulesShouldForceFresh = rulesPrevRefreshTokenRef.current !== refreshToken;
+  rulesPrevRefreshTokenRef.current = refreshToken;
+
+  // Stable string projections for the rules filter so the effect deps
+  // are primitive-comparable and the re-run frequency is bounded.
+  const rulesFilterKey = useMemo(() => JSON.stringify(rulesFilterParams), [rulesFilterParams]);
+  const rulesDsIdsKey = rulesDsIds.join(',');
+
+  // Rules fetch effect — server-side filter + pagination (Phase 4).
+  // Now `rulesPage`/`rulesPageSize` are meaningful: a different page
+  // produces a different server response.
   useEffect(() => {
-    if (selectedDsIds.length === 0) {
+    if (rulesDsIds.length === 0) {
       setRules([]);
       setRulesTotal(0);
       return;
     }
-    // Fetch rules regardless of active tab so the "Rules (N)" tab label
-    // populates on initial load without requiring the user to click the tab.
-    fetchRules(selectedDsIds, rulesPage, rulesPageSize);
-  }, [selectedDsIds, rulesPage, rulesPageSize, fetchRules]);
+    fetchRules(rulesDsIds, rulesPage, rulesPageSize, rulesFilterParams, rulesShouldForceFresh);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rulesDsIdsKey, rulesPage, rulesPageSize, rulesFilterKey, refreshToken, fetchRules]);
 
   // Reset pages when datasource selection changes. `useAlerts` refetches
   // automatically on `selectedDsIds` change, so no alerts-page reset here.
@@ -645,7 +721,7 @@ export const AlarmsPage: React.FC<AlarmsPageProps> = ({
     try {
       await mutations.importMonitors({ monitors: configs }, dsId);
       addToast('Monitors imported successfully');
-      fetchRules(selectedDsIds, rulesPage, rulesPageSize);
+      fetchRules(rulesDsIds, rulesPage, rulesPageSize, rulesFilterParams, true);
     } catch (e: unknown) {
       addToast('Failed to import monitors', 'danger', e instanceof Error ? e.message : String(e));
     }
@@ -977,7 +1053,7 @@ export const AlarmsPage: React.FC<AlarmsPageProps> = ({
             fallbackHints={alertsFallbackHints}
             timelineData={timelineData}
             timelineLoading={timelineLoading}
-            onFilterChange={setTimelineFilterSnapshot}
+            onFilterChange={setAlertsFilterSnapshot}
           />
         </>
       );
@@ -1005,6 +1081,7 @@ export const AlarmsPage: React.FC<AlarmsPageProps> = ({
           onDatasourceChange={handleDatasourceChange}
           maxDatasources={maxDatasources}
           onDatasourceCapReached={handleDatasourceCapReached}
+          onFilterChange={setRulesFilterSnapshot}
         />
       );
     }
@@ -1109,7 +1186,8 @@ export const AlarmsPage: React.FC<AlarmsPageProps> = ({
         // Keyed by datasource name to dedupe when both paths report the
         // same backend (possible if the user flips tabs rapidly while
         // a slow datasource is still timing out on both flows).
-        const combined = activeTab === 'alerts' ? alertsWarnings : rulesWarnings;
+        const combined: Array<{ datasourceName: string; error: string }> =
+          activeTab === 'alerts' ? alertsWarnings : rulesWarnings;
         if (combined.length === 0) return null;
         return (
           <EuiCallOut

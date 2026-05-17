@@ -12,6 +12,8 @@ import {
   AlertingOSClient,
   Logger,
   OpenSearchBackend,
+  OSGetAlertsOptions,
+  OSGetMonitorsOptions,
   OSMonitor,
   OSAlert,
   OSDestination,
@@ -29,6 +31,51 @@ import {
 } from '../../../common/types/alerting';
 import { createConflictError, createInternalError, isStatusCode } from './errors';
 
+// Map UnifiedAlertSeverity → OpenSearch numeric severityLevel (1=critical … 5=info).
+const OS_SEVERITY_LEVELS: Record<string, string> = {
+  critical: '1',
+  high: '2',
+  medium: '3',
+  low: '4',
+  info: '5',
+};
+
+// Map UnifiedAlertState → OS Alerting alertState query param values.
+const OS_ALERT_STATES: Record<string, string> = {
+  active: 'ACTIVE',
+  acknowledged: 'ACKNOWLEDGED',
+  resolved: 'COMPLETED',
+  error: 'ERROR',
+};
+
+// Map server sortField → OpenSearch alert document sort key.
+const OS_ALERT_SORT_FIELDS: Record<string, string> = {
+  startTime: 'start_time',
+  lastUpdated: 'last_notification_time',
+  severity: 'severity',
+  state: 'state',
+  name: 'monitor_name',
+};
+
+// Map server sortField → OpenSearch monitor document sort key.
+const OS_MONITOR_SORT_FIELDS: Record<string, string> = {
+  startTime: 'last_update_time',
+  lastUpdated: 'last_update_time',
+  severity: 'monitor.triggers.severity',
+  state: 'monitor.enabled',
+  name: 'monitor.name.keyword',
+};
+
+const OS_MONITOR_TYPE_MAP: Record<string, string> = {
+  metric: 'query_level_monitor',
+  log: 'doc_level_monitor',
+  apm: 'query_level_monitor',
+  composite: 'query_level_monitor',
+  infrastructure: 'bucket_level_monitor',
+  synthetics: 'query_level_monitor',
+  cluster_metrics: 'query_level_monitor',
+};
+
 export class HttpOpenSearchBackend implements OpenSearchBackend {
   readonly type = 'opensearch' as const;
 
@@ -38,7 +85,18 @@ export class HttpOpenSearchBackend implements OpenSearchBackend {
   // Monitors
   // =========================================================================
 
-  async getMonitors(client: AlertingOSClient): Promise<OSMonitor[]> {
+  async getMonitors(client: AlertingOSClient): Promise<OSMonitor[]>;
+  async getMonitors(
+    client: AlertingOSClient,
+    options: OSGetMonitorsOptions
+  ): Promise<{ monitors: OSMonitor[]; total: number; hasMore: boolean }>;
+  async getMonitors(
+    client: AlertingOSClient,
+    options?: OSGetMonitorsOptions
+  ): Promise<OSMonitor[] | { monitors: OSMonitor[]; total: number; hasMore: boolean }> {
+    if (options) {
+      return this.getMonitorsPage(client, options);
+    }
     const PAGE_SIZE = 100;
     const monitors: OSMonitor[] = [];
     let searchAfter: unknown[] | undefined;
@@ -72,6 +130,100 @@ export class HttpOpenSearchBackend implements OpenSearchBackend {
     }
 
     return monitors;
+  }
+
+  /**
+   * Paginated server-side monitor listing with optional pushdown filters.
+   *
+   * Pushdown:
+   *   - `monitor.enabled` for status (active/disabled)
+   *   - `monitor.monitor_type` for monitorType
+   *   - `monitor.name`/`description` `multi_match` for `search`
+   *   - top-level label terms for OS PPL monitors that store labels at
+   *     `monitor.ui_metadata.labels.<key>` (best-effort; labels not in the
+   *     mapping fall through to post-filter on the caller side)
+   *
+   * Out of scope (post-filter responsibility of the caller):
+   *   - `severity` (nested under `triggers[].*_trigger.severity` with
+   *     trigger-type-specific paths; fragile across monitor types)
+   *   - `healthStatus` (derived from recent alert history)
+   *   - `createdBy` (security-plugin dependent; absent without it)
+   */
+  private async getMonitorsPage(
+    client: AlertingOSClient,
+    options: OSGetMonitorsOptions
+  ): Promise<{ monitors: OSMonitor[]; total: number; hasMore: boolean }> {
+    const page = Math.max(1, options.page ?? 1);
+    const pageSize = Math.min(Math.max(1, options.pageSize ?? 20), 200);
+    const from = (page - 1) * pageSize;
+    const sortField =
+      OS_MONITOR_SORT_FIELDS[options.sortField ?? 'startTime'] ?? 'last_update_time';
+    const sortOrder = options.sortOrder === 'asc' ? 'asc' : 'desc';
+
+    const filterClauses: Array<Record<string, unknown>> = [];
+
+    if (options.status && options.status.length > 0) {
+      const enabledClauses: Array<Record<string, unknown>> = [];
+      if (options.status.includes('active')) {
+        enabledClauses.push({ term: { 'monitor.enabled': true } });
+      }
+      if (options.status.includes('disabled')) {
+        enabledClauses.push({ term: { 'monitor.enabled': false } });
+      }
+      if (enabledClauses.length > 0) {
+        filterClauses.push({ bool: { should: enabledClauses, minimum_should_match: 1 } });
+      }
+    }
+
+    if (options.monitorType && options.monitorType.length > 0) {
+      const typeValues = Array.from(
+        new Set(options.monitorType.map((t) => OS_MONITOR_TYPE_MAP[t] ?? t).filter(Boolean))
+      );
+      if (typeValues.length > 0) {
+        filterClauses.push({ terms: { 'monitor.monitor_type': typeValues } });
+      }
+    }
+
+    if (options.search && options.search.trim()) {
+      filterClauses.push({
+        multi_match: {
+          query: options.search.trim(),
+          fields: ['monitor.name', 'monitor.description'],
+        },
+      });
+    }
+
+    const body: Record<string, unknown> = {
+      size: pageSize,
+      from,
+      sort: [{ [sortField]: { order: sortOrder } }, { _id: 'asc' }],
+      query: filterClauses.length > 0 ? { bool: { filter: filterClauses } } : { match_all: {} },
+      track_total_hits: true,
+    };
+
+    interface PagedResponse extends OSSearchResponse {
+      hits: OSSearchResponse['hits'] & {
+        total?: { value: number; relation?: string } | number;
+      };
+    }
+    const resp = await this.req<PagedResponse>(
+      client,
+      'POST',
+      '/_plugins/_alerting/monitors/_search',
+      body
+    );
+    const rawHits = resp.body?.hits?.hits ?? [];
+    const monitors = rawHits.map((hit) => this.mapMonitor(hit._id, hit._source));
+
+    const totalRaw = resp.body?.hits?.total;
+    const total =
+      typeof totalRaw === 'number'
+        ? totalRaw
+        : typeof totalRaw === 'object' && totalRaw
+        ? totalRaw.value ?? 0
+        : 0;
+    const hasMore = from + monitors.length < total;
+    return { monitors, total, hasMore };
   }
 
   async getMonitor(client: AlertingOSClient, monitorId: string): Promise<OSMonitor | null> {
@@ -209,8 +361,23 @@ export class HttpOpenSearchBackend implements OpenSearchBackend {
 
   async getAlerts(
     client: AlertingOSClient,
-    options?: { startMs?: number; endMs?: number; monitorId?: string }
-  ): Promise<{ alerts: OSAlert[]; totalAlerts: number; truncated: boolean }> {
+    options?: OSGetAlertsOptions
+  ): Promise<{ alerts: OSAlert[]; totalAlerts: number; truncated: boolean; hasMore?: boolean }> {
+    const isPaginated =
+      options !== undefined &&
+      (options.page !== undefined ||
+        options.pageSize !== undefined ||
+        options.sortField !== undefined ||
+        options.sortOrder !== undefined ||
+        (options.severity && options.severity.length > 0) ||
+        (options.state && options.state.length > 0) ||
+        (options.search !== undefined && options.search !== '') ||
+        (options.labels && Object.keys(options.labels).length > 0));
+
+    if (isPaginated) {
+      return this.getAlertsPage(client, options!);
+    }
+
     const PAGE_SIZE = 100;
     /**
      * Cap applied only when a time window is supplied. OpenSearch Alerting's
@@ -311,6 +478,119 @@ export class HttpOpenSearchBackend implements OpenSearchBackend {
       alerts: allAlerts,
       totalAlerts: hasRange ? allAlerts.length : totalAlerts,
       truncated,
+    };
+  }
+
+  /**
+   * Server-paginated alerts listing.
+   *
+   * Pushdown to upstream `_plugins/_alerting/monitors/alerts`:
+   *   - `size`/`startIndex` for page math
+   *   - `sortString`/`sortOrder` from `sortField`/`sortOrder`
+   *   - `severityLevel` for single-value severity (multi → post-filter)
+   *   - `alertState` for single-value state (multi → post-filter)
+   *   - `searchString` for `search`
+   *
+   * Always-post-filter (correctness — same guarantee as Phase 3):
+   *   - JS-side severity/state filter even when single-value pushdown was
+   *     attempted. Cheap; a page is bounded by `pageSize ≤ 200`.
+   *   - `labels` post-filter (alert docs aren't normalized by label).
+   *   - Time-range overlap when `startMs`/`endMs` provided.
+   */
+  private async getAlertsPage(
+    client: AlertingOSClient,
+    options: OSGetAlertsOptions
+  ): Promise<{ alerts: OSAlert[]; totalAlerts: number; truncated: boolean; hasMore: boolean }> {
+    const page = Math.max(1, options.page ?? 1);
+    const pageSize = Math.min(Math.max(1, options.pageSize ?? 20), 200);
+    const startIndex = (page - 1) * pageSize;
+
+    const params: string[] = [`size=${pageSize}`, `startIndex=${startIndex}`];
+
+    if (options.monitorId) {
+      params.push(`monitorId=${encodeURIComponent(options.monitorId)}`);
+    }
+
+    const sortField = options.sortField ?? 'startTime';
+    const sortString = OS_ALERT_SORT_FIELDS[sortField] ?? 'start_time';
+    const sortOrder = options.sortOrder === 'asc' ? 'asc' : 'desc';
+    params.push(`sortString=${encodeURIComponent(sortString)}`);
+    params.push(`sortOrder=${sortOrder}`);
+
+    if (options.severity && options.severity.length === 1) {
+      const lvl = OS_SEVERITY_LEVELS[options.severity[0]];
+      if (lvl) params.push(`severityLevel=${lvl}`);
+    }
+    if (options.state && options.state.length === 1) {
+      const stateValue = OS_ALERT_STATES[options.state[0]];
+      if (stateValue) params.push(`alertState=${stateValue}`);
+    }
+    if (options.search) {
+      params.push(`searchString=${encodeURIComponent(options.search)}`);
+    }
+
+    const path = `/_plugins/_alerting/monitors/alerts?${params.join('&')}`;
+    const resp = await this.req<OSAlertsApiResponse>(client, 'GET', path);
+    const totalAlerts = resp.body.totalAlerts ?? 0;
+    let alerts: OSAlert[] = (resp.body.alerts ?? []).map((a: OSAlertRaw) => this.mapAlert(a));
+
+    // Always JS post-filter for correctness — even when pushdown is in
+    // play. The upstream may not honour all combinations identically;
+    // post-filter keeps the response consistent across single/multi paths.
+    if (options.severity && options.severity.length > 0) {
+      const wanted = new Set(options.severity.map((s) => OS_SEVERITY_LEVELS[s]).filter(Boolean));
+      if (wanted.size > 0) {
+        alerts = alerts.filter((a) => wanted.has(a.severity));
+      }
+    }
+    if (options.state && options.state.length > 0) {
+      const wanted = new Set(
+        options.state.map((s) => OS_ALERT_STATES[s]).filter((v): v is string => Boolean(v))
+      );
+      if (wanted.size > 0) {
+        alerts = alerts.filter((a) => wanted.has(a.state));
+      }
+    }
+    if (options.labels) {
+      const labels = options.labels;
+      alerts = alerts.filter((a) => {
+        // OS alerts don't carry a labels record on the base shape; fall
+        // through to monitor_id / trigger_id / monitor_name lookups for the
+        // `monitor_id` label key (the only one the alerts table uses for OS).
+        const synthetic: Record<string, string> = {
+          monitor_id: a.monitor_id,
+          monitor_name: a.monitor_name,
+          trigger_id: a.trigger_id,
+          trigger_name: a.trigger_name,
+        };
+        for (const [k, vs] of Object.entries(labels)) {
+          if (vs.length === 0) continue;
+          const v = synthetic[k];
+          if (!v || !vs.includes(v)) return false;
+        }
+        return true;
+      });
+    }
+
+    if (options.startMs !== undefined && options.endMs !== undefined) {
+      const windowStart = options.startMs;
+      const windowEnd = options.endMs;
+      alerts = alerts.filter((a) => {
+        const effectiveEnd = a.end_time ?? windowEnd;
+        return a.start_time <= windowEnd && effectiveEnd >= windowStart;
+      });
+    }
+
+    // `truncated` flags whether the post-filter dropped this page below
+    // `pageSize` while more pages remain — caller surfaces the partial-
+    // page warning via the unified service.
+    const partialAfterFilter = alerts.length < pageSize && startIndex + pageSize < totalAlerts;
+
+    return {
+      alerts,
+      totalAlerts,
+      truncated: partialAfterFilter,
+      hasMore: startIndex + pageSize < totalAlerts,
     };
   }
 

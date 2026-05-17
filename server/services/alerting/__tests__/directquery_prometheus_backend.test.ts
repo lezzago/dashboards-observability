@@ -368,4 +368,84 @@ describe('DirectQueryPrometheusBackend', () => {
       ]);
     });
   });
+
+  // ============================================================================
+  // Phase 4 — listing caches + filter matchers
+  // ============================================================================
+  describe('alerts cache (Phase 4)', () => {
+    it('reuses the cached response on a second getAlerts call', async () => {
+      mockClient.transport.request.mockResolvedValue({
+        body: { data: { alerts: [{ labels: { alertname: 'a' }, state: 'firing', activeAt: '' }] } },
+      });
+      await backend.getAlerts(mockClient as never, ds);
+      const firstCalls = mockClient.transport.request.mock.calls.length;
+      await backend.getAlerts(mockClient as never, ds);
+      // Cache hit ⇒ no additional upstream call.
+      expect(mockClient.transport.request.mock.calls.length).toBe(firstCalls);
+    });
+
+    it('bypasses the cache when noCache is true', async () => {
+      mockClient.transport.request.mockResolvedValue({
+        body: { data: { alerts: [{ labels: { alertname: 'a' }, state: 'firing', activeAt: '' }] } },
+      });
+      await backend.getAlerts(mockClient as never, ds);
+      const firstCalls = mockClient.transport.request.mock.calls.length;
+      await backend.getAlerts(mockClient as never, ds, { noCache: true });
+      expect(mockClient.transport.request.mock.calls.length).toBe(firstCalls + 1);
+    });
+  });
+
+  describe('rule groups cache (Phase 4)', () => {
+    it('reuses the cached unfiltered listing on repeat calls', async () => {
+      mockClient.transport.request.mockResolvedValue({
+        body: { data: { groups: [{ name: 'g1', file: 'f', interval: 60, rules: [] }] } },
+      });
+      await backend.getRuleGroups(mockClient as never, ds);
+      const firstCalls = mockClient.transport.request.mock.calls.length;
+      await backend.getRuleGroups(mockClient as never, ds);
+      expect(mockClient.transport.request.mock.calls.length).toBe(firstCalls);
+    });
+
+    it('does NOT cache filtered listings (different filter ⇒ different fetch)', async () => {
+      mockClient.transport.request.mockResolvedValue({
+        body: { data: { groups: [] } },
+      });
+      await backend.getRuleGroups(mockClient as never, ds, { ruleGroup: 'g1' });
+      const firstCalls = mockClient.transport.request.mock.calls.length;
+      await backend.getRuleGroups(mockClient as never, ds, { ruleGroup: 'g2' });
+      expect(mockClient.transport.request.mock.calls.length).toBe(firstCalls + 1);
+    });
+
+    it('bypasses cache when noCache is set', async () => {
+      mockClient.transport.request.mockResolvedValue({
+        body: { data: { groups: [] } },
+      });
+      await backend.getRuleGroups(mockClient as never, ds);
+      const firstCalls = mockClient.transport.request.mock.calls.length;
+      await backend.getRuleGroups(mockClient as never, ds, undefined, { noCache: true });
+      expect(mockClient.transport.request.mock.calls.length).toBe(firstCalls + 1);
+    });
+
+    it('appends `match[]={severity="critical"}` when labels filter is used', async () => {
+      mockClient.transport.request.mockResolvedValue({
+        body: { data: { groups: [] } },
+      });
+      await backend.getRuleGroups(mockClient as never, ds, {
+        labels: { severity: ['critical'] },
+        type: 'alert',
+      });
+      const path = mockClient.transport.request.mock.calls[0][0].path as string;
+      expect(path).toContain('type=alert');
+      expect(path).toContain(`match[]=${encodeURIComponent('{severity="critical"}')}`);
+    });
+
+    it('appends `match[]={alertstate="firing"}` when state filter is used', async () => {
+      mockClient.transport.request.mockResolvedValue({
+        body: { data: { groups: [] } },
+      });
+      await backend.getRuleGroups(mockClient as never, ds, { state: 'firing', type: 'alert' });
+      const path = mockClient.transport.request.mock.calls[0][0].path as string;
+      expect(path).toContain(`match[]=${encodeURIComponent('{alertstate="firing"}')}`);
+    });
+  });
 });

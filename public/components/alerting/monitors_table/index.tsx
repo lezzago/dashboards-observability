@@ -42,6 +42,22 @@ import { DEFAULT_WIDTHS, useResizableColumns } from './resizable_columns';
 import { MonitorsFiltersPanel } from './monitors_filters_panel';
 import { MonitorsMainPanel } from './monitors_main_panel';
 
+/**
+ * Outgoing snapshot of the monitor table's filter state. Mirrors
+ * `AlertsDashboardFilterSnapshot` — emitted to the parent so the parent
+ * can pass the same filters into the server-side rules listing call.
+ */
+export interface MonitorsTableFilterSnapshot {
+  status: string[];
+  severity: string[];
+  monitorType: string[];
+  healthStatus: string[];
+  createdBy: string[];
+  destinations: string[];
+  backend: string[];
+  labels: Record<string, string[]>;
+}
+
 interface MonitorsTableProps {
   rules: UnifiedRuleSummary[];
   datasources: Datasource[];
@@ -58,6 +74,12 @@ interface MonitorsTableProps {
   maxDatasources: number;
   /** Callback fired when user tries to exceed `maxDatasources`. */
   onDatasourceCapReached: () => void;
+  /**
+   * Phase 4 — emit filter changes upward so the parent can drive the
+   * server-side `listRules` call. When omitted the component still
+   * renders client-side filtered results from `rules`.
+   */
+  onFilterChange?: (snapshot: MonitorsTableFilterSnapshot) => void;
 }
 
 // ============================================================================
@@ -76,6 +98,7 @@ export const MonitorsTable: React.FC<MonitorsTableProps> = ({
   onDatasourceChange,
   maxDatasources,
   onDatasourceCapReached,
+  onFilterChange,
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [filters, setFilters] = useState<FilterState>(emptyFilters());
@@ -152,6 +175,26 @@ export const MonitorsTable: React.FC<MonitorsTableProps> = ({
     () => rules.filter((r) => matchesSearch(r, searchQuery) && matchesFilters(r, filters)),
     [rules, searchQuery, filters]
   );
+
+  // Mirror filter state to the parent so it can drive the server-side
+  // listRules call. Stable JSON-projection key — same pattern as
+  // AlertsDashboard so the effect only fires when the snapshot
+  // actually changes.
+  const filterSnapshotKey = useMemo(() => JSON.stringify(filters), [filters]);
+  useEffect(() => {
+    if (!onFilterChange) return;
+    onFilterChange({
+      status: filters.status,
+      severity: filters.severity,
+      monitorType: filters.monitorType,
+      healthStatus: filters.healthStatus,
+      createdBy: filters.createdBy,
+      destinations: filters.destinations,
+      backend: filters.backend,
+      labels: filters.labels,
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filterSnapshotKey, onFilterChange]);
 
   const activeFilterCount = useMemo(() => {
     let count = 0;

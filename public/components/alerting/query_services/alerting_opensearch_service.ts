@@ -14,6 +14,7 @@ import { coreRefs } from '../../../framework/core_refs';
 import type {
   AlertsTimelineResponse,
   NotificationRouting,
+  PaginatedResponse,
   ProgressiveResponse,
   UnifiedAlert,
   UnifiedAlertSummary,
@@ -21,7 +22,25 @@ import type {
   UnifiedRuleSummary,
 } from '../../../../common/types/alerting';
 
-export interface ListAlertsParams {
+interface PaginationParams {
+  /** 1-indexed; presence selects the paginated response shape. */
+  page?: number;
+  pageSize?: number;
+  /** "field:dir", e.g. "startTime:desc". Whitelist enforced server-side. */
+  sort?: string;
+}
+
+interface AlertsFilterParamsCommon {
+  severity?: string[];
+  state?: string[];
+  backend?: string[];
+  labels?: Record<string, string[]>;
+  search?: string;
+  /** Force-skip the per-datasource 30s response cache. */
+  noCache?: boolean;
+}
+
+export interface ListAlertsParams extends PaginationParams, AlertsFilterParamsCommon {
   dsIds: string[];
   /** Optional per-datasource timeout in ms. */
   timeout?: number;
@@ -35,10 +54,13 @@ export interface ListAlertsParams {
   signal?: AbortSignal;
 }
 
-export interface ListRulesParams {
+export interface ListRulesParams extends PaginationParams, AlertsFilterParamsCommon {
   dsIds: string[];
   timeout?: number;
   maxResults?: number;
+  monitorType?: string[];
+  healthStatus?: string[];
+  createdBy?: string[];
   signal?: AbortSignal;
 }
 
@@ -65,34 +87,58 @@ export class AlertingOpenSearchService {
     const q: Record<string, string> = { dsIds: params.dsIds.join(',') };
     if (params.timeout !== undefined) q.timeout = String(params.timeout);
     if (params.maxResults !== undefined) q.maxResults = String(params.maxResults);
-    // Time-range fields are defined on ListAlertsParams only. Check via
-    // `in` operator rather than type narrowing because ListRulesParams
-    // (the other arm of the union) intentionally does not carry them.
+    // Time-range fields are defined on ListAlertsParams only.
     if ('startTime' in params && params.startTime !== undefined) q.startTime = params.startTime;
     if ('endTime' in params && params.endTime !== undefined) q.endTime = params.endTime;
+
+    if (params.page !== undefined) q.page = String(params.page);
+    if (params.pageSize !== undefined) q.pageSize = String(params.pageSize);
+    if (params.sort) q.sort = params.sort;
+    if (params.severity && params.severity.length > 0) q.severity = params.severity.join(',');
+    if (params.state && params.state.length > 0) q.state = params.state.join(',');
+    if (params.backend && params.backend.length > 0) q.backend = params.backend.join(',');
+    if (params.labels && Object.keys(params.labels).length > 0) {
+      q.labels = JSON.stringify(params.labels);
+    }
+    if (params.search) q.search = params.search;
+    if (params.noCache) q.noCache = '1';
+
+    if ('monitorType' in params && params.monitorType && params.monitorType.length > 0) {
+      q.monitorType = params.monitorType.join(',');
+    }
+    if ('healthStatus' in params && params.healthStatus && params.healthStatus.length > 0) {
+      q.healthStatus = params.healthStatus.join(',');
+    }
+    if ('createdBy' in params && params.createdBy && params.createdBy.length > 0) {
+      q.createdBy = params.createdBy.join(',');
+    }
     return q;
   }
 
   /**
    * Unified alerts list across selected datasources.
-   * Returns a `ProgressiveResponse` with `results` + per-datasource status.
+   * When `page` is set, returns the paginated response shape; otherwise
+   * the legacy progressive response.
    */
-  async listAlerts(params: ListAlertsParams): Promise<ProgressiveResponse<UnifiedAlertSummary>> {
+  async listAlerts(
+    params: ListAlertsParams
+  ): Promise<ProgressiveResponse<UnifiedAlertSummary> | PaginatedResponse<UnifiedAlertSummary>> {
     return (await this.requireHttp().get('/api/alerting/unified/alerts', {
       query: this.buildQuery(params),
       signal: params.signal,
-    })) as ProgressiveResponse<UnifiedAlertSummary>;
+    })) as ProgressiveResponse<UnifiedAlertSummary> | PaginatedResponse<UnifiedAlertSummary>;
   }
 
   /**
    * Unified rules/monitors list across selected datasources.
-   * Returns a `ProgressiveResponse` with `results` + per-datasource status.
    */
-  async listRules(params: ListRulesParams): Promise<ProgressiveResponse<UnifiedRuleSummary>> {
+  async listRules(
+    params: ListRulesParams
+  ): Promise<ProgressiveResponse<UnifiedRuleSummary> | PaginatedResponse<UnifiedRuleSummary>> {
     return (await this.requireHttp().get('/api/alerting/unified/rules', {
       query: this.buildQuery(params),
       signal: params.signal,
-    })) as ProgressiveResponse<UnifiedRuleSummary>;
+    })) as ProgressiveResponse<UnifiedRuleSummary> | PaginatedResponse<UnifiedRuleSummary>;
   }
 
   /**

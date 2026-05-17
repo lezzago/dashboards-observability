@@ -209,6 +209,43 @@ export interface OSDestinationsApiResponse {
 // Service interfaces
 // ============================================================================
 
+/**
+ * Optional listing/pagination options accepted by `OpenSearchBackend.getAlerts`.
+ * Phase 4 added pagination + filter forwarding; legacy callers that pass
+ * no options keep the original full-scan + post-filter behaviour.
+ */
+export type OSSortField = 'startTime' | 'lastUpdated' | 'severity' | 'state' | 'name';
+
+export interface OSGetAlertsOptions {
+  startMs?: number;
+  endMs?: number;
+  monitorId?: string;
+  page?: number;
+  pageSize?: number;
+  sortField?: OSSortField;
+  sortOrder?: 'asc' | 'desc';
+  /** UnifiedAlertSeverity values: critical|high|medium|low|info */
+  severity?: string[];
+  /** UnifiedAlertState values: active|pending|acknowledged|silenced|resolved|error */
+  state?: string[];
+  search?: string;
+  labels?: Record<string, string[]>;
+}
+
+export interface OSGetMonitorsOptions {
+  page?: number;
+  pageSize?: number;
+  sortField?: OSSortField;
+  sortOrder?: 'asc' | 'desc';
+  status?: string[];
+  severity?: string[];
+  monitorType?: string[];
+  healthStatus?: string[];
+  createdBy?: string[];
+  search?: string;
+  labels?: Record<string, string[]>;
+}
+
 /** OpenSearch Alerting backend.
  *
  * Implementations talk to the cluster through the caller-provided scoped
@@ -220,7 +257,16 @@ export interface OpenSearchBackend {
   readonly type: 'opensearch';
 
   // Monitors — read-only methods.
+  /**
+   * When `options` is undefined, returns the full set via `search_after`
+   * (legacy behaviour). When options are provided, returns one paginated
+   * page with `total` + `hasMore`.
+   */
   getMonitors(client: AlertingOSClient): Promise<OSMonitor[]>;
+  getMonitors(
+    client: AlertingOSClient,
+    options: OSGetMonitorsOptions
+  ): Promise<{ monitors: OSMonitor[]; total: number; hasMore: boolean }>;
   getMonitor(client: AlertingOSClient, monitorId: string): Promise<OSMonitor | null>;
   runMonitor(client: AlertingOSClient, monitorId: string, dryRun?: boolean): Promise<unknown>;
   searchQuery(
@@ -244,8 +290,8 @@ export interface OpenSearchBackend {
   // Alerts — read + acknowledge.
   getAlerts(
     client: AlertingOSClient,
-    options?: { startMs?: number; endMs?: number; monitorId?: string }
-  ): Promise<{ alerts: OSAlert[]; totalAlerts: number; truncated: boolean }>;
+    options?: OSGetAlertsOptions
+  ): Promise<{ alerts: OSAlert[]; totalAlerts: number; truncated: boolean; hasMore?: boolean }>;
   acknowledgeAlerts(
     client: AlertingOSClient,
     monitorId: string,

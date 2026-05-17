@@ -22,6 +22,7 @@
  *   - PrometheusQueryHandler.java / PrometheusClient.java
  */
 import { createPromFilterProbe, PromFilterProbe } from './prom_filter_probe';
+import { TtlCache } from './ttl_cache';
 import {
   AlertingOSClient,
   Datasource,
@@ -63,11 +64,24 @@ export class DirectQueryPrometheusBackend implements PrometheusBackend, Promethe
   // result is a property of the upstream, not the caller.
   readonly filterProbe: PromFilterProbe;
 
+  /**
+   * Per-process listing caches keyed on `dsId`. 30s TTL so repeated
+   * filter clicks (and chart-vs-table refetches) reuse one upstream
+   * fetch when filter pushdown isn't honoured. Refresh-button clicks
+   * bypass via `noCache: true` on `getAlerts` / `getRuleGroups`.
+   *
+   * Two typed caches keep call-site casts out of the hot path.
+   */
+  readonly alertsCache: TtlCache<string, PromAlert[]>;
+  readonly ruleGroupsCache: TtlCache<string, PromRuleGroup[]>;
+
   constructor(private readonly logger: Logger) {
     this.logger.info(
       'DirectQuery Prometheus backend configured: routing via OSD scoped cluster client'
     );
     this.filterProbe = createPromFilterProbe(this, logger);
+    this.alertsCache = new TtlCache<string, PromAlert[]>(30_000);
+    this.ruleGroupsCache = new TtlCache<string, PromRuleGroup[]>(30_000);
   }
 
   // =========================================================================
@@ -177,6 +191,42 @@ export class DirectQueryPrometheusBackend implements PrometheusBackend, Promethe
     filter?: PromRuleGroupsFilter,
     options?: PromRuleGroupsOptions
   ): Promise<PromRuleGroup[]> {
+    const includeAlerts = options?.includeAlerts === true;
+    const fetcher = async () => this.fetchRuleGroupsRaw(client, ds, filter, includeAlerts);
+
+    // Cache only the listing path (no filter, no includeAlerts). Detail
+    // flyout calls pass a `ruleGroup`+`ruleName` filter and bypass the
+    // cache implicitly because the cache key would collide with the
+    // listing entries; keeping cacheing scoped to the unfiltered listing
+    // also avoids stale-result bugs when the probe says pushdown works
+    // and one filter result poisons another's read.
+    const cacheable = !options?.noCache && !includeAlerts && this.isCacheableRuleFilter(filter);
+    if (!cacheable) return fetcher();
+    return this.ruleGroupsCache.get(ds.id, fetcher);
+  }
+
+  /**
+   * True when this filter shape only narrows rule-type (alert vs
+   * recording) — i.e. the listing path's "give me all alerting rules"
+   * call. Any rule-name / rule-group / file / labels / state filter
+   * makes the result filter-specific, so caching it per-dsId would mix
+   * different filter sets together. Phase 4 caches only the unscoped
+   * listing.
+   */
+  private isCacheableRuleFilter(filter?: PromRuleGroupsFilter): boolean {
+    if (!filter) return true;
+    if (filter.ruleGroup || filter.ruleName || filter.file) return false;
+    if (filter.labels && Object.keys(filter.labels).length > 0) return false;
+    if (filter.state) return false;
+    return true;
+  }
+
+  private async fetchRuleGroupsRaw(
+    client: AlertingOSClient,
+    ds: Datasource,
+    filter: PromRuleGroupsFilter | undefined,
+    includeAlerts: boolean
+  ): Promise<PromRuleGroup[]> {
     const path = this.buildRulesPath(filter);
     const data = await this.get<PromRulesApiResponse>(client, ds, path);
 
@@ -192,7 +242,6 @@ export class DirectQueryPrometheusBackend implements PrometheusBackend, Promethe
       rawGroups = [];
     }
 
-    const includeAlerts = options?.includeAlerts === true;
     const groups: PromRuleGroup[] = rawGroups.map((g: PromRawRuleGroup) => ({
       name: g.name || '',
       file: g.file || '',
@@ -218,7 +267,19 @@ export class DirectQueryPrometheusBackend implements PrometheusBackend, Promethe
   // Alerts — derived from rules when /api/v1/alerts is unavailable
   // =========================================================================
 
-  async getAlerts(client: AlertingOSClient, ds: Datasource): Promise<PromAlert[]> {
+  async getAlerts(
+    client: AlertingOSClient,
+    ds: Datasource,
+    options?: { noCache?: boolean }
+  ): Promise<PromAlert[]> {
+    if (options?.noCache) {
+      this.alertsCache.invalidate(ds.id);
+      return this.fetchAlertsRaw(client, ds);
+    }
+    return this.alertsCache.get(ds.id, () => this.fetchAlertsRaw(client, ds));
+  }
+
+  private async fetchAlertsRaw(client: AlertingOSClient, ds: Datasource): Promise<PromAlert[]> {
     try {
       const data = await this.get<PromAlertsApiResponse>(client, ds, '/api/v1/alerts');
       let rawAlerts: PromRawAlert[];
@@ -535,6 +596,22 @@ export class DirectQueryPrometheusBackend implements PrometheusBackend, Promethe
     if (filter.ruleName) params.push(`rule_name=${encodeURIComponent(filter.ruleName)}`);
     if (filter.file) params.push(`file=${encodeURIComponent(filter.file)}`);
     if (filter.type) params.push(`type=${encodeURIComponent(filter.type)}`);
+    // Phase 4 — Prom ≥ 2.40 / Cortex ≥ 1.13 honour `match[]` matchers on
+    // /api/v1/rules. Older upstreams silently ignore them; the filter
+    // probe gates whether to send these (caller responsibility) and the
+    // service post-filters in JS for correctness regardless.
+    if (filter.state) {
+      params.push(`match[]=${encodeURIComponent(`{alertstate="${filter.state}"}`)}`);
+    }
+    if (filter.labels) {
+      for (const [k, vs] of Object.entries(filter.labels)) {
+        for (const v of vs) {
+          if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(k)) continue;
+          const escaped = String(v).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+          params.push(`match[]=${encodeURIComponent(`{${k}="${escaped}"}`)}`);
+        }
+      }
+    }
     return params.length === 0 ? '/api/v1/rules' : `/api/v1/rules?${params.join('&')}`;
   }
 

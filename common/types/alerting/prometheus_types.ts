@@ -223,6 +223,15 @@ export interface PromRuleGroupsFilter {
   ruleName?: string;
   file?: string;
   type?: 'alert' | 'recording';
+  /**
+   * Phase 4 additions — used when the filter probe says pushdown works.
+   * `labels` are appended as `match[]={k="v"}` matchers; `state` narrows
+   * to a single Prometheus alert state (`firing`/`pending`/`inactive`).
+   * Always best-effort — caller MUST also post-filter in JS for
+   * correctness, mirroring the rule-detail path.
+   */
+  labels?: Record<string, string[]>;
+  state?: string;
 }
 
 /**
@@ -232,6 +241,16 @@ export interface PromRuleGroupsFilter {
  */
 export interface PromRuleGroupsOptions {
   includeAlerts?: boolean;
+  /**
+   * Phase 4 — bypass the per-process 30s listing cache. Refresh-button
+   * clicks at the UI layer pass `noCache: true` to force a live fetch.
+   */
+  noCache?: boolean;
+}
+
+export interface PromGetAlertsOptions {
+  /** Same semantics as `PromRuleGroupsOptions.noCache`. */
+  noCache?: boolean;
 }
 
 export interface PrometheusBackend {
@@ -246,7 +265,11 @@ export interface PrometheusBackend {
   ): Promise<PromRuleGroup[]>;
 
   // Active alerts from Prometheus server
-  getAlerts(client: AlertingOSClient, ds: Datasource): Promise<PromAlert[]>;
+  getAlerts(
+    client: AlertingOSClient,
+    ds: Datasource,
+    options?: PromGetAlertsOptions
+  ): Promise<PromAlert[]>;
 
   // Workspace discovery
   listWorkspaces(client: AlertingOSClient, ds: Datasource): Promise<PrometheusWorkspace[]>;

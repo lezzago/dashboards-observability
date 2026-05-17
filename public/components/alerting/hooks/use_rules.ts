@@ -13,7 +13,11 @@
  * `data.results` client-side.
  */
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import type { ProgressiveResponse, UnifiedRuleSummary } from '../../../../common/types/alerting';
+import type {
+  PaginatedResponse,
+  ProgressiveResponse,
+  UnifiedRuleSummary,
+} from '../../../../common/types/alerting';
 import { AlertingOpenSearchService } from '../query_services/alerting_opensearch_service';
 
 export interface UseRulesParams {
@@ -21,8 +25,12 @@ export interface UseRulesParams {
   refreshToken?: unknown;
 }
 
+export type RulesResponse =
+  | ProgressiveResponse<UnifiedRuleSummary>
+  | PaginatedResponse<UnifiedRuleSummary>;
+
 export interface UseRulesResult {
-  data: ProgressiveResponse<UnifiedRuleSummary> | null;
+  data: RulesResponse | null;
   isLoading: boolean;
   error: Error | null;
   refetch: () => void;
@@ -30,7 +38,7 @@ export interface UseRulesResult {
 
 export function useRules({ dsIds, refreshToken }: UseRulesParams): UseRulesResult {
   const service = useMemo(() => new AlertingOpenSearchService(), []);
-  const [data, setData] = useState<ProgressiveResponse<UnifiedRuleSummary> | null>(null);
+  const [data, setData] = useState<RulesResponse | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<Error | null>(null);
   const [localRefresh, setLocalRefresh] = useState(0);

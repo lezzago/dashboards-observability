@@ -27,6 +27,8 @@ import {
   Logger,
   NotificationRouting,
   OpenSearchBackend,
+  OSGetAlertsOptions,
+  OSGetMonitorsOptions,
   PrometheusBackend,
   OSAlert,
   OSMonitor,
@@ -123,6 +125,250 @@ function resolveRangeMsFromOptions(options?: {
     endMs,
     endIsNow: Math.abs(endMs - Date.now()) <= NOW_TOLERANCE_MS,
   };
+}
+
+// ============================================================================
+// Phase 4 — pagination + filter helpers (pure)
+//
+// Used by `getPaginatedAlerts` / `getPaginatedRules` to do the JS-side
+// post-filter, sort, and slice over per-datasource results. Filter
+// pushdown happens in the backend layer; these helpers run regardless
+// (correctness contract — same as Phase 3's rule-detail path).
+// ============================================================================
+
+const SEVERITY_SORT_ORDER: Record<string, number> = {
+  critical: 0,
+  high: 1,
+  medium: 2,
+  low: 3,
+  info: 4,
+};
+
+function filterDatasourcesByBackend(datasources: Datasource[], backend?: string[]): Datasource[] {
+  if (!backend || backend.length === 0) return datasources;
+  const wanted = new Set(backend);
+  return datasources.filter((ds) => wanted.has(ds.type));
+}
+
+function parseSort(
+  sort: string | undefined,
+  defaultField: string
+): { field: string; dir: 'asc' | 'desc' } {
+  if (!sort) return { field: defaultField, dir: 'desc' };
+  const [rawField, rawDir] = sort.split(':');
+  const field = rawField || defaultField;
+  const dir = rawDir === 'asc' ? 'asc' : 'desc';
+  return { field, dir };
+}
+
+function applyAlertFilters(
+  alerts: UnifiedAlertSummary[],
+  options?: UnifiedFetchOptions
+): UnifiedAlertSummary[] {
+  if (!options) return alerts;
+  let result = alerts;
+  if (options.severity && options.severity.length > 0) {
+    const wanted = new Set(options.severity);
+    result = result.filter((a) => wanted.has(a.severity));
+  }
+  if (options.state && options.state.length > 0) {
+    const wanted = new Set(options.state);
+    result = result.filter((a) => wanted.has(a.state));
+  }
+  if (options.labels) {
+    const labelEntries = Object.entries(options.labels).filter(([, vs]) => vs.length > 0);
+    if (labelEntries.length > 0) {
+      result = result.filter((a) =>
+        labelEntries.every(([k, vs]) => {
+          const v = a.labels[k];
+          return v !== undefined && vs.includes(v);
+        })
+      );
+    }
+  }
+  if (options.search && options.search.trim()) {
+    const q = options.search.trim().toLowerCase();
+    result = result.filter((a) => {
+      if (a.name.toLowerCase().includes(q)) return true;
+      if ((a.message ?? '').toLowerCase().includes(q)) return true;
+      for (const v of Object.values(a.labels)) {
+        if (v.toLowerCase().includes(q)) return true;
+      }
+      return false;
+    });
+  }
+  return result;
+}
+
+function applyRuleFilters(
+  rules: UnifiedRuleSummary[],
+  options?: UnifiedFetchOptions
+): UnifiedRuleSummary[] {
+  if (!options) return rules;
+  let result = rules;
+  if (options.state && options.state.length > 0) {
+    const wanted = new Set(options.state);
+    result = result.filter((r) => wanted.has(r.status));
+  }
+  if (options.severity && options.severity.length > 0) {
+    const wanted = new Set(options.severity);
+    result = result.filter((r) => wanted.has(r.severity));
+  }
+  if (options.monitorType && options.monitorType.length > 0) {
+    const wanted = new Set(options.monitorType);
+    result = result.filter((r) => wanted.has(r.monitorType));
+  }
+  if (options.healthStatus && options.healthStatus.length > 0) {
+    const wanted = new Set(options.healthStatus);
+    result = result.filter((r) => wanted.has(r.healthStatus));
+  }
+  if (options.createdBy && options.createdBy.length > 0) {
+    const wanted = new Set(options.createdBy);
+    result = result.filter((r) => wanted.has(r.createdBy));
+  }
+  if (options.labels) {
+    const labelEntries = Object.entries(options.labels).filter(([, vs]) => vs.length > 0);
+    if (labelEntries.length > 0) {
+      result = result.filter((r) =>
+        labelEntries.every(([k, vs]) => {
+          const v = r.labels[k];
+          return v !== undefined && vs.includes(v);
+        })
+      );
+    }
+  }
+  if (options.search && options.search.trim()) {
+    const q = options.search.trim().toLowerCase();
+    result = result.filter((r) => {
+      if (r.name.toLowerCase().includes(q)) return true;
+      for (const v of Object.values(r.labels)) {
+        if (v.toLowerCase().includes(q)) return true;
+      }
+      return false;
+    });
+  }
+  return result;
+}
+
+function sortAlerts(alerts: UnifiedAlertSummary[], sort?: string): UnifiedAlertSummary[] {
+  const { field, dir } = parseSort(sort, 'startTime');
+  const mul = dir === 'asc' ? 1 : -1;
+  const copy = alerts.slice();
+  copy.sort((a, b) => {
+    let cmp = 0;
+    if (field === 'severity') {
+      cmp = (SEVERITY_SORT_ORDER[a.severity] ?? 99) - (SEVERITY_SORT_ORDER[b.severity] ?? 99);
+    } else if (field === 'state') {
+      cmp = a.state.localeCompare(b.state);
+    } else if (field === 'name') {
+      cmp = a.name.localeCompare(b.name);
+    } else if (field === 'lastUpdated') {
+      cmp = new Date(a.lastUpdated).getTime() - new Date(b.lastUpdated).getTime();
+    } else {
+      cmp = new Date(a.startTime).getTime() - new Date(b.startTime).getTime();
+    }
+    return cmp * mul;
+  });
+  return copy;
+}
+
+function sortRules(rules: UnifiedRuleSummary[], sort?: string): UnifiedRuleSummary[] {
+  const { field, dir } = parseSort(sort, 'name');
+  const mul = dir === 'asc' ? 1 : -1;
+  const copy = rules.slice();
+  copy.sort((a, b) => {
+    let cmp = 0;
+    if (field === 'severity') {
+      cmp = (SEVERITY_SORT_ORDER[a.severity] ?? 99) - (SEVERITY_SORT_ORDER[b.severity] ?? 99);
+    } else if (field === 'state') {
+      cmp = a.status.localeCompare(b.status);
+    } else if (field === 'lastUpdated') {
+      cmp = new Date(a.lastModified).getTime() - new Date(b.lastModified).getTime();
+    } else if (field === 'startTime') {
+      cmp = new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+    } else {
+      cmp = a.name.localeCompare(b.name);
+    }
+    return cmp * mul;
+  });
+  return copy;
+}
+
+/**
+ * Build per-datasource OS alerts options when ANY filter or range or
+ * monitorId is in play. Returns undefined when no narrowing is needed —
+ * caller falls through to the legacy full-scan path.
+ *
+ * Per-DS pageSize is intentionally generous: this is the inner fetch
+ * before unified-layer pagination slices the merged set. We want
+ * filter-narrowed results, not page-narrowed.
+ */
+function buildOsAlertOptions(
+  range: ResolvedRange | undefined,
+  options?: UnifiedFetchOptions
+): OSGetAlertsOptions | undefined {
+  if (!options && !range) return undefined;
+
+  // Without filters, range, OR pagination, fall through to the legacy
+  // full-scan. The paginated path kicks in when the caller asks for it
+  // (page/pageSize) OR has any filter to push down.
+  const hasPaging = !!options && (options.page !== undefined || options.pageSize !== undefined);
+  const hasFilter =
+    !!options &&
+    ((options.severity && options.severity.length > 0) ||
+      (options.state && options.state.length > 0) ||
+      (options.search !== undefined && options.search !== '') ||
+      (options.labels && Object.keys(options.labels).length > 0));
+
+  if (!hasFilter && !hasPaging && !range) return undefined;
+
+  const out: OSGetAlertsOptions = {
+    pageSize: 200,
+    page: 1,
+    sortField: 'startTime',
+    sortOrder: 'desc',
+  };
+  if (range) {
+    out.startMs = range.startMs;
+    out.endMs = range.endMs;
+  }
+  if (options?.severity) out.severity = options.severity;
+  if (options?.state) out.state = options.state;
+  if (options?.search) out.search = options.search;
+  if (options?.labels) out.labels = options.labels;
+  return out;
+}
+
+function buildOsMonitorOptions(options?: UnifiedFetchOptions): OSGetMonitorsOptions | undefined {
+  if (!options) return undefined;
+  // Switch to the paginated upstream when the caller asks for page/size
+  // OR when any filter is in play. `getUnifiedRules` (legacy progressive
+  // path) calls without page/size and without filters → falls through to
+  // the legacy full-scan.
+  const hasPaging = options.page !== undefined || options.pageSize !== undefined;
+  const hasFilter =
+    (options.state && options.state.length > 0) ||
+    (options.severity && options.severity.length > 0) ||
+    (options.monitorType && options.monitorType.length > 0) ||
+    (options.healthStatus && options.healthStatus.length > 0) ||
+    (options.createdBy && options.createdBy.length > 0) ||
+    (options.search !== undefined && options.search !== '') ||
+    (options.labels && Object.keys(options.labels).length > 0);
+  if (!hasFilter && !hasPaging) return undefined;
+  const out: OSGetMonitorsOptions = {
+    page: 1,
+    pageSize: 200,
+    sortField: 'name',
+    sortOrder: 'asc',
+  };
+  if (options.state) out.status = options.state;
+  if (options.severity) out.severity = options.severity;
+  if (options.monitorType) out.monitorType = options.monitorType;
+  if (options.healthStatus) out.healthStatus = options.healthStatus;
+  if (options.createdBy) out.createdBy = options.createdBy;
+  if (options.search) out.search = options.search;
+  if (options.labels) out.labels = options.labels;
+  return out;
 }
 
 export class MultiBackendAlertService {
@@ -367,19 +613,25 @@ export class MultiBackendAlertService {
   // =========================================================================
 
   async getPaginatedRules(
-    client: AlertingOSClient,
+    clientOrResolver: AlertingOSClient | ((dsId: string) => Promise<AlertingOSClient>),
     options?: UnifiedFetchOptions
   ): Promise<PaginatedResponse<UnifiedRuleSummary>> {
-    const page = options?.page ?? 1;
-    const pageSize = Math.min(options?.pageSize ?? 20, 100);
-    const datasources = await this.resolveDatasources(options?.dsIds);
+    const page = Math.max(1, options?.page ?? 1);
+    const pageSize = Math.min(Math.max(1, options?.pageSize ?? 20), 200);
+    const datasources = filterDatasourcesByBackend(
+      await this.resolveDatasources(options?.dsIds),
+      options?.backend
+    );
 
     const allRules: UnifiedRuleSummary[] = [];
     const warnings: DatasourceWarning[] = [];
 
-    // Fetch from all datasources in parallel
+    const isResolver = typeof clientOrResolver === 'function';
     const dsResults = await Promise.allSettled(
-      datasources.map((ds) => this.fetchRulesRaw(client, ds))
+      datasources.map(async (ds) => {
+        const client = isResolver ? await clientOrResolver(ds.id) : clientOrResolver;
+        return this.fetchRulesRaw(client, ds, options);
+      })
     );
 
     for (let i = 0; i < datasources.length; i++) {
@@ -407,9 +659,14 @@ export class MultiBackendAlertService {
       );
     }
 
-    const total = allRules.length;
+    // Always JS post-filter for correctness — even when one or more
+    // datasources push down successfully, others may not.
+    const filtered = applyRuleFilters(allRules, options);
+    const sorted = sortRules(filtered, options?.sort);
+
+    const total = sorted.length;
     const start = (page - 1) * pageSize;
-    const results = allRules.slice(start, start + pageSize);
+    const results = sorted.slice(start, start + pageSize);
 
     return {
       results,
@@ -422,19 +679,27 @@ export class MultiBackendAlertService {
   }
 
   async getPaginatedAlerts(
-    client: AlertingOSClient,
+    clientOrResolver: AlertingOSClient | ((dsId: string) => Promise<AlertingOSClient>),
     options?: UnifiedFetchOptions
   ): Promise<PaginatedResponse<UnifiedAlertSummary>> {
-    const page = options?.page ?? 1;
-    const pageSize = Math.min(options?.pageSize ?? 20, 100);
-    const datasources = await this.resolveDatasources(options?.dsIds);
+    const page = Math.max(1, options?.page ?? 1);
+    const pageSize = Math.min(Math.max(1, options?.pageSize ?? 20), 200);
+    const datasources = filterDatasourcesByBackend(
+      await this.resolveDatasources(options?.dsIds),
+      options?.backend
+    );
 
     const allAlerts: UnifiedAlertSummary[] = [];
     const warnings: DatasourceWarning[] = [];
 
-    // Fetch from all datasources in parallel
+    const resolvedRange = resolveRangeMsFromOptions(options);
+
+    const isResolver = typeof clientOrResolver === 'function';
     const dsResults = await Promise.allSettled(
-      datasources.map((ds) => this.fetchAlertsRaw(client, ds))
+      datasources.map(async (ds) => {
+        const client = isResolver ? await clientOrResolver(ds.id) : clientOrResolver;
+        return this.fetchAlertsRaw(client, ds, resolvedRange, options);
+      })
     );
 
     for (let i = 0; i < datasources.length; i++) {
@@ -466,9 +731,15 @@ export class MultiBackendAlertService {
       );
     }
 
-    const total = allAlerts.length;
+    // Same correctness contract as Phase 3 — one Prom datasource
+    // returning a partially-filtered listing must not bleed into the
+    // unified response.
+    const filtered = applyAlertFilters(allAlerts, options);
+    const sorted = sortAlerts(filtered, options?.sort);
+
+    const total = sorted.length;
     const start = (page - 1) * pageSize;
-    const results = allAlerts.slice(start, start + pageSize);
+    const results = sorted.slice(start, start + pageSize);
 
     return {
       results,
@@ -713,14 +984,13 @@ export class MultiBackendAlertService {
   private async fetchAlertsRaw(
     client: AlertingOSClient,
     ds: Datasource,
-    range?: ResolvedRange
+    range?: ResolvedRange,
+    filterOptions?: UnifiedFetchOptions
   ): Promise<FetchAlertsRawResult> {
     if (ds.type === 'opensearch' && this.osBackend) {
-      if (range) {
-        const { alerts, truncated } = await this.osBackend.getAlerts(client, {
-          startMs: range.startMs,
-          endMs: range.endMs,
-        });
+      const osOptions = buildOsAlertOptions(range, filterOptions);
+      if (osOptions) {
+        const { alerts, truncated } = await this.osBackend.getAlerts(client, osOptions);
         return {
           alerts: alerts.map((a) => osAlertToUnified(a, ds.id)),
           truncated,
@@ -731,7 +1001,9 @@ export class MultiBackendAlertService {
     }
 
     if (ds.type === 'prometheus' && this.promBackend) {
-      const alerts = await this.promBackend.getAlerts(client, ds);
+      const alerts = await this.promBackend.getAlerts(client, ds, {
+        noCache: filterOptions?.noCache === true,
+      });
       const mapped = alerts.map((a) => promAlertToUnified(a, ds.id));
       return range
         ? { alerts: mapped, fallback: 'prometheus-alerts-current-only' }
@@ -743,14 +1015,28 @@ export class MultiBackendAlertService {
 
   private async fetchRulesRaw(
     client: AlertingOSClient,
-    ds: Datasource
+    ds: Datasource,
+    filterOptions?: UnifiedFetchOptions
   ): Promise<UnifiedRuleSummary[]> {
     const results: UnifiedRuleSummary[] = [];
     if (ds.type === 'opensearch' && this.osBackend) {
-      const monitors = await this.osBackend.getMonitors(client);
-      for (const m of monitors) results.push(osMonitorToUnifiedRuleSummary(m, ds.id));
+      const osMonitorOptions = buildOsMonitorOptions(filterOptions);
+      if (osMonitorOptions) {
+        // `pageSize` here is the per-DS request size — large enough to
+        // cover the post-filter cap with headroom. Multi-DS pagination
+        // is Option B from PHASE_4.md: per-DS fetch all filter-narrowed,
+        // server-side concat, then slice.
+        const { monitors } = await this.osBackend.getMonitors(client, osMonitorOptions);
+        for (const m of monitors) results.push(osMonitorToUnifiedRuleSummary(m, ds.id));
+      } else {
+        const monitors = await this.osBackend.getMonitors(client);
+        for (const m of monitors) results.push(osMonitorToUnifiedRuleSummary(m, ds.id));
+      }
     } else if (ds.type === 'prometheus' && this.promBackend) {
-      const groups = await this.promBackend.getRuleGroups(client, ds);
+      const promFilter = await this.buildPromRuleFilter(client, ds, filterOptions);
+      const groups = await this.promBackend.getRuleGroups(client, ds, promFilter, {
+        noCache: filterOptions?.noCache === true,
+      });
       for (const g of groups) {
         for (const r of g.rules) {
           if (r.type === 'alerting') results.push(promRuleToUnified(r, g.name, ds.id));
@@ -758,6 +1044,57 @@ export class MultiBackendAlertService {
       }
     }
     return results;
+  }
+
+  /**
+   * Build a `PromRuleGroupsFilter` from `UnifiedFetchOptions` only when
+   * the per-process probe says pushdown works for this datasource.
+   * Reuses `DirectQueryPrometheusBackend.filterProbe` (Phase 3) — does
+   * NOT construct a new probe instance.
+   */
+  private async buildPromRuleFilter(
+    client: AlertingOSClient,
+    ds: Datasource,
+    filterOptions?: UnifiedFetchOptions
+  ): Promise<import('../../../common/types/alerting').PromRuleGroupsFilter | undefined> {
+    if (!filterOptions) return undefined;
+    const wants =
+      (filterOptions.severity && filterOptions.severity.length > 0) ||
+      (filterOptions.state && filterOptions.state.length > 0) ||
+      (filterOptions.labels && Object.keys(filterOptions.labels).length > 0);
+    if (!wants) return undefined;
+    const probe = (this.promBackend as { filterProbe?: PromFilterProbe } | undefined)?.filterProbe;
+    if (!probe) return undefined;
+    const result = await probe.probe(client, ds);
+    if (result.status !== 'pushdown-works') return undefined;
+
+    const filter: import('../../../common/types/alerting').PromRuleGroupsFilter = {
+      type: 'alert',
+    };
+    const labels: Record<string, string[]> = {};
+    if (filterOptions.severity && filterOptions.severity.length > 0) {
+      labels.severity = filterOptions.severity;
+    }
+    if (filterOptions.labels) {
+      for (const [k, vs] of Object.entries(filterOptions.labels)) {
+        if (vs.length > 0) labels[k] = vs;
+      }
+    }
+    if (Object.keys(labels).length > 0) filter.labels = labels;
+    if (filterOptions.state && filterOptions.state.length === 1) {
+      const s = filterOptions.state[0];
+      // Map UnifiedAlertState → Prometheus alertstate values.
+      const mapped =
+        s === 'active'
+          ? 'firing'
+          : s === 'pending'
+          ? 'pending'
+          : s === 'resolved'
+          ? 'inactive'
+          : undefined;
+      if (mapped) filter.state = mapped;
+    }
+    return filter;
   }
 
   // =========================================================================

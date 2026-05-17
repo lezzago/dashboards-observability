@@ -15,6 +15,7 @@ import type {
   AlertingOSClient,
   OSMonitor,
   UnifiedAlertSeverity,
+  UnifiedFetchOptions,
 } from '../../../common/types/alerting';
 import { MultiBackendAlertService } from '../../services/alerting';
 import { toHandlerResult } from './route_utils';
@@ -175,32 +176,112 @@ export async function handleGetPromAlerts(
 // Unified View Handlers (cross-backend, parallel with per-datasource status)
 // ============================================================================
 
+/**
+ * Shared query shape for the paginated unified listing endpoints.
+ * All fields are strings because OSD's schema forwards URL params raw;
+ * the handler parses + validates each one.
+ */
+export interface UnifiedListQuery {
+  dsIds?: string;
+  timeout?: string;
+  maxResults?: string;
+  startTime?: string;
+  endTime?: string;
+  page?: string;
+  pageSize?: string;
+  sort?: string;
+  severity?: string;
+  state?: string;
+  backend?: string;
+  labels?: string;
+  search?: string;
+  monitorType?: string;
+  healthStatus?: string;
+  createdBy?: string;
+  noCache?: string;
+}
+
+function parseInteger(raw: string | undefined): number | undefined {
+  if (raw === undefined) return undefined;
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) ? n : undefined;
+}
+
+function parseCsvList(raw: string | undefined): string[] | undefined {
+  if (!raw) return undefined;
+  const items = raw
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  return items.length > 0 ? items : undefined;
+}
+
+function parseLabelsParam(raw: string | undefined): Record<string, string[]> | undefined {
+  if (!raw) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined;
+  const out: Record<string, string[]> = {};
+  for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+    if (typeof k !== 'string') continue;
+    if (!Array.isArray(v)) continue;
+    const values = v.filter((x): x is string => typeof x === 'string');
+    if (values.length > 0) out[k] = values;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/**
+ * Translate the wire query into `UnifiedFetchOptions`. Returns the
+ * options plus a flag indicating whether the caller asked for the
+ * paginated response shape (`page` present).
+ */
+function buildFetchOptionsFromQuery(
+  query?: UnifiedListQuery,
+  includeAlertFields: boolean = false
+): { options: UnifiedFetchOptions; paginated: boolean } {
+  const options: UnifiedFetchOptions = {
+    dsIds: query?.dsIds ? query.dsIds.split(',').filter(Boolean) : undefined,
+    timeoutMs: parseInteger(query?.timeout),
+    maxResults: parseInteger(query?.maxResults),
+    startTime: query?.startTime,
+    endTime: query?.endTime,
+    page: parseInteger(query?.page),
+    pageSize: parseInteger(query?.pageSize),
+    sort: query?.sort,
+    severity: parseCsvList(query?.severity),
+    state: parseCsvList(query?.state),
+    backend: parseCsvList(query?.backend),
+    labels: parseLabelsParam(query?.labels),
+    search: query?.search,
+    noCache: query?.noCache === '1' || query?.noCache === 'true' ? true : undefined,
+  };
+  if (!includeAlertFields) {
+    options.monitorType = parseCsvList(query?.monitorType);
+    options.healthStatus = parseCsvList(query?.healthStatus);
+    options.createdBy = parseCsvList(query?.createdBy);
+  }
+  return { options, paginated: options.page !== undefined };
+}
+
 export async function handleGetUnifiedAlerts(
   alertSvc: MultiBackendAlertService,
   clientResolver: (dsId: string) => Promise<AlertingOSClient>,
-  query?: {
-    dsIds?: string;
-    timeout?: string;
-    maxResults?: string;
-    startTime?: string;
-    endTime?: string;
-  }
+  query?: UnifiedListQuery
 ): Promise<HandlerResult> {
   try {
-    const dsIds = query?.dsIds ? query.dsIds.split(',').filter(Boolean) : undefined;
-    const rawTimeout = query?.timeout ? parseInt(query.timeout, 10) : undefined;
-    const timeoutMs =
-      rawTimeout !== undefined && Number.isFinite(rawTimeout) ? rawTimeout : undefined;
-    const rawMaxResults = query?.maxResults ? parseInt(query.maxResults, 10) : undefined;
-    const maxResults =
-      rawMaxResults !== undefined && Number.isFinite(rawMaxResults) ? rawMaxResults : undefined;
-    const response = await alertSvc.getUnifiedAlerts(clientResolver, {
-      dsIds,
-      timeoutMs,
-      maxResults,
-      startTime: query?.startTime,
-      endTime: query?.endTime,
-    });
+    const { options, paginated } = buildFetchOptionsFromQuery(query, /* includeAlertFields */ true);
+    if (paginated) {
+      const response = await alertSvc.getPaginatedAlerts(clientResolver, options);
+      return { status: 200, body: response };
+    }
+    // Backward compat: when `page` is absent, return the legacy
+    // ProgressiveResponse shape that existing callers + tests assume.
+    const response = await alertSvc.getUnifiedAlerts(clientResolver, options);
     return { status: 200, body: response };
   } catch (e: unknown) {
     return toHandlerResult(e);
@@ -210,21 +291,18 @@ export async function handleGetUnifiedAlerts(
 export async function handleGetUnifiedRules(
   alertSvc: MultiBackendAlertService,
   clientResolver: (dsId: string) => Promise<AlertingOSClient>,
-  query?: { dsIds?: string; timeout?: string; maxResults?: string }
+  query?: UnifiedListQuery
 ): Promise<HandlerResult> {
   try {
-    const dsIds = query?.dsIds ? query.dsIds.split(',').filter(Boolean) : undefined;
-    const rawTimeout = query?.timeout ? parseInt(query.timeout, 10) : undefined;
-    const timeoutMs =
-      rawTimeout !== undefined && Number.isFinite(rawTimeout) ? rawTimeout : undefined;
-    const rawMaxResults = query?.maxResults ? parseInt(query.maxResults, 10) : undefined;
-    const maxResults =
-      rawMaxResults !== undefined && Number.isFinite(rawMaxResults) ? rawMaxResults : undefined;
-    const response = await alertSvc.getUnifiedRules(clientResolver, {
-      dsIds,
-      timeoutMs,
-      maxResults,
-    });
+    const { options, paginated } = buildFetchOptionsFromQuery(
+      query,
+      /* includeAlertFields */ false
+    );
+    if (paginated) {
+      const response = await alertSvc.getPaginatedRules(clientResolver, options);
+      return { status: 200, body: response };
+    }
+    const response = await alertSvc.getUnifiedRules(clientResolver, options);
     return { status: 200, body: response };
   } catch (e: unknown) {
     return toHandlerResult(e);

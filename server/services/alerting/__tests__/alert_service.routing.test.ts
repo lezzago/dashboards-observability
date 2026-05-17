@@ -365,4 +365,126 @@ describe('MultiBackendAlertService — routing & list', () => {
     const setter = instance.setDatasourceService;
     expect(setter).toBeUndefined();
   });
+
+  // ============================================================================
+  // Phase 4 — paginated unified listings (filter pushdown + Option B slicing)
+  // ============================================================================
+  describe('getPaginatedAlerts (Phase 4)', () => {
+    it('returns PaginatedResponse shape with total/page/pageSize/hasMore', async () => {
+      mockOsBackend.getAlerts.mockResolvedValueOnce({
+        alerts: [
+          {
+            id: '1',
+            monitor_id: 'm',
+            monitor_name: 'm',
+            trigger_id: 't',
+            trigger_name: 't',
+            state: 'ACTIVE',
+            severity: '1',
+            start_time: 100,
+            last_notification_time: 100,
+            end_time: null,
+            error_message: null,
+            version: 1,
+            monitor_version: 1,
+            acknowledged_time: null,
+            action_execution_results: [],
+          },
+          {
+            id: '2',
+            monitor_id: 'm',
+            monitor_name: 'm',
+            trigger_id: 't',
+            trigger_name: 't',
+            state: 'ACTIVE',
+            severity: '1',
+            start_time: 200,
+            last_notification_time: 200,
+            end_time: null,
+            error_message: null,
+            version: 1,
+            monitor_version: 1,
+            acknowledged_time: null,
+            action_execution_results: [],
+          },
+        ],
+        totalAlerts: 2,
+        truncated: false,
+      });
+      mockPromBackend.getAlerts.mockResolvedValueOnce([]);
+
+      const res = await svc.getPaginatedAlerts({} as never, {
+        page: 1,
+        pageSize: 10,
+        sort: 'startTime:desc',
+      });
+      expect(res).toMatchObject({ page: 1, pageSize: 10 });
+      expect(res.results.length).toBeLessThanOrEqual(10);
+      expect(typeof res.total).toBe('number');
+      expect(typeof res.hasMore).toBe('boolean');
+    });
+
+    it('clamps pageSize to 200', async () => {
+      mockOsBackend.getAlerts.mockResolvedValueOnce({
+        alerts: [],
+        totalAlerts: 0,
+        truncated: false,
+      });
+      mockPromBackend.getAlerts.mockResolvedValueOnce([]);
+      const res = await svc.getPaginatedAlerts({} as never, { page: 1, pageSize: 9999 });
+      expect(res.pageSize).toBe(200);
+    });
+
+    it('honours backend filter — excludes prometheus when backend=opensearch', async () => {
+      mockOsBackend.getAlerts.mockResolvedValueOnce({
+        alerts: [],
+        totalAlerts: 0,
+        truncated: false,
+      });
+      mockPromBackend.getAlerts.mockResolvedValueOnce([]);
+      await svc.getPaginatedAlerts({} as never, {
+        page: 1,
+        pageSize: 10,
+        backend: ['opensearch'],
+      });
+      // OS gets called, Prom does not.
+      expect(mockOsBackend.getAlerts).toHaveBeenCalled();
+      expect(mockPromBackend.getAlerts).not.toHaveBeenCalled();
+    });
+
+    it('threads noCache to the Prom getAlerts call', async () => {
+      mockOsBackend.getAlerts.mockResolvedValueOnce({
+        alerts: [],
+        totalAlerts: 0,
+        truncated: false,
+      });
+      mockPromBackend.getAlerts.mockResolvedValueOnce([]);
+      await svc.getPaginatedAlerts({} as never, {
+        page: 1,
+        pageSize: 10,
+        noCache: true,
+      });
+      // Last arg passed to Prom getAlerts contains the noCache hint.
+      const lastCall = mockPromBackend.getAlerts.mock.calls.at(-1)!;
+      expect(lastCall[2]).toMatchObject({ noCache: true });
+    });
+  });
+
+  describe('getPaginatedRules (Phase 4)', () => {
+    it('skips Prom when backend=opensearch', async () => {
+      mockOsBackend.getMonitors.mockResolvedValueOnce({
+        monitors: [],
+        total: 0,
+        hasMore: false,
+      });
+      const res = await svc.getPaginatedRules({} as never, {
+        page: 1,
+        pageSize: 10,
+        backend: ['opensearch'],
+      });
+      expect(mockOsBackend.getMonitors).toHaveBeenCalled();
+      expect(mockPromBackend.getRuleGroups).not.toHaveBeenCalled();
+      expect(res).toMatchObject({ page: 1, pageSize: 10, total: 0 });
+    });
+  });
 });

@@ -315,6 +315,37 @@ export interface UnifiedFetchOptions {
    * {@link UnifiedFetchOptions.startTime} for semantics.
    */
   endTime?: string;
+
+  // ========================================================================
+  // Phase 4 — server-side filter forwarding (alerts + rules listings).
+  // All fields are additive; legacy callers omit them and behavior is
+  // unchanged.
+  // ========================================================================
+
+  /** "field:dir" — e.g. "startTime:desc". Service-layer-validated. */
+  sort?: string;
+  /** UnifiedAlertSeverity values. */
+  severity?: string[];
+  /** UnifiedAlertState values (alerts) or rule status values (rules). */
+  state?: string[];
+  /** Datasource type filter — "opensearch" / "prometheus". */
+  backend?: string[];
+  /** Free-form label-equality filter. */
+  labels?: Record<string, string[]>;
+  /** Free-text search forwarded as `searchString` (OS) / regex (Prom). */
+  search?: string;
+
+  // Rules-only ----------------------------------------------------------------
+
+  /** Rule monitor type ("metric", "log", …). */
+  monitorType?: string[];
+  /** Rule health status ("healthy", "failing", "no_data"). */
+  healthStatus?: string[];
+  /** Rule createdBy. */
+  createdBy?: string[];
+
+  /** Skip the per-datasource listing cache (refresh-button bump). */
+  noCache?: boolean;
 }
 
 // ============================================================================

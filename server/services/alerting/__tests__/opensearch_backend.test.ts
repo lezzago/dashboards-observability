@@ -361,6 +361,165 @@ describe('HttpOpenSearchBackend', () => {
     });
   });
 
+  describe('getAlerts paginated (Phase 4)', () => {
+    const mkPagedAlert = (id: string, severityNum: number, state: string) => ({
+      id,
+      monitor_id: 'm-1',
+      monitor_name: 'm',
+      trigger_id: 't-1',
+      trigger_name: 'trig',
+      state,
+      severity: String(severityNum),
+      start_time: 1_500_000,
+      last_notification_time: 1_500_000,
+      end_time: null,
+    });
+
+    it('forwards page/pageSize/sort/severityLevel into the URL on a single-severity filter', async () => {
+      const { client, request } = makeClient([{ body: { totalAlerts: 5, alerts: [] } }]);
+      await backend.getAlerts(client, {
+        page: 2,
+        pageSize: 50,
+        sortField: 'startTime',
+        sortOrder: 'desc',
+        severity: ['critical'],
+      });
+      expect(request).toHaveBeenCalledTimes(1);
+      const path = (request.mock.calls[0][0] as { path: string }).path;
+      expect(path).toContain('size=50');
+      expect(path).toContain('startIndex=50');
+      expect(path).toContain('sortString=start_time');
+      expect(path).toContain('sortOrder=desc');
+      expect(path).toContain('severityLevel=1');
+    });
+
+    it('omits severityLevel when severity is multi (post-filter mode)', async () => {
+      const { client, request } = makeClient([
+        {
+          body: {
+            totalAlerts: 3,
+            alerts: [
+              mkPagedAlert('a1', 1, 'ACTIVE'),
+              mkPagedAlert('a2', 2, 'ACTIVE'),
+              mkPagedAlert('a3', 3, 'ACTIVE'),
+            ],
+          },
+        },
+      ]);
+      const result = await backend.getAlerts(client, {
+        page: 1,
+        pageSize: 20,
+        severity: ['critical', 'high'],
+      });
+      const path = (request.mock.calls[0][0] as { path: string }).path;
+      expect(path).not.toContain('severityLevel=');
+      // Post-filter narrows to severity 1 (critical) and 2 (high).
+      expect(result.alerts.map((a) => a.id)).toEqual(['a1', 'a2']);
+    });
+
+    it('post-filters severity even when the upstream returned all rows (single-pushdown correctness)', async () => {
+      const { client } = makeClient([
+        {
+          body: {
+            totalAlerts: 2,
+            alerts: [mkPagedAlert('a1', 1, 'ACTIVE'), mkPagedAlert('a2', 5, 'ACTIVE')],
+          },
+        },
+      ]);
+      const result = await backend.getAlerts(client, {
+        page: 1,
+        pageSize: 20,
+        severity: ['critical'],
+      });
+      // Even though we asked for critical via severityLevel pushdown,
+      // the post-filter must still drop a2 (severity=5/info) for safety.
+      expect(result.alerts.map((a) => a.id)).toEqual(['a1']);
+    });
+
+    it('forwards searchString when search is provided', async () => {
+      const { client, request } = makeClient([{ body: { totalAlerts: 0, alerts: [] } }]);
+      await backend.getAlerts(client, { page: 1, pageSize: 20, search: 'database errors' });
+      const path = (request.mock.calls[0][0] as { path: string }).path;
+      expect(path).toContain(`searchString=${encodeURIComponent('database errors')}`);
+    });
+
+    it('reports hasMore when totalAlerts exceeds startIndex + pageSize', async () => {
+      const { client } = makeClient([
+        {
+          body: {
+            totalAlerts: 1000,
+            alerts: [mkPagedAlert('a1', 1, 'ACTIVE')],
+          },
+        },
+      ]);
+      const result = await backend.getAlerts(client, {
+        page: 1,
+        pageSize: 20,
+        severity: ['critical'],
+      });
+      expect(result.hasMore).toBe(true);
+    });
+  });
+
+  describe('getMonitors paginated (Phase 4)', () => {
+    it('returns paginated shape with options, full-scan shape without', async () => {
+      // No options ⇒ array (full-scan path).
+      const { client: legacyClient } = makeClient([
+        { body: { hits: { hits: [monitorHit('m-1', 'A')] } } },
+      ]);
+      const fullList = await backend.getMonitors(legacyClient);
+      expect(Array.isArray(fullList)).toBe(true);
+
+      // Options ⇒ paginated shape.
+      const { client, request } = makeClient([
+        {
+          body: {
+            hits: { total: { value: 42 }, hits: [monitorHit('m-1', 'A')] },
+          },
+        },
+      ]);
+      const paged = await backend.getMonitors(client, { page: 1, pageSize: 20 });
+      expect(paged).toMatchObject({ total: 42, hasMore: true });
+      expect(paged.monitors).toHaveLength(1);
+      const reqBody = (request.mock.calls[0][0] as { body: Record<string, unknown> }).body;
+      expect(reqBody).toMatchObject({ size: 20, from: 0, track_total_hits: true });
+    });
+
+    it('pushes monitor.enabled filter for status=active', async () => {
+      const { client, request } = makeClient([
+        { body: { hits: { total: { value: 0 }, hits: [] } } },
+      ]);
+      await backend.getMonitors(client, {
+        page: 1,
+        pageSize: 20,
+        status: ['active'],
+      });
+      const reqBody = (request.mock.calls[0][0] as {
+        body: { query?: { bool?: { filter?: unknown[] } } };
+      }).body;
+      const filterArr = reqBody?.query?.bool?.filter;
+      expect(Array.isArray(filterArr)).toBe(true);
+      // The bool.should clause inside should contain monitor.enabled=true.
+      const json = JSON.stringify(filterArr);
+      expect(json).toContain('monitor.enabled');
+      // Single `term: { "monitor.enabled": true }` clause for status=active.
+      expect(json).toContain('"monitor.enabled":true');
+    });
+
+    it('pushes multi_match for search', async () => {
+      const { client, request } = makeClient([
+        { body: { hits: { total: { value: 0 }, hits: [] } } },
+      ]);
+      await backend.getMonitors(client, { page: 1, pageSize: 20, search: 'foo' });
+      const reqBody = (request.mock.calls[0][0] as {
+        body: { query?: { bool?: { filter?: unknown[] } } };
+      }).body;
+      const json = JSON.stringify(reqBody?.query?.bool?.filter);
+      expect(json).toContain('multi_match');
+      expect(json).toContain('"query":"foo"');
+    });
+  });
+
   describe('getDestinations', () => {
     it('maps raw destinations to OSDestination shape', async () => {
       const { client } = makeClient([
