@@ -9,13 +9,13 @@
  */
 import React, { useState, useMemo, useEffect } from 'react';
 import {
+  EuiBasicTable,
   EuiBasicTableColumn,
   EuiFlexGroup,
   EuiFlexItem,
   EuiPanel,
   EuiSpacer,
   EuiHealth,
-  EuiInMemoryTable,
   EuiText,
   EuiTitle,
   EuiButtonIcon,
@@ -34,7 +34,7 @@ import {
   UnifiedAlertSummary,
   Datasource,
 } from '../../../common/types/alerting';
-import { filterAlerts } from '../../../common/services/alerting/filter';
+import type { AlertFacetCountsResponse } from './query_services/alerting_opensearch_service';
 import { AlertTimeline } from './alerts_charts';
 import { AlertsSummaryCards } from './alerts_summary_cards';
 import { FacetFilterGroup, useFacetCollapse } from './facet_filter_panel';
@@ -165,11 +165,11 @@ function collectAlertLabelValues(alerts: UnifiedAlertSummary[], key: string): st
 }
 
 // ============================================================================
-// Memoized Table — keeps EuiInMemoryTable pagination state stable under the
-// ancestor `EuiResizableContainer`, which re-renders on every mouse move.
-// Without this wrap, the mid-click re-render cascade causes Chrome to drop
-// the `click` event between mousedown and mouseup. Mirrors the pattern in
-// public/components/apm/pages/services_home/services_home.tsx.
+// Memoized Table — controlled `EuiBasicTable`. Page nav, sort, and page-size
+// changes flow upward via `onTableChange` so the parent's hook can fire a
+// new server request for the page. Memoization keeps the table stable under
+// the ancestor `EuiResizableContainer`'s mousemove re-render cascade
+// (mirrors `services_home.tsx`).
 // ============================================================================
 
 interface AlertsTableProps {
@@ -177,18 +177,49 @@ interface AlertsTableProps {
   columns: Array<EuiBasicTableColumn<UnifiedAlertSummary>>;
   loading: boolean;
   message: React.ReactNode;
+  page: number;
+  pageSize: number;
+  total: number;
+  sortField: string;
+  sortDirection: 'asc' | 'desc';
+  onChange: (e: {
+    page?: { index: number; size: number };
+    sort?: { field: keyof UnifiedAlertSummary | string; direction: 'asc' | 'desc' };
+  }) => void;
 }
 
-const AlertsTable = React.memo(({ items, columns, loading, message }: AlertsTableProps) => (
-  <EuiInMemoryTable
-    items={items}
-    columns={columns}
-    loading={loading}
-    pagination={{ initialPageSize: 20, pageSizeOptions: [10, 20, 50, 100] }}
-    sorting={{ sort: { field: 'startTime', direction: 'desc' } }}
-    message={message}
-  />
-));
+const AlertsTable = React.memo(
+  ({
+    items,
+    columns,
+    loading,
+    message,
+    page,
+    pageSize,
+    total,
+    sortField,
+    sortDirection,
+    onChange,
+  }: AlertsTableProps) => (
+    <EuiBasicTable
+      items={items}
+      columns={columns}
+      loading={loading}
+      pagination={{
+        pageIndex: page,
+        pageSize,
+        totalItemCount: total,
+        pageSizeOptions: [10, 20, 50, 100],
+      }}
+      sorting={{
+        sort: { field: sortField as keyof UnifiedAlertSummary, direction: sortDirection },
+      }}
+      onChange={onChange}
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- React duplicate-types collision with @elastic/eui
+      noItemsMessage={message as any}
+    />
+  )
+);
 
 // ============================================================================
 // Main Dashboard Component
@@ -235,6 +266,34 @@ export interface AlertsDashboardProps {
    * intentionally excluded — see Phase 2 plan.
    */
   onFilterChange?: (filters: AlertsDashboardFilterSnapshot) => void;
+  /**
+   * Phase 5 — server-side facet response. Drives the panel counts. While
+   * the hook is loading or errored, the dashboard falls back to the
+   * client-side memo so users never see flash-of-empty counts.
+   */
+  facetData?: AlertFacetCountsResponse | null;
+  facetLoading?: boolean;
+  /**
+   * Phase 5 — controlled pagination + sort state. Page is 0-indexed (Eui
+   * convention). Filter / datasource changes reset page to 0 in the
+   * parent.
+   */
+  page: number;
+  pageSize: number;
+  total: number;
+  sortField: string;
+  sortDirection: 'asc' | 'desc';
+  onPageChange: (page: number) => void;
+  onPageSizeChange: (size: number) => void;
+  onSortChange: (field: string, direction: 'asc' | 'desc') => void;
+  /**
+   * Phase 5 — search input state lives in the parent so the listing /
+   * facet / timeline hooks can debounce against the same underlying
+   * value. The dashboard renders the input but emits keystrokes
+   * upward.
+   */
+  searchInput: string;
+  onSearchInputChange: (value: string) => void;
 }
 
 export const AlertsDashboard: React.FC<AlertsDashboardProps> = ({
@@ -252,8 +311,21 @@ export const AlertsDashboard: React.FC<AlertsDashboardProps> = ({
   timelineData,
   timelineLoading,
   onFilterChange,
+  facetData,
+  page,
+  pageSize,
+  total,
+  sortField,
+  sortDirection,
+  onPageChange,
+  onPageSizeChange,
+  onSortChange,
+  searchInput,
+  onSearchInputChange,
 }) => {
-  const [searchQuery, setSearchQuery] = useState('');
+  // searchInput is controlled by the parent (so hooks debounce against the
+  // same underlying value); local string mirrors it for in-component reads.
+  const searchQuery = searchInput;
   const [severityFilter, setSeverityFilter] = useState('all');
   const [stateFilter, setStateFilter] = useState('all');
   const [filters, setFilters] = useState<AlertFilterState>(emptyAlertFilters());
@@ -297,18 +369,32 @@ export const AlertsDashboard: React.FC<AlertsDashboardProps> = ({
     [datasources]
   );
 
-  // Unique values for facets
-  const uniqueSeverities = useMemo(() => collectAlertUniqueValues(alerts, (a) => a.severity), [
-    alerts,
-  ]);
-  const uniqueStates = useMemo(() => collectAlertUniqueValues(alerts, (a) => a.state), [alerts]);
-  const uniqueBackends = useMemo(() => collectAlertUniqueValues(alerts, (a) => a.datasourceType), [
-    alerts,
-  ]);
-  const labelKeys = useMemo(() => collectAlertLabelKeys(alerts), [alerts]);
+  // Unique values for facets. Phase 5: prefer the server's facet response
+  // (covers the full filtered set), fall back to the page-local `alerts`
+  // when the hook is still loading.
+  const uniqueSeverities = useMemo(() => {
+    if (facetData) return Object.keys(facetData.severity).sort();
+    return collectAlertUniqueValues(alerts, (a) => a.severity);
+  }, [facetData, alerts]);
+  const uniqueStates = useMemo(() => {
+    if (facetData) return Object.keys(facetData.state).sort();
+    return collectAlertUniqueValues(alerts, (a) => a.state);
+  }, [facetData, alerts]);
+  const uniqueBackends = useMemo(() => {
+    if (facetData) return Object.keys(facetData.backend).sort();
+    return collectAlertUniqueValues(alerts, (a) => a.datasourceType);
+  }, [facetData, alerts]);
+  const labelKeys = useMemo(() => {
+    if (facetData) return Object.keys(facetData.labels).sort();
+    return collectAlertLabelKeys(alerts);
+  }, [facetData, alerts]);
 
-  // Facet counts (against search-matched but not filter-matched alerts)
-  const facetCounts = useMemo(() => {
+  // Phase 5 — facet counts come from the server (`useAlertsFacets`),
+  // computed over the full filtered set rather than the page-local
+  // `alerts` array. While the hook is loading or has errored we fall
+  // back to a client-side memo over the page-local set so the panel
+  // never flashes empty.
+  const clientFallbackFacets = useMemo(() => {
     const searchMatched = alerts.filter((a) => {
       if (!searchQuery) return true;
       const q = searchQuery.toLowerCase();
@@ -339,53 +425,43 @@ export const AlertsDashboard: React.FC<AlertsDashboardProps> = ({
     return { counts, labelCounts };
   }, [alerts, searchQuery, labelKeys]);
 
+  const facetCounts = useMemo(() => {
+    if (facetData) {
+      return {
+        counts: {
+          severity: facetData.severity,
+          state: facetData.state,
+          backend: facetData.backend,
+        },
+        labelCounts: facetData.labels,
+      };
+    }
+    return clientFallbackFacets;
+  }, [facetData, clientFallbackFacets]);
+
   const activeFilterCount = useMemo(() => {
     let count = filters.severity.length + filters.state.length + filters.backend.length;
     for (const vals of Object.values(filters.labels)) count += vals.length;
     return count;
   }, [filters]);
 
-  // Filtered + sorted alerts for the table
-  const filteredAlerts = useMemo(() => {
-    // Combine stat-card filters with panel filters
-    let sevArr: string[] | undefined;
-    if (filters.severity.length > 0) {
-      sevArr = filters.severity;
-    } else if (severityFilter === 'medium') {
-      sevArr = ['medium', 'low', 'info'];
-    } else if (severityFilter !== 'all') {
-      sevArr = [severityFilter];
-    }
+  // Phase 5 — `alerts` is the server-paged + filtered set. The dashboard
+  // renders that page directly; no client-side re-filter, no client-side
+  // search-narrow. Stat cards / counts come from the server facet
+  // response (full filtered set).
+  const filteredAlerts = alerts;
 
-    let stateArr: string[] | undefined;
-    if (filters.state.length > 0) {
-      stateArr = filters.state;
-    } else if (stateFilter !== 'all') {
-      stateArr = [stateFilter];
-    }
-
-    let result = filterAlerts(alerts, {
-      severity: sevArr,
-      state: stateArr,
-      labels: Object.keys(filters.labels).length > 0 ? filters.labels : undefined,
-      search: searchQuery || undefined,
-    });
-
-    // Apply backend filter separately (not in core filterAlerts)
-    if (filters.backend.length > 0) {
-      result = result.filter((a) => filters.backend.includes(a.datasourceType));
-    }
-
-    return result;
-  }, [alerts, searchQuery, severityFilter, stateFilter, filters]);
-
-  // Severity counts for stat cards — derived from filtered set
-  const severityCounts = useMemo(() => countBy(filteredAlerts, (a) => a.severity), [
-    filteredAlerts,
-  ]);
-  const activeCount = useMemo(() => filteredAlerts.filter((a) => a.state === 'active').length, [
-    filteredAlerts,
-  ]);
+  // Severity counts for stat cards — derived from the server facet
+  // response (full filtered set), falling back to the page-local set
+  // before the hook resolves.
+  const severityCounts = useMemo(() => {
+    if (facetData) return facetData.severity;
+    return countBy(alerts, (a) => a.severity);
+  }, [facetData, alerts]);
+  const activeCount = useMemo(() => {
+    if (facetData) return facetData.state.active ?? 0;
+    return alerts.filter((a) => a.state === 'active').length;
+  }, [facetData, alerts]);
   const isFiltered =
     activeFilterCount > 0 ||
     searchQuery !== '' ||
@@ -396,7 +472,7 @@ export const AlertsDashboard: React.FC<AlertsDashboardProps> = ({
     setFilters(emptyAlertFilters());
     setSeverityFilter('all');
     setStateFilter('all');
-    setSearchQuery('');
+    onSearchInputChange('');
   };
 
   const updateFilter = <K extends keyof AlertFilterState>(key: K, value: AlertFilterState[K]) => {
@@ -560,17 +636,17 @@ export const AlertsDashboard: React.FC<AlertsDashboardProps> = ({
   // applied a filter. If the chart has data but the table doesn't (e.g. a
   // filter is narrowing the table), we keep the chart visible and let the
   // table render its filter-aware empty message.
-  const tableEmpty = !loading && alerts.length === 0;
+  const tableEmpty = !loading && total === 0;
   const timelineHasData = useMemo(() => {
     if (!timelineData || !timelineData.buckets) return false;
     for (const b of timelineData.buckets) {
-      const total =
+      const bucketTotal =
         b.severity.critical +
         b.severity.high +
         b.severity.medium +
         b.severity.low +
         b.severity.info;
-      if (total > 0) return true;
+      if (bucketTotal > 0) return true;
     }
     return false;
   }, [timelineData]);
@@ -685,16 +761,21 @@ export const AlertsDashboard: React.FC<AlertsDashboardProps> = ({
                     </EuiText>
                     {labelKeys
                       .filter((key) => !INTERNAL_LABEL_KEYS.has(key))
-                      .map((key) =>
-                        renderFacetGroup(
+                      .map((key) => {
+                        // Phase 5: prefer the server's per-key value list
+                        // when available; fall back to the page-local set.
+                        const values = facetData?.labels[key]
+                          ? Object.keys(facetData.labels[key]).sort()
+                          : collectAlertLabelValues(alerts, key);
+                        return renderFacetGroup(
                           `label:${key}`,
                           key,
-                          collectAlertLabelValues(alerts, key),
+                          values,
                           filters.labels[key] || [],
                           (v) => updateLabelFilter(key, v),
                           facetCounts.labelCounts[key] || {}
-                        )
-                      )}
+                        );
+                      })}
                   </>
                 )}
               </div>
@@ -721,8 +802,8 @@ export const AlertsDashboard: React.FC<AlertsDashboardProps> = ({
               <>
                 {/* ---- Summary Stat Cards (extracted component) ---- */}
                 <AlertsSummaryCards
-                  filteredCount={filteredAlerts.length}
-                  totalCount={alerts.length}
+                  filteredCount={total}
+                  totalCount={total}
                   activeCount={activeCount}
                   severityCounts={severityCounts}
                   severityFilter={severityFilter}
@@ -853,14 +934,14 @@ export const AlertsDashboard: React.FC<AlertsDashboardProps> = ({
                   <EuiFieldSearch
                     placeholder="Search alerts by name, message, or label..."
                     value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
+                    onChange={(e) => onSearchInputChange(e.target.value)}
                     isClearable
                     fullWidth
                     aria-label="Search alerts"
                   />
                   <EuiSpacer size="s" />
                   <EuiText size="s">
-                    <strong>{filteredAlerts.length}</strong> alerts
+                    <strong>{total}</strong> alerts
                     {activeFilterCount > 0 && (
                       <span>
                         {' '}
@@ -873,6 +954,23 @@ export const AlertsDashboard: React.FC<AlertsDashboardProps> = ({
                     items={filteredAlerts}
                     columns={columns}
                     loading={loading}
+                    page={page}
+                    pageSize={pageSize}
+                    total={total}
+                    sortField={sortField}
+                    sortDirection={sortDirection}
+                    onChange={(e) => {
+                      if (e.page) {
+                        if (e.page.size !== pageSize) {
+                          onPageSizeChange(e.page.size);
+                        } else {
+                          onPageChange(e.page.index);
+                        }
+                      }
+                      if (e.sort) {
+                        onSortChange(String(e.sort.field), e.sort.direction);
+                      }
+                    }}
                     message={
                       searchQuery ||
                       activeFilterCount > 0 ||

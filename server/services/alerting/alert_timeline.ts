@@ -51,7 +51,16 @@ export interface TimelineFilterOptions {
   state?: Array<'active' | 'pending' | 'acknowledged' | 'resolved' | 'error' | 'silenced'>;
   /** Label-equality matchers; multi-value entries become regex unions. */
   labels?: Record<string, string[]>;
+  /**
+   * Free-text search forwarded to OS via `searchString` and to Prom via an
+   * `alertname=~".*<escaped>.*"` matcher. Prom matcher is wrapped in
+   * `topk(200, …)` so a broad regex never blows up series cardinality.
+   */
+  search?: string;
 }
+
+/** Cap on Prometheus timeline series when the user supplies a search. */
+export const PROM_TIMELINE_SEARCH_TOPK = 200;
 
 export interface GetUnifiedTimelineOptions extends TimelineFilterOptions {
   dsIds?: string[];
@@ -381,6 +390,18 @@ function buildAlertStateMatcher(state?: TimelineFilterOptions['state']): string 
   return `alertstate=~"${[...promStates].sort().join('|')}"`;
 }
 
+/**
+ * Escape user input so it's safe to embed inside a PromQL regex string
+ * literal. Per Prom's grammar (RE2), the literal-string layer escapes `\`
+ * and `"`; the regex layer escapes its own metacharacters. We do both,
+ * since the input is treated as a literal substring.
+ */
+function escapePromRegexLiteral(input: string): string {
+  // Escape RE2 metacharacters first, then the string-literal escape.
+  const re = input.replace(/[\\^$.*+?()[\]{}|]/g, '\\$&');
+  return re.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
 export async function fetchPromTimelineBuckets(
   promBackend: PrometheusBackend,
   client: AlertingOSClient,
@@ -402,9 +423,23 @@ export async function fetchPromTimelineBuckets(
 
   const stateMatcher = buildAlertStateMatcher(options.state);
   const extraMatchers = buildPromSelectorMatchers(options);
-  const matchers = [stateMatcher, ...extraMatchers].join(', ');
+
+  // `search` becomes an `alertname=~".*<escaped>.*"` matcher. Wrapped in
+  // `topk(200, …)` to bound series cardinality — without it a broad
+  // regex (e.g. `.*` or `service.*`) would re-introduce the unbounded-
+  // matrix problem Phase 1 fixed.
+  const searchTrim = options.search?.trim();
+  const matcherList = [stateMatcher, ...extraMatchers];
+  if (searchTrim) {
+    matcherList.push(`alertname=~".*${escapePromRegexLiteral(searchTrim)}.*"`);
+  }
+  const matchers = matcherList.join(', ');
   const selector = `ALERTS{${matchers}}`;
-  const groupedQuery = `sum by(severity) (${selector})`;
+  const grouped = `sum by(severity) (${selector})`;
+  const groupedQuery = searchTrim
+    ? `sum by(severity) (topk(${PROM_TIMELINE_SEARCH_TOPK}, ${selector}))`
+    : grouped;
+  const searchTruncated = !!searchTrim;
 
   const series = await dq.queryRangeMatrix!(client, ds, groupedQuery, startSec, endSec, stepSec);
 
@@ -419,9 +454,13 @@ export async function fetchPromTimelineBuckets(
   if (series.length === 0 || !hasSeverityLabel) {
     if (series.length === 0) {
       // Empty-matrix is a valid result (no alerts fired); no fallback.
-      return { buckets: makeEmptyBuckets(startMs, bucketCount, bucketDurationMs) };
+      return {
+        buckets: makeEmptyBuckets(startMs, bucketCount, bucketDurationMs),
+        ...(searchTruncated ? { fallback: 'prometheus-search-truncated' as const } : {}),
+      };
     }
-    const countQuery = `count(${selector})`;
+    const innerCount = searchTrim ? `topk(${PROM_TIMELINE_SEARCH_TOPK}, ${selector})` : selector;
+    const countQuery = `count(${innerCount})`;
     const countSeries = await dq.queryRangeMatrix!(
       client,
       ds,
@@ -438,7 +477,15 @@ export async function fetchPromTimelineBuckets(
         buckets[idx].severity.medium += point.value;
       }
     }
-    return { buckets, fallback: 'prometheus-no-severity-labels' };
+    // Search-truncated wins over the no-severity fallback for the
+    // per-datasource hint; the chart still renders, but the boundary
+    // is the more important signal for callers asserting on it.
+    return {
+      buckets,
+      fallback: searchTruncated
+        ? ('prometheus-search-truncated' as const)
+        : ('prometheus-no-severity-labels' as const),
+    };
   }
 
   const buckets = makeEmptyBuckets(startMs, bucketCount, bucketDurationMs);
@@ -450,7 +497,10 @@ export async function fetchPromTimelineBuckets(
       buckets[idx].severity[sev] += point.value;
     }
   }
-  return { buckets };
+  return {
+    buckets,
+    ...(searchTruncated ? { fallback: 'prometheus-search-truncated' as const } : {}),
+  };
 }
 
 function sampleToBucketIndex(
@@ -508,6 +558,32 @@ export async function fetchOSTimelineBuckets(
 
   // labels{} not supported on OS alert history docs — schema doesn't
   // normalize labels. Skipped per Phase 2 plan.
+
+  // searchQuery push-down: alert-history docs index `monitor_name` /
+  // `trigger_name`; do a case-insensitive substring on both via
+  // `wildcard` inside the same `filter` clause so the chart matches the
+  // table's `searchString` semantics.
+  const searchTrim = options.search?.trim();
+  if (searchTrim) {
+    const escaped = searchTrim.replace(/[\\]/g, '\\\\').replace(/[*?]/g, '\\$&').toLowerCase();
+    filters.push({
+      bool: {
+        should: [
+          {
+            wildcard: {
+              'monitor_name.keyword': { value: `*${escaped}*`, case_insensitive: true },
+            },
+          },
+          {
+            wildcard: {
+              'trigger_name.keyword': { value: `*${escaped}*`, case_insensitive: true },
+            },
+          },
+        ],
+        minimum_should_match: 1,
+      },
+    });
+  }
 
   const body = {
     size: 0,
@@ -599,12 +675,17 @@ async function fetchOSTimelineFromGetAlerts(
 
   const severityFilter = options.severity ? new Set(options.severity) : null;
   const stateFilter = options.state ? new Set(options.state) : null;
+  const searchTrim = options.search?.trim().toLowerCase();
 
   for (const a of alerts) {
     const sev: UnifiedAlertSeverity = osSeverityToUnified(a.severity);
     if (severityFilter && !severityFilter.has(sev)) continue;
     const state = osAlertStateForFilter(a);
     if (stateFilter && !stateFilter.has(state)) continue;
+    if (searchTrim) {
+      const haystack = `${a.monitor_name ?? ''} ${a.trigger_name ?? ''}`.toLowerCase();
+      if (!haystack.includes(searchTrim)) continue;
+    }
 
     const idx = sampleToBucketIndex(a.start_time, startMs, bucketDurationMs, bucketCount);
     if (idx < 0) continue;

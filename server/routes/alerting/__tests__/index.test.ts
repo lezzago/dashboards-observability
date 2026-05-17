@@ -53,7 +53,7 @@ describe('registerAlertingRoutes', () => {
     mockRouter.delete.mockClear();
   });
 
-  it('registers all runtime routes when metadata routes are enabled (16 GET + 4 mutations = 20)', () => {
+  it('registers all runtime routes when metadata routes are enabled (18 GET + 4 mutations = 22)', () => {
     registerAlertingRoutes(mockRouter as never, {
       osBackend: mockOsBackend,
       promBackend: mockPromBackend,
@@ -66,12 +66,13 @@ describe('registerAlertingRoutes', () => {
       mockRouter.post.mock.calls.length +
       mockRouter.put.mock.calls.length +
       mockRouter.delete.mock.calls.length;
-    expect(total).toBe(20);
-    // 12 inline GETs (Phase 3 added /routing) + 4 conditional metadata GETs = 16
-    expect(mockRouter.get.mock.calls.length).toBe(16);
+    expect(total).toBe(22);
+    // 14 inline GETs (Phase 5 added /alerts/_facets + /rules/_facets) + 4
+    // conditional metadata GETs = 18.
+    expect(mockRouter.get.mock.calls.length).toBe(18);
   });
 
-  it('skips the 4 metadata GET routes when enableMetadataRoutes is false (12 GET + 4 mutations = 16)', () => {
+  it('skips the 4 metadata GET routes when enableMetadataRoutes is false (14 GET + 4 mutations = 18)', () => {
     registerAlertingRoutes(mockRouter as never, {
       osBackend: mockOsBackend,
       promBackend: mockPromBackend,
@@ -84,8 +85,8 @@ describe('registerAlertingRoutes', () => {
       mockRouter.post.mock.calls.length +
       mockRouter.put.mock.calls.length +
       mockRouter.delete.mock.calls.length;
-    expect(total).toBe(16);
-    expect(mockRouter.get.mock.calls.length).toBe(12);
+    expect(total).toBe(18);
+    expect(mockRouter.get.mock.calls.length).toBe(14);
   });
 
   it('registers the 4 surviving mutation paths', () => {

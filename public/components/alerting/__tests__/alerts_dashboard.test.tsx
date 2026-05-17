@@ -87,6 +87,19 @@ const baseProps = {
   onDatasourceCapReached: jest.fn(),
   timelineData: sampleTimeline,
   timelineLoading: false,
+  // Phase 5 — controlled pagination + facets + lifted search.
+  facetData: null,
+  facetLoading: false,
+  page: 0,
+  pageSize: 20,
+  total: 0,
+  sortField: 'startTime',
+  sortDirection: 'desc' as const,
+  onPageChange: jest.fn(),
+  onPageSizeChange: jest.fn(),
+  onSortChange: jest.fn(),
+  searchInput: '',
+  onSearchInputChange: jest.fn(),
 };
 
 beforeEach(() => {

@@ -21,6 +21,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { EuiResizableContainer } from '@elastic/eui';
 import { Datasource, UnifiedRuleSummary } from '../../../../common/types/alerting';
 import { serializeMonitors } from '../../../../common/services/alerting/serializer';
+import type { RuleFacetCountsResponse } from '../query_services/alerting_opensearch_service';
 import { useFacetCollapse } from '../facet_filter_panel';
 import {
   BASE_COLUMNS,
@@ -34,7 +35,6 @@ import {
   collectUniqueValues,
   emptyFilters,
   FilterState,
-  matchesFilters,
   matchesSearch,
 } from './monitors_table_filters';
 import { SavedSearch } from './monitors_table_helpers';
@@ -80,6 +80,24 @@ interface MonitorsTableProps {
    * renders client-side filtered results from `rules`.
    */
   onFilterChange?: (snapshot: MonitorsTableFilterSnapshot) => void;
+
+  /** Phase 5 — server-side facet counts. Fallback to local memo while loading. */
+  facetData?: RuleFacetCountsResponse | null;
+  facetLoading?: boolean;
+
+  /** Phase 5 — controlled pagination + sort. Page is 0-indexed. */
+  page: number;
+  pageSize: number;
+  total: number;
+  sortField: string;
+  sortDirection: 'asc' | 'desc';
+  onPageChange: (page: number) => void;
+  onPageSizeChange: (size: number) => void;
+  onSortChange: (field: string, direction: 'asc' | 'desc') => void;
+
+  /** Phase 5 — search input lifted to the parent for debounced server calls. */
+  searchInput: string;
+  onSearchInputChange: (value: string) => void;
 }
 
 // ============================================================================
@@ -99,8 +117,22 @@ export const MonitorsTable: React.FC<MonitorsTableProps> = ({
   maxDatasources,
   onDatasourceCapReached,
   onFilterChange,
+  facetData,
+  page,
+  pageSize,
+  total,
+  sortField,
+  sortDirection,
+  onPageChange,
+  onPageSizeChange,
+  onSortChange,
+  searchInput,
+  onSearchInputChange,
 }) => {
-  const [searchQuery, setSearchQuery] = useState('');
+  // Phase 5: search lives on the parent for debouncing; expose a stable
+  // local-shaped surface to the rest of this component.
+  const searchQuery = searchInput;
+  const setSearchQuery = onSearchInputChange;
   const [filters, setFilters] = useState<FilterState>(emptyFilters());
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [visibleColumns, setVisibleColumns] = useState<Set<ColumnId>>(new Set(DEFAULT_VISIBLE));
@@ -137,7 +169,10 @@ export const MonitorsTable: React.FC<MonitorsTableProps> = ({
   );
 
   const allSuggestions = useMemo(() => buildSuggestions(rules), [rules]);
-  const labelKeys = useMemo(() => collectLabelKeys(rules), [rules]);
+  const labelKeys = useMemo(() => {
+    if (facetData) return Object.keys(facetData.labels).sort();
+    return collectLabelKeys(rules);
+  }, [facetData, rules]);
 
   // Build available columns including dynamic label columns
   const allColumns = useMemo(() => {
@@ -170,11 +205,9 @@ export const MonitorsTable: React.FC<MonitorsTableProps> = ({
     return () => document.removeEventListener('mousedown', handler);
   }, []);
 
-  // Filter (sorting is handled by EuiInMemoryTable via the column `sortable` keys)
-  const filtered = useMemo(
-    () => rules.filter((r) => matchesSearch(r, searchQuery) && matchesFilters(r, filters)),
-    [rules, searchQuery, filters]
-  );
+  // Phase 5 — `rules` is the server-paged + filtered set. The table
+  // renders that page directly.
+  const filtered = rules;
 
   // Mirror filter state to the parent so it can drive the server-side
   // listRules call. Stable JSON-projection key — same pattern as
@@ -298,15 +331,33 @@ export const MonitorsTable: React.FC<MonitorsTableProps> = ({
   // Attach DOM-based resize handles to table header cells
   useResizableColumns(tableWrapperRef, columnWidths, setColumnWidths, visibleColumns);
 
-  // Unique values for filter dropdowns
-  const uniqueStatuses = useMemo(() => collectUniqueValues(rules, (r) => r.status), [rules]);
-  const uniqueSeverities = useMemo(() => collectUniqueValues(rules, (r) => r.severity), [rules]);
-  const uniqueTypes = useMemo(() => collectUniqueValues(rules, (r) => r.monitorType), [rules]);
-  const uniqueHealth = useMemo(() => collectUniqueValues(rules, (r) => r.healthStatus), [rules]);
-  const uniqueCreators = useMemo(() => collectUniqueValues(rules, (r) => r.createdBy), [rules]);
-  const uniqueBackends = useMemo(() => collectUniqueValues(rules, (r) => r.datasourceType), [
-    rules,
-  ]);
+  // Unique values for filter dropdowns. Phase 5: prefer server facet
+  // keys (cover the full filtered set), fallback to page-local rules
+  // while loading.
+  const uniqueStatuses = useMemo(() => {
+    if (facetData) return Object.keys(facetData.status).sort();
+    return collectUniqueValues(rules, (r) => r.status);
+  }, [facetData, rules]);
+  const uniqueSeverities = useMemo(() => {
+    if (facetData) return Object.keys(facetData.severity).sort();
+    return collectUniqueValues(rules, (r) => r.severity);
+  }, [facetData, rules]);
+  const uniqueTypes = useMemo(() => {
+    if (facetData) return Object.keys(facetData.monitorType).sort();
+    return collectUniqueValues(rules, (r) => r.monitorType);
+  }, [facetData, rules]);
+  const uniqueHealth = useMemo(() => {
+    if (facetData) return Object.keys(facetData.healthStatus).sort();
+    return collectUniqueValues(rules, (r) => r.healthStatus);
+  }, [facetData, rules]);
+  const uniqueCreators = useMemo(() => {
+    if (facetData) return Object.keys(facetData.createdBy).sort();
+    return collectUniqueValues(rules, (r) => r.createdBy);
+  }, [facetData, rules]);
+  const uniqueBackends = useMemo(() => {
+    if (facetData) return Object.keys(facetData.backend).sort();
+    return collectUniqueValues(rules, (r) => r.datasourceType);
+  }, [facetData, rules]);
 
   const updateFilter = <K extends keyof FilterState>(key: K, value: FilterState[K]) => {
     setFilters((prev) => ({ ...prev, [key]: value }));
@@ -341,9 +392,10 @@ export const MonitorsTable: React.FC<MonitorsTableProps> = ({
     }
   };
 
-  // Facet helper: count items per value for a given field
-  const facetCounts = useMemo(() => {
-    // Count against the search-matched (but not filter-matched) rules so counts update with search
+  // Phase 5 — facet counts come from the server. Fallback to a client
+  // memo over `rules` while the hook is still loading or has errored so
+  // the panel never renders empty counts.
+  const clientFallbackFacets = useMemo(() => {
     const searchMatched = rules.filter((r) => matchesSearch(r, searchQuery));
     const counts: Record<string, Record<string, number>> = {
       status: {},
@@ -361,7 +413,6 @@ export const MonitorsTable: React.FC<MonitorsTableProps> = ({
       counts.backend[r.datasourceType] = (counts.backend[r.datasourceType] || 0) + 1;
       counts.createdBy[r.createdBy] = (counts.createdBy[r.createdBy] || 0) + 1;
     }
-    // Label counts
     const labelCounts: Record<string, Record<string, number>> = {};
     for (const key of labelKeys) {
       labelCounts[key] = {};
@@ -372,6 +423,23 @@ export const MonitorsTable: React.FC<MonitorsTableProps> = ({
     }
     return { counts, labelCounts };
   }, [rules, searchQuery, labelKeys]);
+
+  const facetCounts = useMemo(() => {
+    if (facetData) {
+      return {
+        counts: {
+          status: facetData.status,
+          severity: facetData.severity,
+          monitorType: facetData.monitorType,
+          healthStatus: facetData.healthStatus,
+          backend: facetData.backend,
+          createdBy: facetData.createdBy,
+        },
+        labelCounts: facetData.labels,
+      };
+    }
+    return clientFallbackFacets;
+  }, [facetData, clientFallbackFacets]);
 
   // Collapsible facet sections state (shared hook)
   const { toggleFacetCollapse, isCollapsed: isFacetCollapsed } = useFacetCollapse();
@@ -473,6 +541,14 @@ export const MonitorsTable: React.FC<MonitorsTableProps> = ({
                 setSelectedMonitor={setSelectedMonitor}
                 onDelete={onDelete}
                 onClone={onClone}
+                page={page}
+                pageSize={pageSize}
+                total={total}
+                sortField={sortField}
+                sortDirection={sortDirection}
+                onPageChange={onPageChange}
+                onPageSizeChange={onPageSizeChange}
+                onSortChange={onSortChange}
               />
             </EuiResizablePanel>
           </>

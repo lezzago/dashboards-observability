@@ -231,7 +231,12 @@ describe('getUnifiedTimeline', () => {
 
   it('Prometheus path narrows the selector when severity[] is supplied', async () => {
     const datasourceService = makeDatasourceService([promDatasource]);
-    const queryRangeMatrix = jest.fn(async () => []);
+    const queryRangeMatrix = jest.fn(
+      async (...args: unknown[]): Promise<unknown[]> => {
+        void args;
+        return [];
+      }
+    );
     const promBackend = ({
       type: 'prometheus' as const,
       getRuleGroups: jest.fn(),
@@ -259,21 +264,75 @@ describe('getUnifiedTimeline', () => {
     );
   });
 
+  it('Prometheus path wraps the selector in topk(200, ...) when search is supplied (Phase 5)', async () => {
+    const datasourceService = makeDatasourceService([promDatasource]);
+    const queryRangeMatrix = jest.fn(
+      async (...args: unknown[]): Promise<unknown[]> => {
+        void args;
+        return [
+          {
+            metric: { severity: 'critical' },
+            values: [{ timestamp: START_MS + 60_000, value: 1 }],
+          },
+        ];
+      }
+    );
+    const promBackend = ({
+      type: 'prometheus' as const,
+      getRuleGroups: jest.fn(),
+      getAlerts: jest.fn(),
+      listWorkspaces: jest.fn(),
+      queryRangeMatrix,
+    } as unknown) as PrometheusBackend;
+    const result = await getUnifiedTimeline(
+      {
+        datasourceService,
+        osBackend: undefined,
+        promBackend,
+        clientResolver,
+        logger: mockLogger,
+      },
+      {
+        startTime: 'now-1h',
+        endTime: 'now',
+        search: 'cpu',
+      }
+    );
+    const queryArg = queryRangeMatrix.mock.calls[0][2];
+    expect(queryArg).toMatch(/topk\(200, ALERTS\{[^)]*alertname=~"\.\*cpu\.\*"\}\)/);
+    const status = result.datasourceStatus.find((s) => s.datasourceId === 'ds-prom');
+    expect(status?.fallback).toBe('prometheus-search-truncated');
+  });
+
   it('OpenSearch path emits a date_histogram aggregation against the alert history index', async () => {
     const datasourceService = makeDatasourceService([osDatasource]);
-    const searchAlertHistoryAggregation = jest.fn(async () => ({
-      indexMissing: false as const,
-      buckets: [
-        {
-          key: START_MS + 60_000,
-          docCount: 3,
-          severityBuckets: [
-            { key: '1', docCount: 2 },
-            { key: '3', docCount: 1 },
+    const searchAlertHistoryAggregation = jest.fn(
+      async (
+        ...args: unknown[]
+      ): Promise<{
+        indexMissing: false;
+        buckets: Array<{
+          key: number;
+          docCount: number;
+          severityBuckets: Array<{ key: string; docCount: number }>;
+        }>;
+      }> => {
+        void args;
+        return {
+          indexMissing: false,
+          buckets: [
+            {
+              key: START_MS + 60_000,
+              docCount: 3,
+              severityBuckets: [
+                { key: '1', docCount: 2 },
+                { key: '3', docCount: 1 },
+              ],
+            },
           ],
-        },
-      ],
-    }));
+        };
+      }
+    );
     const osBackend = ({
       type: 'opensearch' as const,
       getMonitors: jest.fn(),

@@ -369,6 +369,7 @@ export async function handleGetUnifiedTimeline(
     state?: string;
     labels?: string;
     timeout?: string;
+    search?: string;
   }
 ): Promise<HandlerResult> {
   try {
@@ -391,9 +392,42 @@ export async function handleGetUnifiedTimeline(
       severity: severity.length > 0 ? severity : undefined,
       state: state.length > 0 ? state : undefined,
       labels,
+      search: query.search,
       timeoutMs: rawTimeout !== undefined && Number.isFinite(rawTimeout) ? rawTimeout : undefined,
     });
     return { status: 200, body: response };
+  } catch (e: unknown) {
+    return toHandlerResult(e);
+  }
+}
+
+// ============================================================================
+// Facet Handlers (Phase 5)
+// ============================================================================
+
+export async function handleGetAlertFacets(
+  alertSvc: MultiBackendAlertService,
+  clientResolver: (dsId: string) => Promise<AlertingOSClient>,
+  query?: UnifiedListQuery
+): Promise<HandlerResult> {
+  try {
+    const { options } = buildFetchOptionsFromQuery(query, /* includeAlertFields */ true);
+    const facets = await alertSvc.getAlertFacets(clientResolver, options);
+    return { status: 200, body: facets };
+  } catch (e: unknown) {
+    return toHandlerResult(e);
+  }
+}
+
+export async function handleGetRuleFacets(
+  alertSvc: MultiBackendAlertService,
+  clientResolver: (dsId: string) => Promise<AlertingOSClient>,
+  query?: UnifiedListQuery
+): Promise<HandlerResult> {
+  try {
+    const { options } = buildFetchOptionsFromQuery(query, /* includeAlertFields */ false);
+    const facets = await alertSvc.getRuleFacets(clientResolver, options);
+    return { status: 200, body: facets };
   } catch (e: unknown) {
     return toHandlerResult(e);
   }

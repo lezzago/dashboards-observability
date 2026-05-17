@@ -36,7 +36,13 @@ import type { PromAlert, PromAlertingRule } from './prometheus_types';
 export type DatasourceFetchFallback =
   | 'prometheus-alerts-current-only'
   | 'prometheus-no-severity-labels'
-  | 'opensearch-history-index-missing';
+  | 'opensearch-history-index-missing'
+  /**
+   * Set by the Prom timeline backend when a `search` query is in play; the
+   * matcher is wrapped in `topk(200, …)` so series count is bounded. The
+   * UI ignores this for the chart but tests assert the boundary.
+   */
+  | 'prometheus-search-truncated';
 
 // ============================================================================
 // OSD scoped client — structural shape of the subset we use

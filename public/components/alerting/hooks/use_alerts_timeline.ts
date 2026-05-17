@@ -27,6 +27,8 @@ export interface UseAlertsTimelineParams {
   severity?: string[];
   state?: string[];
   labels?: Record<string, string[]>;
+  /** Phase 5 — chart-vs-table search parity. Wrapped in topk(200) on Prom. */
+  search?: string;
   refreshToken?: unknown;
 }
 
@@ -56,6 +58,7 @@ export function useAlertsTimeline({
   severity,
   state,
   labels,
+  search,
   refreshToken,
 }: UseAlertsTimelineParams): UseAlertsTimelineResult {
   const service = useMemo(() => new AlertingOpenSearchService(), []);
@@ -102,6 +105,7 @@ export function useAlertsTimeline({
           severity,
           state,
           labels,
+          search,
           signal: controller.signal,
         });
         if (requestId !== lastRequestIdRef.current) return;
@@ -127,6 +131,7 @@ export function useAlertsTimeline({
     severityKey,
     stateKey,
     labelsKey,
+    search,
     refreshToken,
     localRefresh,
   ]);

@@ -46,14 +46,20 @@ describe('useAlertsTimeline', () => {
   it('forwards a derived bucket count when none is supplied', async () => {
     renderHook(() => useAlertsTimeline({ dsIds: ['ds-1'], startTime: 'now-1h', endTime: 'now' }));
     await waitFor(() => expect(mockListAlertsTimeline).toHaveBeenCalledTimes(1));
+    // Each `parseDateMathMs(start)` and `parseDateMathMs(end)` call captures
+    // `now` separately, so the resulting `(end - start)` may be exactly
+    // 3_600_000 ms (→ ceil = 12 buckets) or a microsecond more (→ 13). Both
+    // fall inside `[MIN_BUCKETS=12, MAX_BUCKETS=24]` and either is correct.
     expect(mockListAlertsTimeline).toHaveBeenCalledWith(
       expect.objectContaining({
         dsIds: ['ds-1'],
         startTime: 'now-1h',
         endTime: 'now',
-        buckets: 12, // 1h / 5min target = 12, clamped to MIN_BUCKETS
       })
     );
+    const lastBuckets = mockListAlertsTimeline.mock.calls[0][0].buckets;
+    expect(lastBuckets).toBeGreaterThanOrEqual(12);
+    expect(lastBuckets).toBeLessThanOrEqual(24);
   });
 
   it('forwards severity / state / labels filters as the service params', async () => {

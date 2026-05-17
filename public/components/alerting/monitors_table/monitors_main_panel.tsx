@@ -45,7 +45,7 @@ export interface MonitorsMainPanelProps {
 
   // Search
   searchQuery: string;
-  setSearchQuery: React.Dispatch<React.SetStateAction<string>>;
+  setSearchQuery: (value: string) => void;
   showSuggestions: boolean;
   setShowSuggestions: React.Dispatch<React.SetStateAction<boolean>>;
   suggestions: string[];
@@ -85,6 +85,16 @@ export interface MonitorsMainPanelProps {
   setSelectedMonitor: React.Dispatch<React.SetStateAction<UnifiedRuleSummary | null>>;
   onDelete: (ids: string[]) => void;
   onClone?: (monitor: UnifiedRuleSummary) => void;
+
+  // Phase 5 — controlled pagination + sort.
+  page: number;
+  pageSize: number;
+  total: number;
+  sortField: string;
+  sortDirection: 'asc' | 'desc';
+  onPageChange: (page: number) => void;
+  onPageSizeChange: (size: number) => void;
+  onSortChange: (field: string, direction: 'asc' | 'desc') => void;
 }
 
 export const MonitorsMainPanel: React.FC<MonitorsMainPanelProps> = ({
@@ -124,6 +134,14 @@ export const MonitorsMainPanel: React.FC<MonitorsMainPanelProps> = ({
   setSelectedMonitor,
   onDelete,
   onClone,
+  page,
+  pageSize,
+  total,
+  sortField,
+  sortDirection,
+  onPageChange,
+  onPageSizeChange,
+  onSortChange,
 }) => {
   return (
     <>
@@ -243,7 +261,7 @@ export const MonitorsMainPanel: React.FC<MonitorsMainPanelProps> = ({
               <EuiFlexGroup gutterSize="s" alignItems="center">
                 <EuiFlexItem grow={false}>
                   <EuiText size="s">
-                    <strong>{filtered.length}</strong> monitors
+                    <strong>{total}</strong> monitors
                     {selectedIds.size > 0 && (
                       <span>
                         {' '}
@@ -366,6 +384,23 @@ export const MonitorsMainPanel: React.FC<MonitorsMainPanelProps> = ({
               columns={tableColumns}
               loading={loading}
               rowProps={rowProps}
+              page={page}
+              pageSize={pageSize}
+              total={total}
+              sortField={sortField}
+              sortDirection={sortDirection}
+              onChange={(e) => {
+                if (e.page) {
+                  if (e.page.size !== pageSize) {
+                    onPageSizeChange(e.page.size);
+                  } else {
+                    onPageChange(e.page.index);
+                  }
+                }
+                if (e.sort) {
+                  onSortChange(String(e.sort.field), e.sort.direction);
+                }
+              }}
             />
           )}
         </div>

@@ -51,6 +51,19 @@ const defaultProps = {
   onDatasourceChange: jest.fn(),
   maxDatasources: 5,
   onDatasourceCapReached: jest.fn(),
+  // Phase 5 — controlled pagination + lifted search.
+  facetData: null,
+  facetLoading: false,
+  page: 0,
+  pageSize: 20,
+  total: 1,
+  sortField: 'name',
+  sortDirection: 'asc' as const,
+  onPageChange: jest.fn(),
+  onPageSizeChange: jest.fn(),
+  onSortChange: jest.fn(),
+  searchInput: '',
+  onSearchInputChange: jest.fn(),
 };
 
 describe('MonitorsTable', () => {

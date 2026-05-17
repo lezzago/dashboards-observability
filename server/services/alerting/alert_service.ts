@@ -48,6 +48,12 @@ import {
   getAlertDetail as getAlertDetailImpl,
   getRuleDetail as getRuleDetailImpl,
 } from './alert_detail';
+import {
+  computeAlertFacets,
+  computeRuleFacets,
+  AlertFacetCounts,
+  RuleFacetCounts,
+} from './alert_facets';
 import type { PromFilterProbe } from './prom_filter_probe';
 import {
   getUnifiedTimeline as getUnifiedTimelineImpl,
@@ -76,7 +82,7 @@ const DEFAULT_MAX_RESULTS = 5_000;
  * data; a past-only range should not. Kept on the resolved object so we
  * don't pass two values around.
  */
-interface ResolvedRange {
+export interface ResolvedRange {
   startMs: number;
   endMs: number;
   endIsNow: boolean;
@@ -113,7 +119,7 @@ interface FetchAlertsRawResult {
  */
 const NOW_TOLERANCE_MS = 60_000;
 
-function resolveRangeMsFromOptions(options?: {
+export function resolveRangeMsFromOptions(options?: {
   startTime?: string;
   endTime?: string;
 }): ResolvedRange | undefined {
@@ -144,7 +150,10 @@ const SEVERITY_SORT_ORDER: Record<string, number> = {
   info: 4,
 };
 
-function filterDatasourcesByBackend(datasources: Datasource[], backend?: string[]): Datasource[] {
+export function filterDatasourcesByBackend(
+  datasources: Datasource[],
+  backend?: string[]
+): Datasource[] {
   if (!backend || backend.length === 0) return datasources;
   const wanted = new Set(backend);
   return datasources.filter((ds) => wanted.has(ds.type));
@@ -161,7 +170,7 @@ function parseSort(
   return { field, dir };
 }
 
-function applyAlertFilters(
+export function applyAlertFilters(
   alerts: UnifiedAlertSummary[],
   options?: UnifiedFetchOptions
 ): UnifiedAlertSummary[] {
@@ -200,7 +209,7 @@ function applyAlertFilters(
   return result;
 }
 
-function applyRuleFilters(
+export function applyRuleFilters(
   rules: UnifiedRuleSummary[],
   options?: UnifiedFetchOptions
 ): UnifiedRuleSummary[] {
@@ -854,6 +863,27 @@ export class MultiBackendAlertService {
   }
 
   /**
+   * Server-side facet counts for the alerts page. Reuses `fetchAlertsRaw`
+   * (and therefore the Phase 4 `alertsCache`) so a facet call within 30s
+   * of a listing call is a cache hit on the upstream side. Computes
+   * "OR-within-dimension, AND-across-dimensions" counts.
+   */
+  async getAlertFacets(
+    clientResolver: (dsId: string) => Promise<AlertingOSClient>,
+    options?: UnifiedFetchOptions
+  ): Promise<AlertFacetCounts> {
+    return computeAlertFacets(this, clientResolver, options ?? {});
+  }
+
+  /** Server-side facet counts for the rules page. Same shape as alerts. */
+  async getRuleFacets(
+    clientResolver: (dsId: string) => Promise<AlertingOSClient>,
+    options?: UnifiedFetchOptions
+  ): Promise<RuleFacetCounts> {
+    return computeRuleFacets(this, clientResolver, options ?? {});
+  }
+
+  /**
    * Aggregated alerts timeline across selected datasources. Delegates to
    * `alert_timeline.ts` which owns the per-backend bucket logic.
    */
@@ -981,7 +1011,14 @@ export class MultiBackendAlertService {
    *                            historical view with a bounded-cardinality
    *                            query (`sum by(severity)`).
    */
-  private async fetchAlertsRaw(
+  /**
+   * Per-datasource raw fetch — mapped to `UnifiedAlertSummary[]`. Public for
+   * the facet path (`alert_facets.ts`) so it can fetch the dimensional
+   * superset (no severity / state / labels filter) once and recount each
+   * dimension client-side. The caller is responsible for any post-filter
+   * via `applyAlertFilters`.
+   */
+  async fetchAlertsRaw(
     client: AlertingOSClient,
     ds: Datasource,
     range?: ResolvedRange,
@@ -1013,7 +1050,8 @@ export class MultiBackendAlertService {
     return { alerts: [] };
   }
 
-  private async fetchRulesRaw(
+  /** Public counterpart to `fetchAlertsRaw` for the rule-facet path. */
+  async fetchRulesRaw(
     client: AlertingOSClient,
     ds: Datasource,
     filterOptions?: UnifiedFetchOptions
@@ -1101,7 +1139,8 @@ export class MultiBackendAlertService {
   // Helpers
   // =========================================================================
 
-  private async resolveDatasources(dsIds?: string[]): Promise<Datasource[]> {
+  /** Public for the facet path. */
+  async resolveDatasources(dsIds?: string[]): Promise<Datasource[]> {
     const all = await this.datasourceService.list();
     const enabled = all.filter((ds) => ds.enabled);
     if (!dsIds || dsIds.length === 0) return enabled;

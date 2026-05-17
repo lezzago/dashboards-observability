@@ -72,8 +72,66 @@ export interface ListAlertsTimelineParams {
   severity?: string[];
   state?: string[];
   labels?: Record<string, string[]>;
+  search?: string;
   timeout?: number;
   signal?: AbortSignal;
+}
+
+/**
+ * Phase 5 — server-side facets. Same wire shape as the listing params
+ * but `page`/`pageSize`/`sort` are ignored at the route layer (facets
+ * cover the full filtered set).
+ */
+export interface ListAlertsFacetsParams extends AlertsFilterParamsCommon {
+  dsIds: string[];
+  startTime?: string;
+  endTime?: string;
+  timeout?: number;
+  signal?: AbortSignal;
+}
+
+export interface ListRulesFacetsParams extends AlertsFilterParamsCommon {
+  dsIds: string[];
+  monitorType?: string[];
+  healthStatus?: string[];
+  createdBy?: string[];
+  timeout?: number;
+  signal?: AbortSignal;
+}
+
+export interface AlertFacetCountsResponse {
+  severity: Record<string, number>;
+  state: Record<string, number>;
+  backend: Record<string, number>;
+  labels: Record<string, Record<string, number>>;
+  total: number;
+  truncated?: boolean;
+  fetchedAt: string;
+  warnings?: Array<{
+    datasourceId: string;
+    datasourceName: string;
+    datasourceType: string;
+    error: string;
+  }>;
+}
+
+export interface RuleFacetCountsResponse {
+  status: Record<string, number>;
+  severity: Record<string, number>;
+  monitorType: Record<string, number>;
+  healthStatus: Record<string, number>;
+  backend: Record<string, number>;
+  createdBy: Record<string, number>;
+  labels: Record<string, Record<string, number>>;
+  total: number;
+  truncated?: boolean;
+  fetchedAt: string;
+  warnings?: Array<{
+    datasourceId: string;
+    datasourceName: string;
+    datasourceType: string;
+    error: string;
+  }>;
 }
 
 export class AlertingOpenSearchService {
@@ -158,10 +216,58 @@ export class AlertingOpenSearchService {
     if (params.labels && Object.keys(params.labels).length > 0) {
       q.labels = JSON.stringify(params.labels);
     }
+    if (params.search) q.search = params.search;
     return (await this.requireHttp().get('/api/alerting/unified/alerts/timeline', {
       query: q,
       signal: params.signal,
     })) as AlertsTimelineResponse;
+  }
+
+  /** Phase 5 — server-computed alert facets. */
+  async listAlertFacets(params: ListAlertsFacetsParams): Promise<AlertFacetCountsResponse> {
+    const q: Record<string, string> = { dsIds: params.dsIds.join(',') };
+    if (params.timeout !== undefined) q.timeout = String(params.timeout);
+    if (params.startTime !== undefined) q.startTime = params.startTime;
+    if (params.endTime !== undefined) q.endTime = params.endTime;
+    if (params.severity && params.severity.length > 0) q.severity = params.severity.join(',');
+    if (params.state && params.state.length > 0) q.state = params.state.join(',');
+    if (params.backend && params.backend.length > 0) q.backend = params.backend.join(',');
+    if (params.labels && Object.keys(params.labels).length > 0) {
+      q.labels = JSON.stringify(params.labels);
+    }
+    if (params.search) q.search = params.search;
+    if (params.noCache) q.noCache = '1';
+    return (await this.requireHttp().get('/api/alerting/unified/alerts/_facets', {
+      query: q,
+      signal: params.signal,
+    })) as AlertFacetCountsResponse;
+  }
+
+  /** Phase 5 — server-computed rule facets. */
+  async listRuleFacets(params: ListRulesFacetsParams): Promise<RuleFacetCountsResponse> {
+    const q: Record<string, string> = { dsIds: params.dsIds.join(',') };
+    if (params.timeout !== undefined) q.timeout = String(params.timeout);
+    if (params.severity && params.severity.length > 0) q.severity = params.severity.join(',');
+    if (params.state && params.state.length > 0) q.state = params.state.join(',');
+    if (params.backend && params.backend.length > 0) q.backend = params.backend.join(',');
+    if (params.labels && Object.keys(params.labels).length > 0) {
+      q.labels = JSON.stringify(params.labels);
+    }
+    if (params.search) q.search = params.search;
+    if (params.noCache) q.noCache = '1';
+    if (params.monitorType && params.monitorType.length > 0) {
+      q.monitorType = params.monitorType.join(',');
+    }
+    if (params.healthStatus && params.healthStatus.length > 0) {
+      q.healthStatus = params.healthStatus.join(',');
+    }
+    if (params.createdBy && params.createdBy.length > 0) {
+      q.createdBy = params.createdBy.join(',');
+    }
+    return (await this.requireHttp().get('/api/alerting/unified/rules/_facets', {
+      query: q,
+      signal: params.signal,
+    })) as RuleFacetCountsResponse;
   }
 
   /** Single alert detail for the flyout. */

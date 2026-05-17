@@ -4,7 +4,7 @@
  */
 
 import { MultiBackendAlertService } from '../alert_service';
-import type { Datasource, Logger } from '../../../../common/types/alerting/types';
+import type { Datasource, Logger } from '../../../../common/types/alerting';
 
 const mockLogger: Logger = { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() };
 
@@ -38,24 +38,33 @@ const mockDsSvc = {
   seed: jest.fn(),
 };
 
+// Explicit `unknown[]` / `unknown` return types on the empty-default mocks
+// keep `mockResolvedValueOnce({ alerts, …})` from being narrowed to `never`
+// by TS (which infers `never[]` from `jest.fn(async () => [])`).
 const mockOsBackend = {
-  getMonitors: jest.fn(async () => []),
+  getMonitors: jest.fn(async (): Promise<unknown> => []),
   getMonitor: jest.fn(),
   createMonitor: jest.fn(),
   updateMonitor: jest.fn(),
   deleteMonitor: jest.fn(),
-  getAlerts: jest.fn(async () => ({ alerts: [], totalAlerts: 0, truncated: false })),
+  getAlerts: jest.fn(
+    async (): Promise<{ alerts: unknown[]; totalAlerts: number; truncated: boolean }> => ({
+      alerts: [],
+      totalAlerts: 0,
+      truncated: false,
+    })
+  ),
   acknowledgeAlerts: jest.fn(),
-  getDestinations: jest.fn(async () => []),
+  getDestinations: jest.fn(async (): Promise<unknown[]> => []),
   searchQuery: jest.fn(),
   runMonitor: jest.fn(),
 };
 
 const mockPromBackend = {
   type: 'prometheus' as const,
-  getRuleGroups: jest.fn(async () => []),
-  getAlerts: jest.fn(async () => []),
-  listWorkspaces: jest.fn(async () => []),
+  getRuleGroups: jest.fn(async (): Promise<unknown[]> => []),
+  getAlerts: jest.fn(async (): Promise<unknown[]> => []),
+  listWorkspaces: jest.fn(async (): Promise<unknown[]> => []),
 };
 
 let svc: MultiBackendAlertService;
@@ -352,15 +361,15 @@ describe('MultiBackendAlertService — routing & list', () => {
    */
   it('has no setDatasourceService setter', () => {
     const dsSvc = {
-      list: jest.fn(async () => []),
-      get: jest.fn(async () => null),
+      list: jest.fn(async (): Promise<unknown[]> => []),
+      get: jest.fn(async (): Promise<unknown> => null),
       create: jest.fn(),
       update: jest.fn(),
       delete: jest.fn(),
       testConnection: jest.fn(),
       seed: jest.fn(),
     };
-    const instance = new MultiBackendAlertService(dsSvc, mockLogger);
+    const instance = new MultiBackendAlertService(dsSvc as never, mockLogger);
     // @ts-expect-error setDatasourceService was intentionally removed
     const setter = instance.setDatasourceService;
     expect(setter).toBeUndefined();
@@ -465,7 +474,7 @@ describe('MultiBackendAlertService — routing & list', () => {
         noCache: true,
       });
       // Last arg passed to Prom getAlerts contains the noCache hint.
-      const lastCall = mockPromBackend.getAlerts.mock.calls.at(-1)!;
+      const lastCall = mockPromBackend.getAlerts.mock.calls.at(-1)! as unknown[];
       expect(lastCall[2]).toMatchObject({ noCache: true });
     });
   });

@@ -56,6 +56,8 @@ import { CreateMetricsMonitor, MetricsMonitorFormState } from './create_metrics_
 import { AlertingOpenSearchService } from './query_services/alerting_opensearch_service';
 import { useAlerts } from './hooks/use_alerts';
 import { useAlertsTimeline } from './hooks/use_alerts_timeline';
+import { useAlertsFacets } from './hooks/use_alerts_facets';
+import { useRulesFacets } from './hooks/use_rules_facets';
 import { useMonitorMutations } from './hooks/use_monitor_mutations';
 import type { AlertsDashboardFilterSnapshot } from './alerts_dashboard';
 import type { MonitorsTableFilterSnapshot } from './monitors_table';
@@ -192,11 +194,6 @@ const TAB_LABELS: Record<TabId, string> = {
   routing: 'Routing',
 };
 
-// Fetch a large page from the server so child tables can paginate client-side.
-// The child components (AlertsDashboard, MonitorsTable) handle their own
-// page-size controls (10/20/50/100 rows per page) over this full dataset.
-const DEFAULT_PAGE_SIZE = 1000;
-
 export const AlarmsPage: React.FC<AlarmsPageProps> = ({
   datasources,
   datasourcesLoading,
@@ -281,24 +278,57 @@ export const AlarmsPage: React.FC<AlarmsPageProps> = ({
     [selectedDsIds, datasources, alertsFilterSnapshot.backend]
   );
 
-  // ---- Alerts data (Phase 4 — server-side filter pushdown + pagination) ----
+  // ---- Alerts pagination / sort state (Phase 5) ----
   //
-  // We pass `page=1, pageSize=200` so the listing endpoint dispatches to
-  // the paginated path (filter pushdown, 30s cache) but the in-page
-  // EuiInMemoryTable continues to paginate client-side over the
-  // filter-narrowed page. The dashboard's existing pagination UX is
-  // unchanged; the data feeding it is now filter-narrowed at the
-  // backend.
+  // Controlled `EuiBasicTable` lives in `AlertsDashboard`. Page is
+  // 0-indexed (Eui convention); the hook re-indexes to 1-based for the
+  // server. Filter / search / datasource changes reset page to 0.
+  const [alertsPage, setAlertsPage] = useState(0);
+  const [alertsPageSize, setAlertsPageSize] = useState(20);
+  const [alertsSortField, setAlertsSortField] = useState('startTime');
+  const [alertsSortOrder, setAlertsSortOrder] = useState<'asc' | 'desc'>('desc');
+
+  // Search input is split into immediate (drives the input) and debounced
+  // (drives downstream hooks) state. 250ms keeps keystroke noise out of
+  // the listing / facet / timeline calls.
+  const [alertsSearchInput, setAlertsSearchInput] = useState('');
+  const [alertsSearchQuery, setAlertsSearchQuery] = useState('');
+  useEffect(() => {
+    const t = setTimeout(() => setAlertsSearchQuery(alertsSearchInput), 250);
+    return () => clearTimeout(t);
+  }, [alertsSearchInput]);
+
+  // Reset page to 0 when filters / search / datasources change. The hook
+  // already triggers a refetch on the same deps; we just need the page
+  // index to start fresh so the user lands on page 1 of the new set.
+  const alertsResetKey = useMemo(
+    () =>
+      JSON.stringify({
+        ds: alertsTimelineDsIds,
+        s: alertsFilterParams.severity,
+        st: alertsFilterParams.state,
+        l: alertsFilterParams.labels,
+        q: alertsSearchQuery,
+      }),
+    [alertsTimelineDsIds, alertsFilterParams, alertsSearchQuery]
+  );
+  useEffect(() => {
+    setAlertsPage(0);
+  }, [alertsResetKey]);
+
+  // ---- Alerts data (Phase 5 — server-side pagination + facets) ----
   const { data: alertsData, isLoading: alertsLoading, error: alertsError } = useAlerts({
     dsIds: alertsTimelineDsIds,
     startTime,
     endTime,
     refreshToken,
-    page: 1,
-    pageSize: 200,
+    page: alertsPage + 1,
+    pageSize: alertsPageSize,
+    sort: `${alertsSortField}:${alertsSortOrder}`,
     severity: alertsFilterParams.severity,
     state: alertsFilterParams.state,
     labels: alertsFilterParams.labels,
+    search: alertsSearchQuery || undefined,
   });
 
   const { data: timelineData, isLoading: timelineLoading } = useAlertsTimeline({
@@ -308,6 +338,18 @@ export const AlarmsPage: React.FC<AlarmsPageProps> = ({
     severity: alertsFilterParams.severity,
     state: alertsFilterParams.state,
     labels: alertsFilterParams.labels,
+    search: alertsSearchQuery || undefined,
+    refreshToken,
+  });
+
+  const { data: alertsFacetData, isLoading: alertsFacetLoading } = useAlertsFacets({
+    dsIds: alertsTimelineDsIds,
+    startTime,
+    endTime,
+    severity: alertsFilterParams.severity,
+    state: alertsFilterParams.state,
+    labels: alertsFilterParams.labels,
+    search: alertsSearchQuery || undefined,
     refreshToken,
   });
 
@@ -334,7 +376,12 @@ export const AlarmsPage: React.FC<AlarmsPageProps> = ({
       return ov ? { ...a, state: ov.state, lastUpdated: ov.lastUpdated } : a;
     });
   }, [rawAlerts, ackOverrides]);
-  const alertsTotal = alerts.length;
+  // PaginatedResponse exposes `total`; legacy ProgressiveResponse falls
+  // back to result-array length. With Phase 5's controlled pagination
+  // every alerts request hits the paginated path so `total` is always
+  // defined; the fallback is defensive.
+  const alertsTotal: number =
+    alertsData && 'total' in alertsData ? alertsData.total : alerts.length;
 
   // Drop overrides whose target alert is now acknowledged on the server
   // (or has fallen out of the result set entirely). Runs after every hook
@@ -397,8 +444,21 @@ export const AlarmsPage: React.FC<AlarmsPageProps> = ({
 
   const [rules, setRules] = useState<UnifiedRuleSummary[]>([]);
   const [rulesTotal, setRulesTotal] = useState(-1); // -1 = not yet loaded
+  // 1-indexed for the listing endpoint; controlled `EuiBasicTable` uses
+  // 0-indexed internally and the dashboard re-indexes on the boundary.
   const [rulesPage, setRulesPage] = useState(1);
-  const [rulesPageSize] = useState(DEFAULT_PAGE_SIZE);
+  const [rulesPageSize, setRulesPageSize] = useState(20);
+  const [rulesSortField, setRulesSortField] = useState('name');
+  const [rulesSortOrder, setRulesSortOrder] = useState<'asc' | 'desc'>('asc');
+
+  // Search input split into immediate / debounced (250ms). Same pattern
+  // as the alerts side.
+  const [rulesSearchInput, setRulesSearchInput] = useState('');
+  const [rulesSearchQuery, setRulesSearchQuery] = useState('');
+  useEffect(() => {
+    const t = setTimeout(() => setRulesSearchQuery(rulesSearchInput), 250);
+    return () => clearTimeout(t);
+  }, [rulesSearchInput]);
 
   // Phase 4 — rules table filter snapshot mirrored upward via `onFilterChange`.
   // Same pattern as the alerts dashboard — keeps server-side filter
@@ -543,7 +603,9 @@ export const AlarmsPage: React.FC<AlarmsPageProps> = ({
       page: number,
       pageSize: number,
       filterParams: ReturnType<typeof mapRuleFilters>,
-      forceFresh: boolean
+      forceFresh: boolean,
+      sort?: string,
+      search?: string
     ) => {
       if (dsIds.length === 0) {
         setRules([]);
@@ -558,6 +620,8 @@ export const AlarmsPage: React.FC<AlarmsPageProps> = ({
           dsIds,
           page,
           pageSize,
+          sort,
+          search,
           // `status` is wire-modeled as the unified `state` param so the
           // server hands a single field through `applyRuleFilters` for
           // both alerts (alert state) and rules (monitor status).
@@ -614,24 +678,70 @@ export const AlarmsPage: React.FC<AlarmsPageProps> = ({
   const rulesFilterKey = useMemo(() => JSON.stringify(rulesFilterParams), [rulesFilterParams]);
   const rulesDsIdsKey = rulesDsIds.join(',');
 
-  // Rules fetch effect — server-side filter + pagination (Phase 4).
-  // Now `rulesPage`/`rulesPageSize` are meaningful: a different page
-  // produces a different server response.
+  // Reset page when filters / search / DS change.
+  const rulesResetKey = useMemo(
+    () =>
+      JSON.stringify({
+        ds: rulesDsIds,
+        f: rulesFilterParams,
+        q: rulesSearchQuery,
+      }),
+    [rulesDsIds, rulesFilterParams, rulesSearchQuery]
+  );
+  useEffect(() => {
+    setRulesPage(1);
+  }, [rulesResetKey]);
+
+  // Rules fetch effect — server-side filter + pagination (Phase 4/5).
   useEffect(() => {
     if (rulesDsIds.length === 0) {
       setRules([]);
       setRulesTotal(0);
       return;
     }
-    fetchRules(rulesDsIds, rulesPage, rulesPageSize, rulesFilterParams, rulesShouldForceFresh);
+    fetchRules(
+      rulesDsIds,
+      rulesPage,
+      rulesPageSize,
+      rulesFilterParams,
+      rulesShouldForceFresh,
+      `${rulesSortField}:${rulesSortOrder}`,
+      rulesSearchQuery || undefined
+    );
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rulesDsIdsKey, rulesPage, rulesPageSize, rulesFilterKey, refreshToken, fetchRules]);
+  }, [
+    rulesDsIdsKey,
+    rulesPage,
+    rulesPageSize,
+    rulesFilterKey,
+    rulesSearchQuery,
+    rulesSortField,
+    rulesSortOrder,
+    refreshToken,
+    fetchRules,
+  ]);
 
-  // Reset pages when datasource selection changes. `useAlerts` refetches
-  // automatically on `selectedDsIds` change, so no alerts-page reset here.
+  // Rules facets — same shape / debounce as alerts.
+  const { data: rulesFacetData, isLoading: rulesFacetLoading } = useRulesFacets({
+    dsIds: rulesDsIds,
+    status: rulesFilterParams.status,
+    severity: rulesFilterParams.severity,
+    monitorType: rulesFilterParams.monitorType,
+    healthStatus: rulesFilterParams.healthStatus,
+    createdBy: rulesFilterParams.createdBy,
+    labels: rulesFilterParams.labels,
+    search: rulesSearchQuery || undefined,
+    refreshToken,
+  });
+
+  // Reset pages when datasource selection changes. The Phase 5 alerts
+  // dashboard now owns its page state on the parent (so the table is a
+  // controlled `EuiBasicTable`); reset here so flipping datasources
+  // doesn't leave the user on a now-out-of-range page.
   const handleDatasourceChange = useCallback((ids: string[]) => {
     setSelectedDsIds(ids);
     setRulesPage(1);
+    setAlertsPage(0);
     setDeletedRuleIds(new Set());
   }, []);
 
@@ -1054,6 +1164,24 @@ export const AlarmsPage: React.FC<AlarmsPageProps> = ({
             timelineData={timelineData}
             timelineLoading={timelineLoading}
             onFilterChange={setAlertsFilterSnapshot}
+            facetData={alertsFacetData}
+            facetLoading={alertsFacetLoading}
+            page={alertsPage}
+            pageSize={alertsPageSize}
+            total={alertsTotal}
+            sortField={alertsSortField}
+            sortDirection={alertsSortOrder}
+            onPageChange={setAlertsPage}
+            onPageSizeChange={(size) => {
+              setAlertsPageSize(size);
+              setAlertsPage(0);
+            }}
+            onSortChange={(field, direction) => {
+              setAlertsSortField(field);
+              setAlertsSortOrder(direction);
+            }}
+            searchInput={alertsSearchInput}
+            onSearchInputChange={setAlertsSearchInput}
           />
         </>
       );
@@ -1082,6 +1210,24 @@ export const AlarmsPage: React.FC<AlarmsPageProps> = ({
           maxDatasources={maxDatasources}
           onDatasourceCapReached={handleDatasourceCapReached}
           onFilterChange={setRulesFilterSnapshot}
+          facetData={rulesFacetData}
+          facetLoading={rulesFacetLoading}
+          page={rulesPage - 1}
+          pageSize={rulesPageSize}
+          total={rulesTotal >= 0 ? rulesTotal : 0}
+          sortField={rulesSortField}
+          sortDirection={rulesSortOrder}
+          onPageChange={(p) => setRulesPage(p + 1)}
+          onPageSizeChange={(size) => {
+            setRulesPageSize(size);
+            setRulesPage(1);
+          }}
+          onSortChange={(field, direction) => {
+            setRulesSortField(field);
+            setRulesSortOrder(direction);
+          }}
+          searchInput={rulesSearchInput}
+          onSearchInputChange={setRulesSearchInput}
         />
       );
     }

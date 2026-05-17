@@ -66,6 +66,8 @@ import {
   handleGetRuleDetail,
   handleGetRuleRouting,
   handleGetAlertDetail,
+  handleGetAlertFacets,
+  handleGetRuleFacets,
 } from './handlers';
 import {
   handleGetMetricNames,
@@ -353,6 +355,7 @@ export function registerAlertingRoutes(router: IRouter, deps: AlertingRoutesDeps
             severity: schema.maybe(schema.string()),
             state: schema.maybe(schema.string()),
             labels: schema.maybe(schema.string()),
+            search: schema.maybe(schema.string()),
             startTime: schema.string({
               validate: (v: string) =>
                 validateDateMath(v) ? undefined : `invalid date-math: ${v}`,
@@ -382,6 +385,7 @@ export function registerAlertingRoutes(router: IRouter, deps: AlertingRoutesDeps
           severity: req.query.severity,
           state: req.query.state,
           labels: req.query.labels,
+          search: req.query.search,
           timeout: req.query.timeout,
         }
       );
@@ -426,6 +430,81 @@ export function registerAlertingRoutes(router: IRouter, deps: AlertingRoutesDeps
         }
       );
       return res.ok({ body: result.body });
+    }
+  );
+
+  // Phase 5 — server-side facets. Same query schema as the listing
+  // routes but `page`/`pageSize`/`sort` are ignored (facets cover the
+  // full filtered set). Caps are surfaced via `truncated: true`.
+  router.get(
+    {
+      path: '/api/alerting/unified/alerts/_facets',
+      validate: {
+        query: schema.object(
+          {
+            dsIds: schema.maybe(schema.string()),
+            timeout: schema.maybe(schema.string()),
+            ...paginationQuery,
+            ...timeRangeQuery,
+          },
+          timeRangeObjectOptions
+        ),
+      },
+    },
+    async (ctx, req, res) => {
+      const { alertService } = buildRequestServices(ctx as AlertingHandlerContext);
+      const result = await handleGetAlertFacets(
+        alertService,
+        async (dsId: string) => getAlertingClient(ctx, dsId),
+        {
+          dsIds: req.query.dsIds,
+          timeout: req.query.timeout,
+          startTime: req.query.startTime,
+          endTime: req.query.endTime,
+          severity: req.query.severity,
+          state: req.query.state,
+          backend: req.query.backend,
+          labels: req.query.labels,
+          search: req.query.search,
+          noCache: req.query.noCache,
+        }
+      );
+      return sendResult(res, result);
+    }
+  );
+
+  router.get(
+    {
+      path: '/api/alerting/unified/rules/_facets',
+      validate: {
+        query: schema.object({
+          dsIds: schema.maybe(schema.string()),
+          timeout: schema.maybe(schema.string()),
+          ...paginationQuery,
+          ...ruleListingExtraQuery,
+        }),
+      },
+    },
+    async (ctx, req, res) => {
+      const { alertService } = buildRequestServices(ctx as AlertingHandlerContext);
+      const result = await handleGetRuleFacets(
+        alertService,
+        async (dsId: string) => getAlertingClient(ctx, dsId),
+        {
+          dsIds: req.query.dsIds,
+          timeout: req.query.timeout,
+          severity: req.query.severity,
+          state: req.query.state,
+          backend: req.query.backend,
+          labels: req.query.labels,
+          search: req.query.search,
+          monitorType: req.query.monitorType,
+          healthStatus: req.query.healthStatus,
+          createdBy: req.query.createdBy,
+          noCache: req.query.noCache,
+        }
+      );
+      return sendResult(res, result);
     }
   );
 

@@ -4,7 +4,7 @@
  */
 
 import { MultiBackendAlertService } from '../alert_service';
-import type { Datasource, Logger } from '../../../../common/types/alerting/types';
+import type { Datasource, Logger } from '../../../../common/types/alerting';
 import {
   sampleOSMonitor,
   sampleOSAlert,
@@ -43,24 +43,31 @@ const mockDsSvc = {
   seed: jest.fn(),
 };
 
+// Explicit `unknown[]` / `unknown` return types so subsequent
+// `mockResolvedValueOnce(typed)` calls aren't narrowed to `never`.
 const mockOsBackend = {
-  getMonitors: jest.fn(async () => []),
+  getMonitors: jest.fn(async (): Promise<unknown> => []),
   getMonitor: jest.fn(),
   createMonitor: jest.fn(),
   updateMonitor: jest.fn(),
   deleteMonitor: jest.fn(),
-  getAlerts: jest.fn(async () => ({ alerts: [], totalAlerts: 0 })),
+  getAlerts: jest.fn(
+    async (): Promise<{ alerts: unknown[]; totalAlerts: number }> => ({
+      alerts: [],
+      totalAlerts: 0,
+    })
+  ),
   acknowledgeAlerts: jest.fn(),
-  getDestinations: jest.fn(async () => []),
+  getDestinations: jest.fn(async (): Promise<unknown[]> => []),
   searchQuery: jest.fn(),
   runMonitor: jest.fn(),
 };
 
 const mockPromBackend = {
   type: 'prometheus' as const,
-  getRuleGroups: jest.fn(async () => []),
-  getAlerts: jest.fn(async () => []),
-  listWorkspaces: jest.fn(async () => []),
+  getRuleGroups: jest.fn(async (): Promise<unknown[]> => []),
+  getAlerts: jest.fn(async (): Promise<unknown[]> => []),
+  listWorkspaces: jest.fn(async (): Promise<unknown[]> => []),
 };
 
 const mockClient = {} as never;
