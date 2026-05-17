@@ -46,10 +46,7 @@ import {
   PromAlertsApiResponse,
   DatasourceDefinition,
   PromTimeSeriesPoint,
-  UnifiedAlertSummary,
 } from '../../../common/types/alerting';
-import { hashRuleIdentity, promAlertToUnified, promEpisodeToUnified } from './alert_utils';
-import type { PromAlertEpisode } from './alert_utils';
 
 export interface PromSeriesMatrix {
   metric: Record<string, string>;
@@ -674,161 +671,35 @@ export class DirectQueryPrometheusBackend implements PrometheusBackend, Promethe
     return series;
   }
 
-  // Unified alert list for a Prometheus datasource over a window. Merges
-  // historical episodes reconstructed from `ALERTS{}` matrix samples with
-  // currently-firing alerts from `/api/v1/alerts`. See the PR description
-  // for the full algorithm; the inline notes below cover only the
-  // non-obvious invariants (edge tolerance, dedupe key, error isolation).
-  async getHistoricalAlerts(
+  /**
+   * Range query for the alerts timeline chart. Issues
+   *
+   *   sum by(severity) (ALERTS{alertstate="firing", <extra>})
+   *
+   * over `[startEpochSec, endEpochSec]` with a step that yields
+   * approximately one sample per chart bucket. Returns one
+   * `PromSeriesMatrix` per distinct `severity` label value — series count
+   * is bounded by severity cardinality (≤ 5), unlike the raw `ALERTS{}`
+   * matrix whose cardinality is the number of distinct alert label sets.
+   *
+   * `extraMatchers` are appended to the selector with no validation; the
+   * caller is responsible for emitting Prom-safe matchers (the
+   * `alert_timeline.ts` resolver builds them from a closed allowlist of
+   * filter shapes).
+   */
+  async queryTimelineSeverityBuckets(
     client: AlertingOSClient,
     ds: Datasource,
     startEpochSec: number,
     endEpochSec: number,
     stepSec: number,
-    endIsNow: boolean
-  ): Promise<{
-    alerts: UnifiedAlertSummary[];
-    fallback?: 'prometheus-alerts-current-only';
-    error?: string;
-  }> {
-    // Filter `alertstate="firing"` at the PromQL level. Pending samples
-    // flap with the query step (fine step on a short window catches them,
-    // coarse step on a long window misses them), so leaving them in
-    // produces row counts that change just from picker changes. Live
-    // `/api/v1/alerts` is already firing-or-inactive on most Prom versions,
-    // so this aligns the two sources.
-    const matrixPromise = this.queryRangeMatrix(
-      client,
-      ds,
-      'ALERTS{alertstate="firing"}',
-      startEpochSec,
-      endEpochSec,
-      stepSec
-    );
-    const liveSettled: Promise<
-      { ok: true; alerts: PromAlert[] } | { ok: false; error: string }
-    > = endIsNow
-      ? this.getAlerts(client, ds).then(
-          (alerts) => ({ ok: true, alerts } as const),
-          (err) => ({ ok: false, error: String(err) } as const)
-        )
-      : Promise.resolve({ ok: true, alerts: [] as PromAlert[] } as const);
-
-    let series: PromSeriesMatrix[];
-    try {
-      series = await matrixPromise;
-    } catch (err) {
-      // Matrix failed — still surface live alerts when window ends at now,
-      // so a transient Cortex error doesn't blank the UI for what's firing
-      // RIGHT NOW.
-      const live = await liveSettled;
-      if (!live.ok || live.alerts.length === 0) {
-        return { alerts: [], error: String(err) };
-      }
-      return {
-        alerts: live.alerts.map((a) => promAlertToUnified(a, ds.id)),
-        fallback: 'prometheus-alerts-current-only',
-        error: String(err),
-      };
-    }
-
-    const windowStartMs = startEpochSec * 1000;
-    const windowEndMs = endEpochSec * 1000;
-    const stepMs = stepSec * 1000;
-    // 1.5× step tolerance for "this run was already firing at the edge".
-    // Tighter than 1× over-clamps (every series looks pre-window because
-    // its first sample is at index 0); looser than 2× under-clamps
-    // (genuine pre-window alerts get reported as starting inside).
-    const edgeToleranceMs = Math.round(stepMs * 1.5);
-    const episodes: PromAlertEpisode[] = [];
-
-    for (const s of series) {
-      const values = s.values;
-      if (values.length === 0) continue;
-
-      let runStart: number | null = null;
-      let lastSampleTsInRun: number | null = null;
-      let truncatedStart = false;
-
-      const closeRun = (endTsMs: number, stillActive: boolean) => {
-        if (runStart === null) return;
-        episodes.push({
-          labels: { ...s.metric },
-          startMs: runStart,
-          endMs: endTsMs,
-          truncatedStart: truncatedStart ? true : undefined,
-          stillActiveAtRangeEnd: stillActive ? true : undefined,
-        });
-        runStart = null;
-        lastSampleTsInRun = null;
-        truncatedStart = false;
-      };
-
-      for (let i = 0; i < values.length; i++) {
-        const point = values[i];
-        const isFiring = point.value === 1;
-        if (isFiring) {
-          if (runStart === null) {
-            if (i === 0 && point.timestamp - windowStartMs <= edgeToleranceMs) {
-              runStart = windowStartMs;
-              truncatedStart = true;
-            } else {
-              runStart = point.timestamp;
-            }
-          }
-          lastSampleTsInRun = point.timestamp;
-        } else if (runStart !== null) {
-          closeRun(lastSampleTsInRun ?? runStart, false);
-        }
-      }
-      if (runStart !== null && lastSampleTsInRun !== null) {
-        const stillActive = windowEndMs - lastSampleTsInRun <= edgeToleranceMs;
-        closeRun(stillActive ? windowEndMs : lastSampleTsInRun, stillActive);
-      }
-    }
-
-    const historicalAlerts = episodes.map((ep) => promEpisodeToUnified(ep, ds.id));
-
-    // Dedupe live alerts against historical episodes still active at the
-    // window's right edge — keyed by rule-identity hash (labels minus
-    // `__name__`/`alertstate`, which differ between the two sources).
-    const activeEpisodeHashes = new Set<string>();
-    for (const ep of episodes) {
-      if (ep.stillActiveAtRangeEnd) {
-        activeEpisodeHashes.add(hashRuleIdentity(ep.labels));
-      }
-    }
-
-    const live = await liveSettled;
-    const liveAlerts = live.ok ? live.alerts : [];
-    const liveError = live.ok ? undefined : live.error;
-
-    const liveAdditions: UnifiedAlertSummary[] = [];
-    for (const la of liveAlerts) {
-      // Skip pending — same step-flapping reason as the matrix filter.
-      if (la.state === 'pending') continue;
-      if (!activeEpisodeHashes.has(hashRuleIdentity(la.labels))) {
-        liveAdditions.push(promAlertToUnified(la, ds.id));
-      }
-    }
-
-    // Flag the "current alerts only" banner when the matrix returned
-    // nothing but live alerts exist — tells the UI that coverage is
-    // limited to "now" rather than the picked window.
-    const fallback =
-      historicalAlerts.length === 0 && liveAdditions.length > 0
-        ? ('prometheus-alerts-current-only' as const)
-        : undefined;
-
-    return {
-      alerts: [...historicalAlerts, ...liveAdditions],
-      ...(fallback ? { fallback } : {}),
-      // Only surface the live-side error when it's the only signal the
-      // user gets — otherwise it's noise on top of a successful matrix.
-      ...(liveError && historicalAlerts.length === 0 && liveAdditions.length === 0
-        ? { error: liveError }
-        : {}),
-    };
+    extraMatchers: string[] = [],
+    severityKey: 'severity' | null = 'severity'
+  ): Promise<PromSeriesMatrix[]> {
+    const matchers = ['alertstate="firing"', ...extraMatchers].join(', ');
+    const selector = `ALERTS{${matchers}}`;
+    const query = severityKey ? `sum by(${severityKey}) (${selector})` : `count(${selector})`;
+    return this.queryRangeMatrix(client, ds, query, startEpochSec, endEpochSec, stepSec);
   }
 
   /**

@@ -7,7 +7,7 @@
  * Alerts Dashboard — visualization-first view of alert history
  * with summary stats, charts, and drill-down table.
  */
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import {
   EuiBasicTableColumn,
   EuiFlexGroup,
@@ -29,6 +29,7 @@ import {
 import { i18n } from '@osd/i18n';
 import { FormattedMessage } from '@osd/i18n/react';
 import {
+  AlertsTimelineResponse,
   DatasourceFetchFallback,
   UnifiedAlertSummary,
   Datasource,
@@ -108,6 +109,23 @@ interface AlertFilterState {
   state: string[];
   backend: string[];
   labels: Record<string, string[]>;
+}
+
+/**
+ * Outgoing filter snapshot exposed to the parent so it can drive the
+ * timeline chart's separate hook with the same severity / state / labels
+ * the table is rendering. `searchQuery` is intentionally excluded —
+ * Phase 2 keeps the chart unfiltered by free-text search.
+ */
+export interface AlertsDashboardFilterSnapshot {
+  severity: string[];
+  state: string[];
+  backend: string[];
+  labels: Record<string, string[]>;
+  /** 'all' | 'critical' | 'high' | 'medium' — the stat-card single-select. */
+  severityCard: string;
+  /** 'all' | 'active' — the stat-card single-select. */
+  stateCard: string;
 }
 
 const emptyAlertFilters = (): AlertFilterState => ({
@@ -190,10 +208,6 @@ export interface AlertsDashboardProps {
   maxDatasources: number;
   /** Callback fired when user tries to exceed `maxDatasources`. */
   onDatasourceCapReached: () => void;
-  /** Picker start resolved to epoch ms (resolved once by the parent). */
-  startMs: number;
-  /** Picker end resolved to epoch ms (resolved once by the parent). */
-  endMs: number;
   /**
    * Set by the parent when any backend reported a hard cap on returned
    * alerts (e.g. the OpenSearch 1000-alert post-filter cap). Drives a
@@ -207,6 +221,20 @@ export interface AlertsDashboardProps {
    * Rendered as a callout above the timeline.
    */
   fallbackHints?: Array<{ datasourceName: string; fallback: DatasourceFetchFallback }>;
+  /**
+   * Pre-bucketed timeline payload from `useAlertsTimeline`. The chart
+   * renders directly from this — it does not iterate `alerts` to build
+   * histograms.
+   */
+  timelineData: AlertsTimelineResponse | null;
+  /** True while the timeline hook is in flight. */
+  timelineLoading?: boolean;
+  /**
+   * Called whenever the dashboard's filter state changes so the parent
+   * can mirror it into the `useAlertsTimeline` deps. Search query is
+   * intentionally excluded — see Phase 2 plan.
+   */
+  onFilterChange?: (filters: AlertsDashboardFilterSnapshot) => void;
 }
 
 export const AlertsDashboard: React.FC<AlertsDashboardProps> = ({
@@ -219,16 +247,46 @@ export const AlertsDashboard: React.FC<AlertsDashboardProps> = ({
   onDatasourceChange,
   maxDatasources,
   onDatasourceCapReached,
-  startMs,
-  endMs,
   truncated,
   fallbackHints,
+  timelineData,
+  timelineLoading,
+  onFilterChange,
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [severityFilter, setSeverityFilter] = useState('all');
   const [stateFilter, setStateFilter] = useState('all');
   const [filters, setFilters] = useState<AlertFilterState>(emptyAlertFilters());
   const { toggleFacetCollapse, isCollapsed: isFacetCollapsed } = useFacetCollapse();
+
+  // Mirror filter state to the parent so it can drive the timeline hook.
+  // We use a stable JSON projection so the effect only fires when the
+  // serialized snapshot actually changes (otherwise every render would
+  // ping the parent because `filters.labels` is a fresh object).
+  const filterSnapshotKey = useMemo(
+    () =>
+      JSON.stringify({
+        s: filters.severity,
+        st: filters.state,
+        b: filters.backend,
+        l: filters.labels,
+        sc: severityFilter,
+        sx: stateFilter,
+      }),
+    [filters, severityFilter, stateFilter]
+  );
+  useEffect(() => {
+    if (!onFilterChange) return;
+    onFilterChange({
+      severity: filters.severity,
+      state: filters.state,
+      backend: filters.backend,
+      labels: filters.labels,
+      severityCard: severityFilter,
+      stateCard: stateFilter,
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filterSnapshotKey, onFilterChange]);
 
   // Build selectable datasource entries for the filter facet — alpha by name
   const datasourceEntries = useMemo(
@@ -751,7 +809,12 @@ export const AlertsDashboard: React.FC<AlertsDashboardProps> = ({
                         <h4>Alert Timeline</h4>
                       </EuiTitle>
                       <EuiSpacer size="s" />
-                      <AlertTimeline alerts={filteredAlerts} startMs={startMs} endMs={endMs} />
+                      <AlertTimeline
+                        buckets={timelineData?.buckets ?? []}
+                        bucketCount={timelineData?.bucketCount ?? 0}
+                        bucketDurationMs={timelineData?.bucketDurationMs ?? 0}
+                        loading={timelineLoading}
+                      />
                     </EuiPanel>
                   </EuiFlexItem>
                 </EuiFlexGroup>

@@ -251,6 +251,29 @@ export interface OpenSearchBackend {
     monitorId: string,
     alertIds: string[]
   ): Promise<unknown>;
+  /**
+   * Run a date_histogram + terms aggregation over
+   * `.opendistro-alerting-alert-history-*`. Returns parsed buckets when
+   * the index exists, or `{ indexMissing: true }` when the index has not
+   * been created yet (alerting plugin creates it lazily on first alert
+   * fire). The timeline resolver uses the sentinel to fall back to
+   * `getAlerts` + server-side bucketing without surfacing an error to the
+   * user.
+   */
+  searchAlertHistoryAggregation?(
+    client: AlertingOSClient,
+    body: Record<string, unknown>
+  ): Promise<
+    | { indexMissing: true }
+    | {
+        indexMissing: false;
+        buckets: Array<{
+          key: number;
+          docCount: number;
+          severityBuckets: Array<{ key: string; docCount: number }>;
+        }>;
+      }
+  >;
 
   // Destinations
   getDestinations(client: AlertingOSClient): Promise<OSDestination[]>;

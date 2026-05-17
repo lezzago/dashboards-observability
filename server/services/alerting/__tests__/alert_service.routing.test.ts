@@ -56,7 +56,6 @@ const mockPromBackend = {
   getRuleGroups: jest.fn(async () => []),
   getAlerts: jest.fn(async () => []),
   listWorkspaces: jest.fn(async () => []),
-  getHistoricalAlerts: jest.fn(),
 };
 
 let svc: MultiBackendAlertService;
@@ -209,7 +208,7 @@ describe('MultiBackendAlertService — routing & list', () => {
     });
     expect(mockPromBackend.getAlerts).toHaveBeenCalled();
     // Historical reconstruction is no longer invoked from the alerts list.
-    expect(mockPromBackend.getHistoricalAlerts).not.toHaveBeenCalled();
+    // Historical reconstruction was removed in Phase 2.
     const promStatus = response.datasourceStatus.find((s) => s.datasourceId === 'ds-prom');
     expect(promStatus?.fallback).toBe('prometheus-alerts-current-only');
   });
@@ -226,7 +225,7 @@ describe('MultiBackendAlertService — routing & list', () => {
       startTime: 'now-2h',
       endTime: 'now-1h',
     });
-    expect(mockPromBackend.getHistoricalAlerts).not.toHaveBeenCalled();
+    // Historical reconstruction was removed in Phase 2.
     const promStatus = response.datasourceStatus.find((s) => s.datasourceId === 'ds-prom');
     expect(promStatus?.fallback).toBe('prometheus-alerts-current-only');
   });
@@ -244,7 +243,7 @@ describe('MultiBackendAlertService — routing & list', () => {
     expect(mockOsBackend.getAlerts).toHaveBeenCalledWith(expect.anything());
     // Prom backend: legacy getAlerts; no historical call.
     expect(mockPromBackend.getAlerts).toHaveBeenCalled();
-    expect(mockPromBackend.getHistoricalAlerts).not.toHaveBeenCalled();
+    // Historical reconstruction was removed in Phase 2.
   });
 
   it('truncated flag propagates into datasourceStatus', async () => {

@@ -14,7 +14,6 @@
  */
 
 import type { AlertingOSClient, Datasource } from './unified_types';
-import type { UnifiedAlertSummary } from './unified_types';
 
 // ============================================================================
 // Prometheus Workspace
@@ -243,51 +242,6 @@ export interface PrometheusBackend {
     query: string,
     time?: number
   ): Promise<PromTimeSeriesPoint[]>;
-
-  /**
-   * @deprecated for unified list use — Phase 1 stopped routing the alerts
-   * table through this method because the matrix series count is unbounded
-   * by alert cardinality and trips Cortex/AMP `-querier.max-samples` at
-   * scale. Phase 2 will repurpose this for the dedicated timeline endpoint
-   * with a bounded `sum by(severity)` query.
-   *
-   * Reconstruct historical alert episodes from the `ALERTS` metric's range
-   * matrix. Optional on the interface because only backends that can route
-   * PromQL range queries (today: `DirectQueryPrometheusBackend`) support it.
-   * The unified alerts list no longer calls this; alternate backends may
-   * still omit it.
-   *
-   * Parameters:
-   *   - `endIsNow`: the caller (service layer) indicates whether the
-   *                 request's `endTime` was date-math relative to `now`
-   *                 (e.g. `'now'`, `'now-5m'`). When `true` AND the matrix
-   *                 is empty, the backend falls back to `/api/v1/alerts`
-   *                 (current-active only) and sets `fallback`. When `false`
-   *                 the empty matrix is treated as a legitimate "no alerts
-   *                 fired in this past window" result. Passing this
-   *                 explicitly avoids ambiguity with wall-clock-based
-   *                 heuristics.
-   *
-   * Returns:
-   *   - `alerts`:   unified alert summaries, one per firing-run episode
-   *                 (runs of `value === 1` in the ALERTS matrix).
-   *   - `fallback`: set to `'prometheus-alerts-current-only'` when the
-   *                 matrix was empty AND `endIsNow === true`, causing
-   *                 the backend to fall back to legacy `/api/v1/alerts`.
-   *   - `error`:    transport / parse error; `alerts` is empty in this case.
-   */
-  getHistoricalAlerts?(
-    client: AlertingOSClient,
-    ds: Datasource,
-    startEpochSec: number,
-    endEpochSec: number,
-    stepSec: number,
-    endIsNow: boolean
-  ): Promise<{
-    alerts: UnifiedAlertSummary[];
-    fallback?: 'prometheus-alerts-current-only';
-    error?: string;
-  }>;
 
   // ---- Alertmanager operations (optional — only available when alertmanagerUrl is set) ----
   // Alertmanager is a global endpoint reached through any Prometheus datasource,

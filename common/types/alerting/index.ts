@@ -6,3 +6,4 @@
 export * from './opensearch_types';
 export * from './prometheus_types';
 export * from './unified_types';
+export * from './timeline';

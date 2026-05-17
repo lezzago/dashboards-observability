@@ -156,14 +156,17 @@ describe('AlarmsPage', () => {
     expect(screen.queryByTestId('alertManager-refreshButton')).not.toBeInTheDocument();
   });
 
-  it('forwards resolved startMs / endMs as numbers to AlertsDashboard', async () => {
+  it('forwards onFilterChange callback + initial timelineData=null to AlertsDashboard', async () => {
     await act(async () => {
       render(<AlarmsPage {...defaultProps} />);
     });
     const last = mockDashboard.mock.calls[mockDashboard.mock.calls.length - 1][0];
-    expect(typeof last.startMs).toBe('number');
-    expect(typeof last.endMs).toBe('number');
-    expect(last.endMs).toBeGreaterThan(last.startMs);
+    expect(typeof last.onFilterChange).toBe('function');
+    // Phase 2: AlertsDashboard no longer receives startMs/endMs; the
+    // bucketed timeline payload arrives via timelineData (null until the
+    // hook resolves; mocked to undefined here unless tests override).
+    expect(last.startMs).toBeUndefined();
+    expect(last.endMs).toBeUndefined();
   });
 
   it('forwards `truncated` from hook data.datasourceStatus to AlertsDashboard', async () => {
@@ -267,14 +270,11 @@ describe('AlarmsPage', () => {
     // The page still mounted.
     expect(screen.getByTestId('alerts-dashboard')).toBeInTheDocument();
 
-    // The dashboard received numeric (valid) startMs/endMs derived from
-    // the fallback defaults.
+    // The dashboard rendered after the heal — Phase 2 no longer routes
+    // startMs/endMs through the dashboard, but onFilterChange is wired so
+    // the timeline hook can subscribe to filter changes.
     const lastDashboard = mockDashboard.mock.calls[mockDashboard.mock.calls.length - 1][0];
-    expect(typeof lastDashboard.startMs).toBe('number');
-    expect(typeof lastDashboard.endMs).toBe('number');
-    expect(Number.isFinite(lastDashboard.startMs)).toBe(true);
-    expect(Number.isFinite(lastDashboard.endMs)).toBe(true);
-    expect(lastDashboard.endMs).toBeGreaterThan(lastDashboard.startMs);
+    expect(typeof lastDashboard.onFilterChange).toBe('function');
 
     // Healing: the hook's most recent call should see the default
     // strings, not the corrupted ones. Without this, the backend route

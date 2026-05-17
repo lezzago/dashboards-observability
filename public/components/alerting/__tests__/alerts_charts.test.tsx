@@ -6,9 +6,6 @@
 import React from 'react';
 import { render } from '@testing-library/react';
 
-// Mock echarts at the module level so the EchartsRender children render
-// without needing a real canvas. We capture the last setOption payload to
-// assert on chart specs.
 const mockSetOption = jest.fn();
 jest.mock('echarts', () => ({
   init: jest.fn(() => ({
@@ -25,181 +22,92 @@ global.ResizeObserver = jest.fn().mockImplementation(() => ({
 }));
 
 import { AlertTimeline } from '../alerts_charts';
-import type { UnifiedAlertSummary } from '../../../../common/types/alerting';
+import type { AlertsTimelineBucket } from '../../../../common/types/alerting';
 
 const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
 
-const makeAlert = (overrides: Partial<UnifiedAlertSummary>): UnifiedAlertSummary => ({
-  id: 'alert-1',
-  datasourceId: 'ds-1',
-  datasourceType: 'prometheus',
-  name: 'HighCpuUsage',
-  state: 'active',
-  severity: 'critical',
-  startTime: new Date().toISOString(),
-  lastUpdated: new Date().toISOString(),
-  labels: {},
-  annotations: {},
-  ...overrides,
-});
+const ZERO = () => ({ critical: 0, high: 0, medium: 0, low: 0, info: 0 });
 
-// Pinned end time for deterministic label formatting across time zones.
-// (We read labels off the spec; they're derived from `Date(ts).getHours()`
-// which is TZ-sensitive. Tests compare format shape, not exact hour/date.)
+const makeBuckets = (
+  startMs: number,
+  bucketCount: number,
+  bucketDurationMs: number,
+  fill: (i: number) => Partial<AlertsTimelineBucket['severity']> = () => ({})
+): AlertsTimelineBucket[] => {
+  const out: AlertsTimelineBucket[] = [];
+  for (let i = 0; i < bucketCount; i++) {
+    out.push({
+      ts: startMs + i * bucketDurationMs,
+      severity: { ...ZERO(), ...fill(i) },
+    });
+  }
+  return out;
+};
+
 const END = new Date('2026-05-08T12:00:00Z').getTime();
 
-describe('alerts_charts', () => {
-  beforeEach(() => {
-    mockSetOption.mockClear();
-  });
+describe('AlertTimeline (Phase 2 — buckets prop)', () => {
+  beforeEach(() => mockSetOption.mockClear());
 
-  it('AlertTimeline renders one stacked bar series per severity', () => {
-    const alerts = [
-      makeAlert({
-        id: '1',
-        severity: 'critical',
-        startTime: new Date(END - 10 * 60 * 1000).toISOString(),
-      }),
-      makeAlert({
-        id: '2',
-        severity: 'high',
-        startTime: new Date(END - 20 * 60 * 1000).toISOString(),
-      }),
-    ];
-    render(<AlertTimeline alerts={alerts} startMs={END - HOUR_MS} endMs={END} />);
-
+  it('renders one stacked bar series per severity', () => {
+    const buckets = makeBuckets(END - HOUR_MS, 12, HOUR_MS / 12, (i) =>
+      i === 0 ? { critical: 2, high: 1 } : {}
+    );
+    render(<AlertTimeline buckets={buckets} bucketCount={12} bucketDurationMs={HOUR_MS / 12} />);
     const option = mockSetOption.mock.calls[0][0] as {
-      series: Array<{ name: string; type: string; stack: string }>;
+      series: Array<{ name: string; type: string; stack: string; data: number[] }>;
     };
     expect(option.series.map((s) => s.name)).toEqual(['critical', 'high', 'medium', 'low', 'info']);
     expect(option.series.every((s) => s.type === 'bar' && s.stack === 'severity')).toBe(true);
+    // First bucket carries the seeded counts.
+    expect(option.series.find((s) => s.name === 'critical')!.data[0]).toBe(2);
+    expect(option.series.find((s) => s.name === 'high')!.data[0]).toBe(1);
   });
 
-  it('AlertTimeline shows an empty-state message when there are no alerts', () => {
-    const { getByText } = render(<AlertTimeline alerts={[]} startMs={END - HOUR_MS} endMs={END} />);
+  it('shows the empty-state message when total count is zero', () => {
+    const buckets = makeBuckets(END - HOUR_MS, 12, HOUR_MS / 12);
+    const { getByText } = render(
+      <AlertTimeline buckets={buckets} bucketCount={12} bucketDurationMs={HOUR_MS / 12} />
+    );
     expect(getByText('No timeline data')).toBeInTheDocument();
     expect(mockSetOption).not.toHaveBeenCalled();
   });
 
-  it('AlertTimeline: 1h range produces 12 buckets (5-minute target width)', () => {
-    const alerts = [makeAlert({ startTime: new Date(END - 30 * 60 * 1000).toISOString() })];
-    render(<AlertTimeline alerts={alerts} startMs={END - HOUR_MS} endMs={END} />);
-
-    const option = mockSetOption.mock.calls[0][0] as {
-      xAxis: { data: string[] };
-      series: Array<{ data: number[] }>;
-    };
-    expect(option.xAxis.data).toHaveLength(12);
-    // Every series shares the same bucket count.
-    expect(option.series[0].data).toHaveLength(12);
+  it('shows the loading message when total count is zero AND loading=true', () => {
+    const buckets = makeBuckets(END - HOUR_MS, 12, HOUR_MS / 12);
+    const { getByText } = render(
+      <AlertTimeline buckets={buckets} bucketCount={12} bucketDurationMs={HOUR_MS / 12} loading />
+    );
+    expect(getByText(/Loading timeline/)).toBeInTheDocument();
   });
 
-  it('AlertTimeline: label format is HH:mm for ranges ≤ 24h', () => {
-    const alerts = [makeAlert({ startTime: new Date(END - 30 * 60 * 1000).toISOString() })];
-    render(<AlertTimeline alerts={alerts} startMs={END - HOUR_MS} endMs={END} />);
-
+  it('label format is HH:mm for ranges ≤ 24h', () => {
+    const buckets = makeBuckets(END - HOUR_MS, 12, HOUR_MS / 12, (i) =>
+      i === 0 ? { medium: 1 } : {}
+    );
+    render(<AlertTimeline buckets={buckets} bucketCount={12} bucketDurationMs={HOUR_MS / 12} />);
     const option = mockSetOption.mock.calls[0][0] as { xAxis: { data: string[] } };
-    // All labels match "HH:mm" — no date component.
-    for (const label of option.xAxis.data) {
-      expect(label).toMatch(/^\d{2}:\d{2}$/);
-    }
+    for (const label of option.xAxis.data) expect(label).toMatch(/^\d{2}:\d{2}$/);
   });
 
-  it('AlertTimeline: label format switches to MM-DD HH:mm for 7d ranges', () => {
+  it('label format switches to MM-DD HH:mm for 7d ranges', () => {
     const start = END - 7 * DAY_MS;
-    const alerts = [makeAlert({ startTime: new Date(END - DAY_MS).toISOString() })];
-    render(<AlertTimeline alerts={alerts} startMs={start} endMs={END} />);
-
+    const dur = (7 * DAY_MS) / 24;
+    const buckets = makeBuckets(start, 24, dur, (i) => (i === 5 ? { high: 1 } : {}));
+    render(<AlertTimeline buckets={buckets} bucketCount={24} bucketDurationMs={dur} />);
     const option = mockSetOption.mock.calls[0][0] as { xAxis: { data: string[] } };
     for (const label of option.xAxis.data) {
       expect(label).toMatch(/^\d{2}-\d{2} \d{2}:\d{2}$/);
     }
   });
 
-  it('AlertTimeline: label format is MM-DD for ranges > 7d', () => {
+  it('label format is MM-DD for ranges > 7d', () => {
     const start = END - 30 * DAY_MS;
-    const alerts = [makeAlert({ startTime: new Date(END - 5 * DAY_MS).toISOString() })];
-    render(<AlertTimeline alerts={alerts} startMs={start} endMs={END} />);
-
+    const dur = (30 * DAY_MS) / 24;
+    const buckets = makeBuckets(start, 24, dur, (i) => (i === 0 ? { low: 1 } : {}));
+    render(<AlertTimeline buckets={buckets} bucketCount={24} bucketDurationMs={dur} />);
     const option = mockSetOption.mock.calls[0][0] as { xAxis: { data: string[] } };
-    for (const label of option.xAxis.data) {
-      expect(label).toMatch(/^\d{2}-\d{2}$/);
-    }
-  });
-
-  it('AlertTimeline: bucket count stays clamped to [12, 24] for extreme ranges', () => {
-    // 5-minute range — should clamp UP to the minimum of 12 buckets.
-    const shortStart = END - 5 * 60 * 1000;
-    const shortAlerts = [makeAlert({ startTime: new Date(END - 60 * 1000).toISOString() })];
-    render(<AlertTimeline alerts={shortAlerts} startMs={shortStart} endMs={END} />);
-    const shortOpt = mockSetOption.mock.calls[0][0] as { xAxis: { data: string[] } };
-    expect(shortOpt.xAxis.data).toHaveLength(12);
-
-    mockSetOption.mockClear();
-
-    // 30-day range — should clamp DOWN to the maximum of 24 buckets.
-    const longStart = END - 30 * DAY_MS;
-    const longAlerts = [makeAlert({ startTime: new Date(END - 15 * DAY_MS).toISOString() })];
-    render(<AlertTimeline alerts={longAlerts} startMs={longStart} endMs={END} />);
-    const longOpt = mockSetOption.mock.calls[0][0] as { xAxis: { data: string[] } };
-    expect(longOpt.xAxis.data).toHaveLength(24);
-  });
-
-  it('AlertTimeline: post-window alerts are excluded from all buckets', () => {
-    const start = END - HOUR_MS;
-    const alerts = [
-      // In-window — counted.
-      makeAlert({
-        id: '1',
-        severity: 'critical',
-        startTime: new Date(END - 30 * 60 * 1000).toISOString(),
-      }),
-      // After window — dropped (clamped startTime still >= endMs, so no bucket matches).
-      makeAlert({
-        id: '3',
-        severity: 'critical',
-        startTime: new Date(END + 60 * 1000).toISOString(),
-      }),
-    ];
-    render(<AlertTimeline alerts={alerts} startMs={start} endMs={END} />);
-
-    const option = mockSetOption.mock.calls[0][0] as {
-      series: Array<{ name: string; data: number[] }>;
-    };
-    const critical = option.series.find((s) => s.name === 'critical');
-    expect(critical).toBeDefined();
-    const total = (critical!.data as number[]).reduce((a, b) => a + b, 0);
-    expect(total).toBe(1);
-  });
-
-  it('AlertTimeline: pre-window alerts are credited to the first bucket (matches backend overlap)', () => {
-    // The OS backend's interval-overlap filter returns alerts that started
-    // before the picked window but are still firing / resolved inside it.
-    // The chart must count those too, otherwise the summary-cards counts and
-    // timeline bars disagree. We clamp startTime to the window start so the
-    // alert lands in bucket 0.
-    const start = END - HOUR_MS;
-    const alerts = [
-      // Started 2h before the window — backend returned it as overlapping,
-      // chart should credit it to the first bucket.
-      makeAlert({
-        id: 'pre',
-        severity: 'critical',
-        startTime: new Date(END - 2 * HOUR_MS).toISOString(),
-      }),
-    ];
-    render(<AlertTimeline alerts={alerts} startMs={start} endMs={END} />);
-
-    const option = mockSetOption.mock.calls[0][0] as {
-      series: Array<{ name: string; data: number[] }>;
-    };
-    const critical = option.series.find((s) => s.name === 'critical');
-    expect(critical).toBeDefined();
-    // First bucket holds the clamped pre-window alert.
-    expect(critical!.data[0]).toBe(1);
-    // Total across all buckets is still 1 — no double-counting.
-    const total = (critical!.data as number[]).reduce((a, b) => a + b, 0);
-    expect(total).toBe(1);
+    for (const label of option.xAxis.data) expect(label).toMatch(/^\d{2}-\d{2}$/);
   });
 });

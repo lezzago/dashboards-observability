@@ -17,6 +17,7 @@
  */
 import {
   AlertingOSClient,
+  AlertsTimelineResponse,
   Datasource,
   DatasourceFetchFallback,
   DatasourceFetchResult,
@@ -44,6 +45,10 @@ import {
   getAlertDetail as getAlertDetailImpl,
   getRuleDetail as getRuleDetailImpl,
 } from './alert_detail';
+import {
+  getUnifiedTimeline as getUnifiedTimelineImpl,
+  GetUnifiedTimelineOptions,
+} from './alert_timeline';
 import {
   osAlertToUnified,
   osMonitorToUnifiedRuleSummary,
@@ -515,6 +520,26 @@ export class MultiBackendAlertService {
       dsId,
       alertId,
       monitorId
+    );
+  }
+
+  /**
+   * Aggregated alerts timeline across selected datasources. Delegates to
+   * `alert_timeline.ts` which owns the per-backend bucket logic.
+   */
+  async getUnifiedTimeline(
+    clientResolver: (dsId: string) => Promise<AlertingOSClient>,
+    options: GetUnifiedTimelineOptions
+  ): Promise<AlertsTimelineResponse> {
+    return getUnifiedTimelineImpl(
+      {
+        datasourceService: this.datasourceService,
+        osBackend: this.osBackend,
+        promBackend: this.promBackend,
+        clientResolver,
+        logger: this.logger,
+      },
+      options
     );
   }
 

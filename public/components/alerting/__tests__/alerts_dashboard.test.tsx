@@ -21,11 +21,15 @@ global.ResizeObserver = jest.fn().mockImplementation(() => ({
   unobserve: jest.fn(),
 }));
 
-// Spy on AlertTimeline so we can assert the resolved startMs/endMs values
-// flow through as numeric props (rather than the picker's date-math strings).
+// Spy on AlertTimeline so we can assert the bucketed payload flows through.
 const mockTimeline = jest.fn();
 jest.mock('../alerts_charts', () => ({
-  AlertTimeline: (props: { alerts: unknown[]; startMs: number; endMs: number }) => {
+  AlertTimeline: (props: {
+    buckets: unknown[];
+    bucketCount: number;
+    bucketDurationMs: number;
+    loading?: boolean;
+  }) => {
     mockTimeline(props);
     return <div data-test-subj="alert-timeline-stub" />;
   },
@@ -58,6 +62,19 @@ const sampleDs: Datasource = {
 const HOUR_MS = 60 * 60 * 1000;
 const NOW = Date.now();
 
+const sampleTimeline = {
+  buckets: [
+    {
+      ts: NOW - HOUR_MS,
+      severity: { critical: 1, high: 0, medium: 0, low: 0, info: 0 },
+    },
+  ],
+  bucketCount: 1,
+  bucketDurationMs: HOUR_MS,
+  datasourceStatus: [],
+  fetchedAt: new Date(NOW).toISOString(),
+};
+
 const baseProps = {
   alerts: [] as UnifiedAlertSummary[],
   datasources: [sampleDs],
@@ -68,8 +85,8 @@ const baseProps = {
   onDatasourceChange: jest.fn(),
   maxDatasources: 5,
   onDatasourceCapReached: jest.fn(),
-  startMs: NOW - HOUR_MS,
-  endMs: NOW,
+  timelineData: sampleTimeline,
+  timelineLoading: false,
 };
 
 beforeEach(() => {
@@ -95,12 +112,13 @@ describe('AlertsDashboard', () => {
     expect(queryByText('Alert Timeline (24h)')).not.toBeInTheDocument();
   });
 
-  it('forwards numeric startMs/endMs to AlertTimeline (not the date-math strings)', () => {
+  it('forwards bucketed timeline payload to AlertTimeline', () => {
     render(<AlertsDashboard {...baseProps} alerts={[sampleAlert]} />);
     expect(mockTimeline).toHaveBeenCalled();
     const lastCall = mockTimeline.mock.calls[mockTimeline.mock.calls.length - 1][0];
-    expect(lastCall.startMs).toBe(NOW - HOUR_MS);
-    expect(lastCall.endMs).toBe(NOW);
+    expect(lastCall.buckets).toBe(sampleTimeline.buckets);
+    expect(lastCall.bucketCount).toBe(sampleTimeline.bucketCount);
+    expect(lastCall.bucketDurationMs).toBe(sampleTimeline.bucketDurationMs);
   });
 
   it('renders the truncated callout when `truncated` is true', () => {

@@ -55,7 +55,9 @@ import { CreateMetricsMonitor, MetricsMonitorFormState } from './create_metrics_
 // Phase 2: import SloListing from './slo_listing';
 import { AlertingOpenSearchService } from './query_services/alerting_opensearch_service';
 import { useAlerts } from './hooks/use_alerts';
+import { useAlertsTimeline } from './hooks/use_alerts_timeline';
 import { useMonitorMutations } from './hooks/use_monitor_mutations';
+import type { AlertsDashboardFilterSnapshot } from './alerts_dashboard';
 import { coreRefs } from '../../framework/core_refs';
 import { setNavBreadCrumbs } from '../../../common/utils/set_nav_bread_crumbs';
 import { observabilityID, observabilityTitle } from '../../../common/constants/shared';
@@ -220,36 +222,19 @@ export const AlarmsPage: React.FC<AlarmsPageProps> = ({
   const [endTime, setEndTime] = useState<string>(loadPersistedEndTime);
   const [refreshToken, setRefreshToken] = useState(0);
 
-  // Resolve once per render, guarded.
-  //
-  // `parseDateMathMs` throws on malformed input (invalid date-math). If a
-  // user or a browser extension corrupts the sessionStorage-hydrated
-  // `startTime`/`endTime`, resolving at module top-level would crash the
-  // page on mount. `useMemo` lets us swallow the error and fall back to
-  // the known-good defaults (`now-24h` -> `now`), which ALSO parse through
-  // `parseDateMathMs` so we never ship hard-coded epoch numbers.
-  //
-  // We emit `console.warn` (not `.error`) because the failure is recoverable
-  // and self-healing — the effect below resets state and sessionStorage to
-  // the defaults so the hook (which forwards the raw date-math strings to
-  // the backend) stops sending garbage that the route-layer validator
-  // would reject with a 400.
-  //
-  // `refreshToken` is in the deps so that clicking Refresh while the range
-  // is relative-to-`now` (e.g. `now-24h` → `now`) re-resolves `now` to the
-  // current wall clock. Without it the chart window would stay pinned to
-  // the mount-time snapshot even though the hook refetches new data, which
-  // would misalign bars at the right edge of the chart.
-  const [startMs, endMs, rangeParseFailed] = useMemo(() => {
+  // Validate the persisted date-math strings up-front so a corrupted
+  // sessionStorage entry doesn't crash the page on mount. We don't keep
+  // the resolved epoch values around (the hooks forward raw date-math
+  // strings); we just need a "did this parse?" signal so the next effect
+  // can heal the stored values back to defaults.
+  const rangeParseFailed = useMemo(() => {
     try {
-      return [parseDateMathMs(startTime, false), parseDateMathMs(endTime, true), false];
+      parseDateMathMs(startTime, false);
+      parseDateMathMs(endTime, true);
+      return false;
     } catch (e) {
       console.warn('[AlertManager] failed to parse time range, falling back to defaults', e);
-      return [
-        parseDateMathMs(DEFAULT_START_TIME, false),
-        parseDateMathMs(DEFAULT_END_TIME, true),
-        true,
-      ];
+      return true;
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [startTime, endTime, refreshToken]);
@@ -272,6 +257,68 @@ export const AlarmsPage: React.FC<AlarmsPageProps> = ({
     dsIds: selectedDsIds,
     startTime,
     endTime,
+    refreshToken,
+  });
+
+  // ---- Alerts timeline (Phase 2: dedicated server-side aggregation) ----
+  //
+  // The timeline chart consumes a separate hook so it can apply the same
+  // filter state the table reflects without ever scanning the alerts list.
+  // Filter state lives inside `AlertsDashboard` (Option B in PHASE_2.md);
+  // we mirror it into local state via the `onFilterChange` callback so the
+  // hook's deps are stable strings.
+  const [timelineFilterSnapshot, setTimelineFilterSnapshot] = useState<
+    AlertsDashboardFilterSnapshot
+  >({
+    severity: [],
+    state: [],
+    backend: [],
+    labels: {},
+    severityCard: 'all',
+    stateCard: 'all',
+  });
+
+  const timelineSeverity = useMemo(() => {
+    // Panel-filter list wins over the stat-card single-select.
+    if (timelineFilterSnapshot.severity.length > 0) return timelineFilterSnapshot.severity;
+    if (timelineFilterSnapshot.severityCard === 'medium') return ['medium', 'low', 'info'];
+    if (timelineFilterSnapshot.severityCard !== 'all') return [timelineFilterSnapshot.severityCard];
+    return undefined;
+  }, [timelineFilterSnapshot.severity, timelineFilterSnapshot.severityCard]);
+
+  const timelineState = useMemo(() => {
+    if (timelineFilterSnapshot.state.length > 0) return timelineFilterSnapshot.state;
+    if (timelineFilterSnapshot.stateCard !== 'all') return [timelineFilterSnapshot.stateCard];
+    return undefined;
+  }, [timelineFilterSnapshot.state, timelineFilterSnapshot.stateCard]);
+
+  const timelineLabels = useMemo(() => {
+    const filtered: Record<string, string[]> = {};
+    for (const [k, vs] of Object.entries(timelineFilterSnapshot.labels)) {
+      if (vs.length > 0) filtered[k] = vs;
+    }
+    return Object.keys(filtered).length > 0 ? filtered : undefined;
+  }, [timelineFilterSnapshot.labels]);
+
+  // Backend filter intersects with the dashboard-level datasource selection.
+  // When the user selects a "backend" facet (e.g. only "prometheus"), narrow
+  // the timeline's dsIds accordingly.
+  const timelineDsIds = useMemo(() => {
+    if (timelineFilterSnapshot.backend.length === 0) return selectedDsIds;
+    const backends = new Set(timelineFilterSnapshot.backend);
+    return selectedDsIds.filter((id) => {
+      const ds = datasources.find((d) => d.id === id);
+      return ds ? backends.has(ds.type) : true;
+    });
+  }, [selectedDsIds, datasources, timelineFilterSnapshot.backend]);
+
+  const { data: timelineData, isLoading: timelineLoading } = useAlertsTimeline({
+    dsIds: timelineDsIds,
+    startTime,
+    endTime,
+    severity: timelineSeverity,
+    state: timelineState,
+    labels: timelineLabels,
     refreshToken,
   });
 
@@ -926,10 +973,11 @@ export const AlarmsPage: React.FC<AlarmsPageProps> = ({
             onDatasourceChange={handleDatasourceChange}
             maxDatasources={maxDatasources}
             onDatasourceCapReached={handleDatasourceCapReached}
-            startMs={startMs}
-            endMs={endMs}
             truncated={alertsTruncated}
             fallbackHints={alertsFallbackHints}
+            timelineData={timelineData}
+            timelineLoading={timelineLoading}
+            onFilterChange={setTimelineFilterSnapshot}
           />
         </>
       );

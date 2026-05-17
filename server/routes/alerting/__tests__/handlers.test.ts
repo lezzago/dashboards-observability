@@ -20,6 +20,7 @@ import {
   handleCreateOSMonitor,
   handleDeleteOSMonitor,
   handleGetUnifiedAlerts,
+  handleGetUnifiedTimeline,
   handleGetOSAlerts,
   handleGetPromAlerts,
   handleGetAlertDetail,
@@ -40,6 +41,7 @@ const mockAlertSvc = {
   getUnifiedRules: jest.fn(),
   getRuleDetail: jest.fn(),
   getAlertDetail: jest.fn(),
+  getUnifiedTimeline: jest.fn(),
 };
 
 const mockClient = {} as never;
@@ -154,6 +156,79 @@ describe('handlers', () => {
       startTime: 'now-30m',
       endTime: 'now',
     });
+  });
+
+  // ---- handleGetUnifiedTimeline ----
+  it('handleGetUnifiedTimeline parses csv dsIds, severity, state, and JSON labels', async () => {
+    mockAlertSvc.getUnifiedTimeline.mockResolvedValueOnce({
+      buckets: [],
+      bucketCount: 12,
+      bucketDurationMs: 5 * 60 * 1000,
+      datasourceStatus: [],
+      fetchedAt: '2026-01-01T00:00:00Z',
+    });
+    const resolver = jest.fn(async () => ({} as never));
+    await handleGetUnifiedTimeline(mockAlertSvc as never, resolver, {
+      dsIds: 'ds-1,ds-2',
+      startTime: 'now-1h',
+      endTime: 'now',
+      buckets: '24',
+      severity: 'critical,high,bogus',
+      state: 'active',
+      labels: JSON.stringify({ service: ['cart'] }),
+      timeout: '5000',
+    });
+    expect(mockAlertSvc.getUnifiedTimeline).toHaveBeenCalledWith(
+      resolver,
+      expect.objectContaining({
+        dsIds: ['ds-1', 'ds-2'],
+        startTime: 'now-1h',
+        endTime: 'now',
+        buckets: 24,
+        severity: ['critical', 'high'],
+        state: ['active'],
+        labels: { service: ['cart'] },
+        timeoutMs: 5000,
+      })
+    );
+  });
+
+  it('handleGetUnifiedTimeline drops invalid severity / state values silently', async () => {
+    mockAlertSvc.getUnifiedTimeline.mockResolvedValueOnce({
+      buckets: [],
+      bucketCount: 12,
+      bucketDurationMs: 5 * 60 * 1000,
+      datasourceStatus: [],
+      fetchedAt: '2026-01-01T00:00:00Z',
+    });
+    const resolver = jest.fn(async () => ({} as never));
+    await handleGetUnifiedTimeline(mockAlertSvc as never, resolver, {
+      startTime: 'now-1h',
+      endTime: 'now',
+      severity: 'bogus,nope',
+      state: 'wat',
+    });
+    const opts = mockAlertSvc.getUnifiedTimeline.mock.calls[0][1];
+    expect(opts.severity).toBeUndefined();
+    expect(opts.state).toBeUndefined();
+  });
+
+  it('handleGetUnifiedTimeline ignores malformed JSON labels', async () => {
+    mockAlertSvc.getUnifiedTimeline.mockResolvedValueOnce({
+      buckets: [],
+      bucketCount: 12,
+      bucketDurationMs: 5 * 60 * 1000,
+      datasourceStatus: [],
+      fetchedAt: '2026-01-01T00:00:00Z',
+    });
+    const resolver = jest.fn(async () => ({} as never));
+    await handleGetUnifiedTimeline(mockAlertSvc as never, resolver, {
+      startTime: 'now-1h',
+      endTime: 'now',
+      labels: '{not valid json',
+    });
+    const opts = mockAlertSvc.getUnifiedTimeline.mock.calls[0][1];
+    expect(opts.labels).toBeUndefined();
   });
 
   it('handleGetOSAlerts accepts absent range (undefined options)', async () => {

@@ -8,3 +8,4 @@ export * from './serializer';
 export * from './validators';
 export * from './promql_validator';
 export * from './time_range';
+export * from './timeline_buckets';

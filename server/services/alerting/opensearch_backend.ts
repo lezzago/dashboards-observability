@@ -314,6 +314,78 @@ export class HttpOpenSearchBackend implements OpenSearchBackend {
     };
   }
 
+  /**
+   * Run an aggregation against `.opendistro-alerting-alert-history-*` and
+   * return parsed `{ key, docCount, severityBuckets[] }` rows. When the
+   * index is missing (alerting plugin creates it lazily on first alert
+   * fire) or the cluster cannot resolve any backing index, returns the
+   * sentinel `{ indexMissing: true }` so the timeline resolver can fall
+   * back to bucketing live alerts server-side.
+   *
+   * Detection: OpenSearch surfaces a missing-index error as either
+   *   - HTTP 404 with `index_not_found_exception` in the body
+   *   - `body.error.type === 'index_not_found_exception'`
+   *   - `String(err)` containing `index_not_found_exception` (older paths)
+   * We accept any of those; anything else propagates.
+   */
+  async searchAlertHistoryAggregation(
+    client: AlertingOSClient,
+    body: Record<string, unknown>
+  ): Promise<
+    | { indexMissing: true }
+    | {
+        indexMissing: false;
+        buckets: Array<{
+          key: number;
+          docCount: number;
+          severityBuckets: Array<{ key: string; docCount: number }>;
+        }>;
+      }
+  > {
+    interface AggResponse {
+      aggregations?: {
+        time_buckets?: {
+          buckets?: Array<{
+            key: number;
+            doc_count: number;
+            by_severity?: { buckets?: Array<{ key: string | number; doc_count: number }> };
+          }>;
+        };
+      };
+    }
+    try {
+      const resp = await this.req<AggResponse>(
+        client,
+        'POST',
+        '/.opendistro-alerting-alert-history-*/_search',
+        body
+      );
+      const raw = resp.body?.aggregations?.time_buckets?.buckets ?? [];
+      const buckets = raw.map((b) => ({
+        key: b.key,
+        docCount: b.doc_count,
+        severityBuckets: (b.by_severity?.buckets ?? []).map((sb) => ({
+          key: String(sb.key),
+          docCount: sb.doc_count,
+        })),
+      }));
+      return { indexMissing: false, buckets };
+    } catch (err) {
+      if (this.isIndexNotFound(err)) return { indexMissing: true };
+      throw err;
+    }
+  }
+
+  private isIndexNotFound(err: unknown): boolean {
+    if (this.is404(err)) return true;
+    const e = err as
+      | { body?: { error?: { type?: string } }; meta?: { body?: { error?: { type?: string } } } }
+      | undefined;
+    if (e?.body?.error?.type === 'index_not_found_exception') return true;
+    if (e?.meta?.body?.error?.type === 'index_not_found_exception') return true;
+    return /index_not_found_exception/.test(String(err));
+  }
+
   async acknowledgeAlerts(
     client: AlertingOSClient,
     monitorId: string,

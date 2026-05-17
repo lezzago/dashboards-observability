@@ -11,7 +11,11 @@
  * datasource discovery + mutation moved to the client via saved-object
  * services (`useDatasources`, `SavedObjectDatasourceService`).
  */
-import type { AlertingOSClient, OSMonitor } from '../../../common/types/alerting';
+import type {
+  AlertingOSClient,
+  OSMonitor,
+  UnifiedAlertSeverity,
+} from '../../../common/types/alerting';
 import { MultiBackendAlertService } from '../../services/alerting';
 import { toHandlerResult } from './route_utils';
 import type { HandlerResult } from './route_utils';
@@ -220,6 +224,96 @@ export async function handleGetUnifiedRules(
       dsIds,
       timeoutMs,
       maxResults,
+    });
+    return { status: 200, body: response };
+  } catch (e: unknown) {
+    return toHandlerResult(e);
+  }
+}
+
+// ============================================================================
+// Unified Timeline Handler (Phase 2)
+// ============================================================================
+
+const SEVERITY_VALUES: ReadonlySet<UnifiedAlertSeverity> = new Set([
+  'critical',
+  'high',
+  'medium',
+  'low',
+  'info',
+]);
+type TimelineState = 'active' | 'pending' | 'acknowledged' | 'resolved' | 'error' | 'silenced';
+const STATE_VALUES: ReadonlySet<TimelineState> = new Set([
+  'active',
+  'pending',
+  'acknowledged',
+  'resolved',
+  'error',
+  'silenced',
+]);
+
+function parseCsvSet<T extends string>(raw: string | undefined, allowed: ReadonlySet<T>): T[] {
+  if (!raw) return [];
+  return raw
+    .split(',')
+    .map((s) => s.trim())
+    .filter((s): s is T => allowed.has(s as T));
+}
+
+function parseLabelsJson(raw: string | undefined): Record<string, string[]> | undefined {
+  if (!raw) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined;
+  const out: Record<string, string[]> = {};
+  for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+    if (typeof k !== 'string') continue;
+    if (!Array.isArray(v)) continue;
+    const values = v.filter((x): x is string => typeof x === 'string');
+    if (values.length > 0) out[k] = values;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+export async function handleGetUnifiedTimeline(
+  alertSvc: MultiBackendAlertService,
+  clientResolver: (dsId: string) => Promise<AlertingOSClient>,
+  query: {
+    dsIds?: string;
+    startTime: string;
+    endTime: string;
+    buckets?: string;
+    severity?: string;
+    state?: string;
+    labels?: string;
+    timeout?: string;
+  }
+): Promise<HandlerResult> {
+  try {
+    const dsIds = query.dsIds
+      ? query.dsIds
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean)
+      : undefined;
+    const buckets = query.buckets ? parseInt(query.buckets, 10) : undefined;
+    const rawTimeout = query.timeout ? parseInt(query.timeout, 10) : undefined;
+    const severity = parseCsvSet(query.severity, SEVERITY_VALUES);
+    const state = parseCsvSet(query.state, STATE_VALUES);
+    const labels = parseLabelsJson(query.labels);
+    const response = await alertSvc.getUnifiedTimeline(clientResolver, {
+      dsIds,
+      startTime: query.startTime,
+      endTime: query.endTime,
+      buckets: Number.isFinite(buckets) ? (buckets as number) : undefined,
+      severity: severity.length > 0 ? severity : undefined,
+      state: state.length > 0 ? state : undefined,
+      labels,
+      timeoutMs: rawTimeout !== undefined && Number.isFinite(rawTimeout) ? rawTimeout : undefined,
     });
     return { status: 200, body: response };
   } catch (e: unknown) {

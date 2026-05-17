@@ -62,6 +62,7 @@ import {
   handleGetPromAlerts,
   handleGetUnifiedAlerts,
   handleGetUnifiedRules,
+  handleGetUnifiedTimeline,
   handleGetRuleDetail,
   handleGetAlertDetail,
 } from './handlers';
@@ -303,6 +304,56 @@ export function registerAlertingRoutes(router: IRouter, deps: AlertingRoutesDeps
         }
       );
       return res.ok({ body: result.body });
+    }
+  );
+
+  // Unified timeline route (Phase 2). Required `startTime` / `endTime`
+  // (date-math validated) — bucket count clamped server-side to [12, 48].
+  router.get(
+    {
+      path: '/api/alerting/unified/alerts/timeline',
+      validate: {
+        query: schema.object(
+          {
+            dsIds: schema.maybe(schema.string()),
+            timeout: schema.maybe(schema.string()),
+            buckets: schema.maybe(schema.string()),
+            severity: schema.maybe(schema.string()),
+            state: schema.maybe(schema.string()),
+            labels: schema.maybe(schema.string()),
+            startTime: schema.string({
+              validate: (v: string) =>
+                validateDateMath(v) ? undefined : `invalid date-math: ${v}`,
+            }),
+            endTime: schema.string({
+              validate: (v: string) =>
+                validateDateMath(v) ? undefined : `invalid date-math: ${v}`,
+            }),
+          },
+          {
+            validate: (value: { startTime?: string; endTime?: string }) =>
+              validateTimeRangeQuery(value),
+          }
+        ),
+      },
+    },
+    async (ctx, req, res) => {
+      const { alertService } = buildRequestServices(ctx as AlertingHandlerContext);
+      const result = await handleGetUnifiedTimeline(
+        alertService,
+        async (dsId: string) => getAlertingClient(ctx, dsId),
+        {
+          dsIds: req.query.dsIds,
+          startTime: req.query.startTime,
+          endTime: req.query.endTime,
+          buckets: req.query.buckets,
+          severity: req.query.severity,
+          state: req.query.state,
+          labels: req.query.labels,
+          timeout: req.query.timeout,
+        }
+      );
+      return sendResult(res, result);
     }
   );
 

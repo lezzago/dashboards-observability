@@ -21,11 +21,22 @@ import type { PromAlert, PromAlertingRule } from './prometheus_types';
  * the UI can exhaustively switch on the value and a new reason requires a
  * type-level declaration.
  *
- * Today's only member: Prometheus historical reconstruction returned an
- * empty matrix on a `now`-relative range, and the backend fell back to
- * `/api/v1/alerts` (current-active only).
+ * Members:
+ *   - `prometheus-alerts-current-only`: Prom alerts list path can't honor
+ *     a historical range and returned the live `/api/v1/alerts` set.
+ *     Surfaced as the user-visible "Showing current alerts only" callout.
+ *   - `prometheus-no-severity-labels`: timeline aggregation found no
+ *     `severity` label on `ALERTS{}` series; backend bucketed unlabeled
+ *     samples into `medium`. Silent for the chart — no callout.
+ *   - `opensearch-history-index-missing`: timeline path could not query
+ *     `.opendistro-alerting-alert-history-*` (index missing) and fell
+ *     back to bucketing `osBackend.getAlerts(...)` server-side. Silent
+ *     for the chart — operational signal only.
  */
-export type DatasourceFetchFallback = 'prometheus-alerts-current-only';
+export type DatasourceFetchFallback =
+  | 'prometheus-alerts-current-only'
+  | 'prometheus-no-severity-labels'
+  | 'opensearch-history-index-missing';
 
 // ============================================================================
 // OSD scoped client — structural shape of the subset we use

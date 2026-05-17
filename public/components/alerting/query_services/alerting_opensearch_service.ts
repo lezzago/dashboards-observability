@@ -12,6 +12,7 @@
  */
 import { coreRefs } from '../../../framework/core_refs';
 import type {
+  AlertsTimelineResponse,
   ProgressiveResponse,
   UnifiedAlert,
   UnifiedAlertSummary,
@@ -37,6 +38,18 @@ export interface ListRulesParams {
   dsIds: string[];
   timeout?: number;
   maxResults?: number;
+  signal?: AbortSignal;
+}
+
+export interface ListAlertsTimelineParams {
+  dsIds: string[];
+  startTime: string;
+  endTime: string;
+  buckets?: number;
+  severity?: string[];
+  state?: string[];
+  labels?: Record<string, string[]>;
+  timeout?: number;
   signal?: AbortSignal;
 }
 
@@ -79,6 +92,29 @@ export class AlertingOpenSearchService {
       query: this.buildQuery(params),
       signal: params.signal,
     })) as ProgressiveResponse<UnifiedRuleSummary>;
+  }
+
+  /**
+   * Unified alerts timeline (aggregated severity buckets per time bucket).
+   * Powers the AlertTimeline chart on the Alerts dashboard.
+   */
+  async listAlertsTimeline(params: ListAlertsTimelineParams): Promise<AlertsTimelineResponse> {
+    const q: Record<string, string> = {
+      dsIds: params.dsIds.join(','),
+      startTime: params.startTime,
+      endTime: params.endTime,
+    };
+    if (params.buckets !== undefined) q.buckets = String(params.buckets);
+    if (params.timeout !== undefined) q.timeout = String(params.timeout);
+    if (params.severity && params.severity.length > 0) q.severity = params.severity.join(',');
+    if (params.state && params.state.length > 0) q.state = params.state.join(',');
+    if (params.labels && Object.keys(params.labels).length > 0) {
+      q.labels = JSON.stringify(params.labels);
+    }
+    return (await this.requireHttp().get('/api/alerting/unified/alerts/timeline', {
+      query: q,
+      signal: params.signal,
+    })) as AlertsTimelineResponse;
   }
 
   /** Single alert detail for the flyout. */
