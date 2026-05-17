@@ -4,7 +4,7 @@
  */
 
 import React from 'react';
-import { render, fireEvent } from '@testing-library/react';
+import { render, fireEvent, waitFor } from '@testing-library/react';
 
 jest.mock('echarts', () => ({
   init: jest.fn(() => ({
@@ -25,10 +25,14 @@ global.ResizeObserver = jest.fn().mockImplementation(() => ({
 // calls `getRuleDetail(dsId, ruleId)` on mount. Mock the class so the
 // constructor returns a stubbed instance with `getRuleDetail` resolving to
 // `null` — the flyout falls back to the monitor summary in that case,
-// which is what these render tests exercise.
+// which is what these render tests exercise. `getRuleRouting` is the
+// Phase-3 lazy fetch the Notification Routing accordion calls on expand.
+// Variable name MUST start with `mock` so the jest hoist rule allows it.
+const mockGetRuleRouting = jest.fn().mockResolvedValue([]);
 jest.mock('../query_services/alerting_opensearch_service', () => ({
   AlertingOpenSearchService: jest.fn().mockImplementation(() => ({
     getRuleDetail: jest.fn().mockResolvedValue(null),
+    getRuleRouting: mockGetRuleRouting,
   })),
 }));
 
@@ -58,6 +62,11 @@ const mockMonitor: UnifiedRuleSummary = {
 };
 
 describe('MonitorDetailFlyout', () => {
+  beforeEach(() => {
+    mockGetRuleRouting.mockClear();
+    mockGetRuleRouting.mockResolvedValue([]);
+  });
+
   it('renders flyout with monitor name', () => {
     const { getByText } = render(
       <MonitorDetailFlyout
@@ -82,5 +91,47 @@ describe('MonitorDetailFlyout', () => {
     );
     fireEvent.click(getByLabelText('Close this dialog'));
     expect(onClose).toHaveBeenCalled();
+  });
+
+  it('does not call getRuleRouting on initial render (lazy)', async () => {
+    render(
+      <MonitorDetailFlyout
+        monitor={mockMonitor}
+        onClose={jest.fn()}
+        onDelete={jest.fn()}
+        onClone={jest.fn()}
+      />
+    );
+    // Wait one microtask so the detail-fetch effect resolves; then assert.
+    await Promise.resolve();
+    expect(mockGetRuleRouting).not.toHaveBeenCalled();
+  });
+
+  it('lazy-loads routing exactly once when the accordion is expanded', async () => {
+    render(
+      <MonitorDetailFlyout
+        monitor={mockMonitor}
+        onClose={jest.fn()}
+        onDelete={jest.fn()}
+        onClone={jest.fn()}
+      />
+    );
+    // EuiFlyout renders to a portal under document.body, not inside the
+    // RTL container. Wait until the routing accordion's button (which EUI
+    // wires via aria-controls referring to the accordion id) shows up.
+    const trigger = await waitFor(() => {
+      const el = document.querySelector(
+        'button[aria-controls="routing-mon-1"]'
+      ) as HTMLButtonElement | null;
+      if (!el) throw new Error('routing accordion button not yet rendered');
+      return el;
+    });
+    fireEvent.click(trigger);
+    expect(mockGetRuleRouting).toHaveBeenCalledTimes(1);
+    expect(mockGetRuleRouting).toHaveBeenCalledWith('ds-1', 'mon-1');
+    // Collapse then expand — no second fetch.
+    fireEvent.click(trigger);
+    fireEvent.click(trigger);
+    expect(mockGetRuleRouting).toHaveBeenCalledTimes(1);
   });
 });

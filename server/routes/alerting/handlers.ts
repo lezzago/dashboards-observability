@@ -340,6 +340,21 @@ export async function handleGetRuleDetail(
   }
 }
 
+export async function handleGetRuleRouting(
+  alertSvc: MultiBackendAlertService,
+  client: AlertingOSClient,
+  dsId: string,
+  ruleId: string
+): Promise<HandlerResult> {
+  try {
+    const routing = await alertSvc.getRuleRouting(client, dsId, ruleId);
+    if (routing === null) return { status: 404, body: { error: 'Rule not found' } };
+    return { status: 200, body: { routing } };
+  } catch (e: unknown) {
+    return toHandlerResult(e);
+  }
+}
+
 export async function handleGetAlertDetail(
   alertSvc: MultiBackendAlertService,
   client: AlertingOSClient,

@@ -213,11 +213,37 @@ export interface PromTimeSeriesPoint {
   value: number;
 }
 
+/**
+ * Optional server-side filter forwarded as `/api/v1/rules` query params.
+ * Prom ≥ 2.40 / Cortex ≥ 1.13 honor these; older upstreams silently ignore
+ * them and return the full listing. Callers MUST post-filter for correctness.
+ */
+export interface PromRuleGroupsFilter {
+  ruleGroup?: string;
+  ruleName?: string;
+  file?: string;
+  type?: 'alert' | 'recording';
+}
+
+/**
+ * Backend opt-in to keep embedded `alerts[]` on `PromAlertingRule`.
+ * Default is to drop them — busy rulers can ship megabytes per response and
+ * the listing path never reads the array.
+ */
+export interface PromRuleGroupsOptions {
+  includeAlerts?: boolean;
+}
+
 export interface PrometheusBackend {
   readonly type: 'prometheus';
 
   // Rules (read-only from Prometheus API; AMP supports write via ruler API)
-  getRuleGroups(client: AlertingOSClient, ds: Datasource): Promise<PromRuleGroup[]>;
+  getRuleGroups(
+    client: AlertingOSClient,
+    ds: Datasource,
+    filter?: PromRuleGroupsFilter,
+    options?: PromRuleGroupsOptions
+  ): Promise<PromRuleGroup[]>;
 
   // Active alerts from Prometheus server
   getAlerts(client: AlertingOSClient, ds: Datasource): Promise<PromAlert[]>;

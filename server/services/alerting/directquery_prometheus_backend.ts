@@ -21,6 +21,7 @@
  *   - RestDirectQueryResourcesManagementAction.java
  *   - PrometheusQueryHandler.java / PrometheusClient.java
  */
+import { createPromFilterProbe, PromFilterProbe } from './prom_filter_probe';
 import {
   AlertingOSClient,
   Datasource,
@@ -33,6 +34,8 @@ import {
   PromRecordingRule,
   PromRule,
   PromRuleGroup,
+  PromRuleGroupsFilter,
+  PromRuleGroupsOptions,
   PrometheusWorkspace,
   AlertmanagerAlert,
   AlertmanagerAlertGroup,
@@ -55,11 +58,16 @@ export interface PromSeriesMatrix {
 
 export class DirectQueryPrometheusBackend implements PrometheusBackend, PrometheusMetadataProvider {
   readonly type = 'prometheus' as const;
+  // Per-process probe cache so concurrent rule-detail flyouts share one
+  // upstream check per dsId. Shared across requests intentionally — probe
+  // result is a property of the upstream, not the caller.
+  readonly filterProbe: PromFilterProbe;
 
   constructor(private readonly logger: Logger) {
     this.logger.info(
       'DirectQuery Prometheus backend configured: routing via OSD scoped cluster client'
     );
+    this.filterProbe = createPromFilterProbe(this, logger);
   }
 
   // =========================================================================
@@ -163,8 +171,14 @@ export class DirectQueryPrometheusBackend implements PrometheusBackend, Promethe
   // Rules — GET /_plugins/_directquery/_resources/{ds}/api/v1/rules
   // =========================================================================
 
-  async getRuleGroups(client: AlertingOSClient, ds: Datasource): Promise<PromRuleGroup[]> {
-    const data = await this.get<PromRulesApiResponse>(client, ds, '/api/v1/rules');
+  async getRuleGroups(
+    client: AlertingOSClient,
+    ds: Datasource,
+    filter?: PromRuleGroupsFilter,
+    options?: PromRuleGroupsOptions
+  ): Promise<PromRuleGroup[]> {
+    const path = this.buildRulesPath(filter);
+    const data = await this.get<PromRulesApiResponse>(client, ds, path);
 
     let rawGroups: PromRawRuleGroup[];
     if (Array.isArray(data)) {
@@ -178,6 +192,7 @@ export class DirectQueryPrometheusBackend implements PrometheusBackend, Promethe
       rawGroups = [];
     }
 
+    const includeAlerts = options?.includeAlerts === true;
     const groups: PromRuleGroup[] = rawGroups.map((g: PromRawRuleGroup) => ({
       name: g.name || '',
       file: g.file || '',
@@ -185,7 +200,7 @@ export class DirectQueryPrometheusBackend implements PrometheusBackend, Promethe
         typeof g.interval === 'number'
           ? g.interval
           : this.parseDurationToSeconds(String(g.interval || '60s')),
-      rules: (g.rules || []).map((r: PromRawRule) => this.mapRule(r)),
+      rules: (g.rules || []).map((r: PromRawRule) => this.mapRule(r, includeAlerts)),
     }));
 
     if (ds.workspaceId && ds.workspaceId !== 'default') {
@@ -235,8 +250,10 @@ export class DirectQueryPrometheusBackend implements PrometheusBackend, Promethe
       this.logger.debug('Dedicated /api/v1/alerts not available, extracting alerts from rules');
     }
 
-    // Fallback: extract alerts from rule groups
-    const groups = await this.getRuleGroups(client, ds);
+    // Fallback: extract alerts from rule groups. Pass includeAlerts so the
+    // embedded alerts[] stays populated through mapRule (listings strip by
+    // default).
+    const groups = await this.getRuleGroups(client, ds, undefined, { includeAlerts: true });
     const alerts: PromAlert[] = [];
     for (const g of groups) {
       for (const r of g.rules) {
@@ -511,7 +528,17 @@ export class DirectQueryPrometheusBackend implements PrometheusBackend, Promethe
   // Helpers
   // =========================================================================
 
-  private mapRule(r: PromRawRule): PromRule {
+  private buildRulesPath(filter?: PromRuleGroupsFilter): string {
+    if (!filter) return '/api/v1/rules';
+    const params: string[] = [];
+    if (filter.ruleGroup) params.push(`rule_group=${encodeURIComponent(filter.ruleGroup)}`);
+    if (filter.ruleName) params.push(`rule_name=${encodeURIComponent(filter.ruleName)}`);
+    if (filter.file) params.push(`file=${encodeURIComponent(filter.file)}`);
+    if (filter.type) params.push(`type=${encodeURIComponent(filter.type)}`);
+    return params.length === 0 ? '/api/v1/rules' : `/api/v1/rules?${params.join('&')}`;
+  }
+
+  private mapRule(r: PromRawRule, includeAlerts: boolean = false): PromRule {
     if (r.type === 'recording' || r.record) {
       return {
         type: 'recording',
@@ -531,6 +558,8 @@ export class DirectQueryPrometheusBackend implements PrometheusBackend, Promethe
         ? r.duration
         : this.parseDurationToSeconds(r.for || String(r.duration || '0s'));
 
+    // Listings drop embedded alerts[] — large on busy rulers and never read
+    // by UnifiedRuleSummary. Detail flyout passes includeAlerts: true.
     return {
       type: 'alerting',
       name,
@@ -538,7 +567,7 @@ export class DirectQueryPrometheusBackend implements PrometheusBackend, Promethe
       duration,
       labels: r.labels || {},
       annotations: r.annotations || {},
-      alerts: (r.alerts || []).map((a: PromRawAlert) => this.mapAlert(a)),
+      alerts: includeAlerts ? (r.alerts || []).map((a: PromRawAlert) => this.mapAlert(a)) : [],
       health: r.health || 'unknown',
       state: r.state || 'inactive',
       lastEvaluation: r.lastEvaluation,

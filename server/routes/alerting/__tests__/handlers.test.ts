@@ -25,6 +25,7 @@ import {
   handleGetPromAlerts,
   handleGetAlertDetail,
   handleGetRuleDetail,
+  handleGetRuleRouting,
 } from '../handlers';
 
 const mockAlertSvc = {
@@ -40,6 +41,7 @@ const mockAlertSvc = {
   getUnifiedAlerts: jest.fn(),
   getUnifiedRules: jest.fn(),
   getRuleDetail: jest.fn(),
+  getRuleRouting: jest.fn(),
   getAlertDetail: jest.fn(),
   getUnifiedTimeline: jest.fn(),
 };
@@ -107,6 +109,32 @@ describe('handlers', () => {
     mockAlertSvc.getRuleDetail.mockResolvedValueOnce(null);
     const result = await handleGetRuleDetail(mockAlertSvc as never, mockClient, 'ds-1', 'nope');
     expect(result.status).toBe(404);
+  });
+
+  // ---- handleGetRuleRouting (Phase 3 / B3) ----
+  it('handleGetRuleRouting returns 404 when the rule is missing', async () => {
+    mockAlertSvc.getRuleRouting.mockResolvedValueOnce(null);
+    const result = await handleGetRuleRouting(mockAlertSvc as never, mockClient, 'ds-1', 'nope');
+    expect(result.status).toBe(404);
+    expect(result.body).toEqual({ error: 'Rule not found' });
+  });
+
+  it('handleGetRuleRouting wraps the array in { routing }', async () => {
+    mockAlertSvc.getRuleRouting.mockResolvedValueOnce([
+      { channel: 'slack', destination: '#oncall' },
+    ]);
+    const result = await handleGetRuleRouting(mockAlertSvc as never, mockClient, 'ds-1', 'mon-1');
+    expect(result.status).toBe(200);
+    expect(result.body).toEqual({
+      routing: [{ channel: 'slack', destination: '#oncall' }],
+    });
+  });
+
+  it('handleGetRuleRouting returns 200 with empty array for Prom rules', async () => {
+    mockAlertSvc.getRuleRouting.mockResolvedValueOnce([]);
+    const result = await handleGetRuleRouting(mockAlertSvc as never, mockClient, 'ds-prom', 'r-1');
+    expect(result.status).toBe(200);
+    expect(result.body).toEqual({ routing: [] });
   });
 
   // =========================================================================

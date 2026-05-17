@@ -184,4 +184,18 @@ describe('MultiBackendAlertService — mutations + detail', () => {
     await svc.getRuleDetail(mockClient, 'ds-os', sampleOSMonitor.id);
     expect(mockOsBackend.runMonitor).not.toHaveBeenCalled();
   });
+
+  it('getRuleDetail (OS) no longer fetches destinations on flyout open', async () => {
+    // Phase 3 / B3: notification routing moved to a lazy /routing endpoint.
+    // The detail call must not pre-load destinations.
+    mockOsBackend.getMonitor.mockResolvedValueOnce(sampleOSMonitor);
+    mockOsBackend.getAlerts.mockResolvedValueOnce({ alerts: [], totalAlerts: 0 });
+    mockOsBackend.searchQuery.mockResolvedValueOnce({
+      aggregations: { time_buckets: { buckets: [] } },
+    });
+    const result = await svc.getRuleDetail(mockClient, 'ds-os', sampleOSMonitor.id);
+    expect(result).not.toBeNull();
+    expect(result!.notificationRouting).toEqual([]);
+    expect(mockOsBackend.getDestinations).not.toHaveBeenCalled();
+  });
 });

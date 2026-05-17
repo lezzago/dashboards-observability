@@ -64,6 +64,7 @@ import {
   handleGetUnifiedRules,
   handleGetUnifiedTimeline,
   handleGetRuleDetail,
+  handleGetRuleRouting,
   handleGetAlertDetail,
 } from './handlers';
 import {
@@ -512,6 +513,25 @@ export function registerAlertingRoutes(router: IRouter, deps: AlertingRoutesDeps
 
   router.get(
     {
+      path: '/api/alerting/rules/{dsId}/{ruleId}/routing',
+      validate: {
+        params: schema.object({ dsId: alertingIdSchema, ruleId: alertingIdSchema }),
+      },
+    },
+    async (ctx, req, res) => {
+      const { alertService } = buildRequestServices(ctx as AlertingHandlerContext);
+      const result = await handleGetRuleRouting(
+        alertService,
+        await getAlertingClient(ctx, req.params.dsId),
+        req.params.dsId,
+        req.params.ruleId
+      );
+      return sendResult(res, result);
+    }
+  );
+
+  router.get(
+    {
       path: '/api/alerting/alerts/{dsId}/{alertId}',
       validate: {
         params: schema.object({ dsId: alertingIdSchema, alertId: alertingIdSchema }),
@@ -574,13 +594,21 @@ export function registerAlertingRoutes(router: IRouter, deps: AlertingRoutesDeps
       // break the UI's consumer. Do preserve the upstream HTTP status code
       // so auth failures show as 401/403 rather than masked as 200.
       if (result.status === 200) return res.ok({ body: result.body });
+      // Pack the domain envelope into ResponseError.attributes so the wire
+      // body keeps its `{ available, code, ... }` shape. The UI catches
+      // the rejected HTTP error and falls into its error state on 401/403,
+      // so the discriminator is preserved without flattening through
+      // `toErrorBody`.
+      const errorMessage =
+        typeof result.body?.error === 'string' ? result.body.error : `HTTP ${result.status}`;
+      const errorBody = { message: errorMessage, attributes: result.body };
       if (result.status === 401) {
-        return res.unauthorized({ body: result.body });
+        return res.unauthorized({ body: errorBody });
       }
       if (result.status === 403) {
-        return res.forbidden({ body: result.body });
+        return res.forbidden({ body: errorBody });
       }
-      return res.customError({ statusCode: result.status, body: result.body });
+      return res.customError({ statusCode: result.status, body: errorBody });
     }
   );
 

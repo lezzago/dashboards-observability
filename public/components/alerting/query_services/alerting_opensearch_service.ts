@@ -13,6 +13,7 @@
 import { coreRefs } from '../../../framework/core_refs';
 import type {
   AlertsTimelineResponse,
+  NotificationRouting,
   ProgressiveResponse,
   UnifiedAlert,
   UnifiedAlertSummary,
@@ -130,5 +131,17 @@ export class AlertingOpenSearchService {
     return (await this.requireHttp().get(
       `/api/alerting/rules/${encodeURIComponent(dsId)}/${encodeURIComponent(ruleId)}`
     )) as UnifiedRule;
+  }
+
+  /**
+   * Notification routing for one rule. Loaded lazily by the rule flyout when
+   * the user expands the Notification Routing accordion — keeps the detail
+   * call cheap and avoids the per-flyout-open destinations fetch.
+   */
+  async getRuleRouting(dsId: string, ruleId: string): Promise<NotificationRouting[]> {
+    const resp = (await this.requireHttp().get(
+      `/api/alerting/rules/${encodeURIComponent(dsId)}/${encodeURIComponent(ruleId)}/routing`
+    )) as { routing: NotificationRouting[] };
+    return resp.routing;
   }
 }

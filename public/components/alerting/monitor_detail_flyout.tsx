@@ -7,7 +7,7 @@
  * Monitor Detail Flyout — comprehensive view of a single monitor's
  * configuration, behavior, and impact with quick actions.
  */
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useCallback, useState, useEffect, useMemo } from 'react';
 import type { EChartsOption, SeriesOption } from 'echarts';
 import {
   EuiFlyout,
@@ -207,6 +207,9 @@ export const MonitorDetailFlyout: React.FC<MonitorDetailFlyoutProps> = ({
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [detail, setDetail] = useState<UnifiedRule | null>(null);
   const [detailLoading, setDetailLoading] = useState(true);
+  // Notification routing is lazy: null = not yet fetched, [] = loaded empty.
+  const [routing, setRouting] = useState<NotificationRouting[] | null>(null);
+  const [routingLoading, setRoutingLoading] = useState(false);
 
   // Fetch full detail from the API when flyout opens
   useEffect(() => {
@@ -230,12 +233,30 @@ export const MonitorDetailFlyout: React.FC<MonitorDetailFlyoutProps> = ({
     };
   }, [monitor.datasourceId, monitor.id, osService]);
 
+  // Reset lazy routing state when the flyout switches to a different rule.
+  useEffect(() => {
+    setRouting(null);
+    setRoutingLoading(false);
+  }, [monitor.id, monitor.datasourceId]);
+
+  const loadRoutingIfNeeded = useCallback(() => {
+    if (routing !== null || routingLoading) return;
+    setRoutingLoading(true);
+    osService
+      .getRuleRouting(monitor.datasourceId, monitor.id)
+      .then((data) => setRouting(data))
+      .catch((err: unknown) => {
+        console.error('Failed to load notification routing:', err);
+        setRouting([]);
+      })
+      .finally(() => setRoutingLoading(false));
+  }, [monitor.datasourceId, monitor.id, routing, routingLoading, osService]);
+
   // Use detail data when available, fall back to summary props.
   // `detail` has the full shape; `monitor` is only a summary, so
   // detail-only fields are empty until the fetch resolves.
   const alertHistory = detail?.alertHistory ?? [];
   const conditionPreviewData = detail?.conditionPreviewData ?? [];
-  const notificationRouting = detail?.notificationRouting ?? [];
   const suppressionRules = detail?.suppressionRules ?? [];
   const description = detail?.description ?? '';
   const evaluationInterval = detail?.evaluationInterval ?? monitor.evaluationInterval ?? '—';
@@ -552,15 +573,25 @@ export const MonitorDetailFlyout: React.FC<MonitorDetailFlyoutProps> = ({
 
               <EuiSpacer size="m" />
 
-              {/* Notification Routing */}
+              {/* Notification Routing — lazy: fetches on accordion expand. */}
               <EuiAccordion
                 id={`routing-${monitor.id}`}
-                buttonContent={<strong>Notification Routing ({notificationRouting.length})</strong>}
+                buttonContent={
+                  <strong>
+                    Notification Routing
+                    {routing !== null ? ` (${routing.length})` : ''}
+                  </strong>
+                }
                 initialIsOpen={false}
                 paddingSize="m"
+                onToggle={(isOpen) => {
+                  if (isOpen) loadRoutingIfNeeded();
+                }}
               >
-                {notificationRouting.length > 0 ? (
-                  <EuiBasicTable items={notificationRouting} columns={routingColumns} compressed />
+                {routingLoading ? (
+                  <EuiLoadingContent lines={3} />
+                ) : routing && routing.length > 0 ? (
+                  <EuiBasicTable items={routing} columns={routingColumns} compressed />
                 ) : (
                   <EuiText size="s" color="subdued">
                     No notification routing configured

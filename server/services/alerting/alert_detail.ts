@@ -20,13 +20,14 @@ import {
   AlertingOSClient,
   Datasource,
   DatasourceService,
-  NotificationRouting,
   OpenSearchBackend,
   PromAlertingRule,
+  PromRuleGroup,
   PrometheusBackend,
   UnifiedAlert,
   UnifiedRule,
 } from '../../../common/types/alerting';
+import type { PromFilterProbe } from './prom_filter_probe';
 import {
   detectMonitorKind,
   osAlertToUnified,
@@ -39,8 +40,10 @@ import { fetchOSPreviewTimeSeries, fetchPromPreviewData } from './alert_preview'
 
 /**
  * Get full detail for a single rule/monitor. Fetches real metadata from
- * the backend (alert history, destinations, annotations). Fields that
- * cannot be fetched from the API are marked as mock placeholders.
+ * the backend (alert history, annotations). Fields that cannot be fetched
+ * from the API are marked as mock placeholders. Notification routing is
+ * lazily fetched by the flyout from `/routing`; this resolver no longer
+ * builds it.
  */
 export async function getRuleDetail(
   datasourceService: DatasourceService,
@@ -48,7 +51,8 @@ export async function getRuleDetail(
   promBackend: PrometheusBackend | undefined,
   client: AlertingOSClient,
   dsId: string,
-  ruleId: string
+  ruleId: string,
+  promFilterProbe?: PromFilterProbe
 ): Promise<UnifiedRule | null> {
   const ds = await datasourceService.get(dsId);
   if (!ds) return null;
@@ -56,7 +60,7 @@ export async function getRuleDetail(
   if (ds.type === 'opensearch' && osBackend) {
     return getOSRuleDetail(osBackend, client, ds, ruleId);
   } else if (ds.type === 'prometheus' && promBackend) {
-    return getPromRuleDetail(promBackend, client, ds, ruleId);
+    return getPromRuleDetail(promBackend, client, ds, ruleId, promFilterProbe);
   }
   return null;
 }
@@ -84,27 +88,6 @@ export async function getOSRuleDetail(
     }));
   } catch {
     // Alert history fetch is best-effort
-  }
-
-  // Build notification routing from trigger actions + destinations
-  const notificationRouting: NotificationRouting[] = [];
-  try {
-    const destinations = await osBackend.getDestinations(client);
-    const destMap = new Map(destinations.map((d) => [d.id, d]));
-    for (const trigger of monitor.triggers) {
-      for (const action of trigger.actions) {
-        const dest = destMap.get(action.destination_id);
-        notificationRouting.push({
-          channel: dest?.type || 'unknown',
-          destination: dest?.name || action.name || action.destination_id,
-          throttle: action.throttle
-            ? `${action.throttle.value} ${action.throttle.unit}`
-            : undefined,
-        });
-      }
-    }
-  } catch {
-    // Destination fetch is best-effort
   }
 
   // Build description from trigger message template or input type
@@ -146,22 +129,67 @@ export async function getOSRuleDetail(
     lookbackPeriod: undefined,
     alertHistory,
     conditionPreviewData,
-    notificationRouting,
+    // Notification routing is fetched lazily by the flyout when the user
+    // expands the accordion. The dedicated /routing endpoint owns the
+    // destinations lookup so the detail path stays cheap.
+    notificationRouting: [],
     // Suppression rules from the in-memory service (not from OS API)
     suppressionRules: [],
     raw: monitor,
   };
 }
 
+/**
+ * Parse the unified ruleId `{dsId}-{groupName}-{ruleName}` into its parts.
+ * `dsId` may itself contain `-`, but the convention used by `promRuleToUnified`
+ * always concatenates exactly three components in this order. We split from
+ * the left taking the first two `-` boundaries and treat everything between
+ * the last two as `groupName`, the suffix after the trailing `-{ruleName}`.
+ *
+ * Returns `undefined` when the id can't be parsed — caller falls back to a
+ * full scan, which preserves correctness against unexpected id shapes.
+ */
+function parsePromRuleId(
+  ruleId: string,
+  dsId: string
+): { groupName: string; ruleName: string } | undefined {
+  if (!ruleId.startsWith(`${dsId}-`)) return undefined;
+  const tail = ruleId.slice(dsId.length + 1);
+  const idx = tail.indexOf('-');
+  if (idx <= 0 || idx === tail.length - 1) return undefined;
+  return { groupName: tail.slice(0, idx), ruleName: tail.slice(idx + 1) };
+}
+
 export async function getPromRuleDetail(
   promBackend: PrometheusBackend,
   client: AlertingOSClient,
   ds: Datasource,
-  ruleId: string
+  ruleId: string,
+  promFilterProbe?: PromFilterProbe
 ): Promise<UnifiedRule | null> {
-  const groups = await promBackend.getRuleGroups(client, ds);
+  const parsed = parsePromRuleId(ruleId, ds.id);
 
-  // ruleId format: "{dsId}-{groupName}-{ruleName}"
+  let groups: PromRuleGroup[];
+  if (parsed && promFilterProbe) {
+    const probeResult = await promFilterProbe.probe(client, ds);
+    if (probeResult.status === 'pushdown-works') {
+      groups = await promBackend.getRuleGroups(
+        client,
+        ds,
+        { ruleGroup: parsed.groupName, ruleName: parsed.ruleName, type: 'alert' },
+        { includeAlerts: true }
+      );
+    } else {
+      groups = await promBackend.getRuleGroups(client, ds, undefined, { includeAlerts: true });
+    }
+  } else {
+    groups = await promBackend.getRuleGroups(client, ds, undefined, { includeAlerts: true });
+  }
+
+  // Post-filter for correctness — a Cortex upstream that only partially
+  // honors `rule_group` / `rule_name` would otherwise sneak the wrong rule
+  // through. Cost is O(returned rules), which is 1 in the happy path and
+  // ≤ N (full listing) in fallback.
   for (const group of groups) {
     for (const rule of group.rules) {
       if (rule.type !== 'alerting') continue;

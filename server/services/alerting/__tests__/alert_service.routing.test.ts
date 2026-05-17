@@ -299,6 +299,50 @@ describe('MultiBackendAlertService — routing & list', () => {
     expect(promStatus?.fallback).toBe('prometheus-alerts-current-only');
   });
 
+  // ---- getRuleRouting (Phase 3 / B3) ----
+  it('getRuleRouting returns null for unknown datasource', async () => {
+    mockDsSvc.get.mockResolvedValueOnce(null);
+    const result = await svc.getRuleRouting({} as never, 'unknown', 'r-1');
+    expect(result).toBeNull();
+  });
+
+  it('getRuleRouting returns null when OS monitor is not found', async () => {
+    mockOsBackend.getMonitor.mockResolvedValueOnce(null);
+    const result = await svc.getRuleRouting({} as never, 'ds-os', 'missing');
+    expect(result).toBeNull();
+    // Importantly: no destinations fetch when the monitor doesn't exist.
+    expect(mockOsBackend.getDestinations).not.toHaveBeenCalled();
+  });
+
+  it('getRuleRouting builds a routing list from monitor triggers + destinations', async () => {
+    mockOsBackend.getMonitor.mockResolvedValueOnce({
+      id: 'mon-1',
+      triggers: [
+        {
+          actions: [
+            {
+              destination_id: 'd-1',
+              name: 'pager',
+              throttle: { value: 5, unit: 'MINUTES' },
+            },
+          ],
+        },
+      ],
+    });
+    mockOsBackend.getDestinations.mockResolvedValueOnce([
+      { id: 'd-1', name: 'OnCall', type: 'slack' },
+    ]);
+    const result = await svc.getRuleRouting({} as never, 'ds-os', 'mon-1');
+    expect(result).toEqual([{ channel: 'slack', destination: 'OnCall', throttle: '5 MINUTES' }]);
+  });
+
+  it('getRuleRouting returns [] for Prom rules without hitting an upstream', async () => {
+    const result = await svc.getRuleRouting({} as never, 'ds-prom', 'whatever');
+    expect(result).toEqual([]);
+    // Prom path takes no upstream call.
+    expect(mockPromBackend.getRuleGroups).not.toHaveBeenCalled();
+  });
+
   /**
    * Compile-time regression guard: `setDatasourceService` must not exist on
    * the type. Re-adding it would resurrect the cross-tenant SavedObjects-

@@ -93,10 +93,37 @@ beforeEach(() => {
   mockTimeline.mockClear();
 });
 
+const emptyTimeline = {
+  buckets: [{ ts: NOW - HOUR_MS, severity: { critical: 0, high: 0, medium: 0, low: 0, info: 0 } }],
+  bucketCount: 1,
+  bucketDurationMs: HOUR_MS,
+  datasourceStatus: [],
+  fetchedAt: new Date(NOW).toISOString(),
+};
+
 describe('AlertsDashboard', () => {
-  it('renders empty state when no alerts', () => {
-    const { getByText } = render(<AlertsDashboard {...baseProps} />);
+  it('renders the empty prompt when both alerts and timeline are empty', () => {
+    // Phase 3 / Carryover-1: empty prompt only when nothing is filtered
+    // AND both data signals are empty.
+    const { getByText } = render(<AlertsDashboard {...baseProps} timelineData={emptyTimeline} />);
     expect(getByText('No Active Alerts')).toBeInTheDocument();
+  });
+
+  it('keeps the chart visible when the timeline has data even if the alerts list is empty', () => {
+    // Phase 3 / Carryover-1: this is the regression — the chart used to
+    // hide whenever alerts.length === 0 even with non-zero buckets.
+    const { queryByText, getByTestId } = render(<AlertsDashboard {...baseProps} />);
+    expect(queryByText('No Active Alerts')).not.toBeInTheDocument();
+    expect(getByTestId('alert-timeline-stub')).toBeInTheDocument();
+  });
+
+  it('keeps the chart visible while the timeline is still loading', () => {
+    // Loading flagged at the top level should suppress the page-wide empty
+    // prompt — otherwise the prompt flashes briefly on every refresh.
+    const { queryByText } = render(
+      <AlertsDashboard {...baseProps} timelineData={null} timelineLoading />
+    );
+    expect(queryByText('No Active Alerts')).not.toBeInTheDocument();
   });
 
   it('renders alert table when alerts provided', () => {

@@ -555,7 +555,30 @@ export const AlertsDashboard: React.FC<AlertsDashboardProps> = ({
     [onAcknowledge, onViewDetail]
   );
 
-  const emptyState = !loading && alerts.length === 0;
+  // Two-axis empty derivation. We want the page-wide "No Active Alerts"
+  // prompt only when both data sources are empty AND the user hasn't
+  // applied a filter. If the chart has data but the table doesn't (e.g. a
+  // filter is narrowing the table), we keep the chart visible and let the
+  // table render its filter-aware empty message.
+  const tableEmpty = !loading && alerts.length === 0;
+  const timelineHasData = useMemo(() => {
+    if (!timelineData || !timelineData.buckets) return false;
+    for (const b of timelineData.buckets) {
+      const total =
+        b.severity.critical +
+        b.severity.high +
+        b.severity.medium +
+        b.severity.low +
+        b.severity.info;
+      if (total > 0) return true;
+    }
+    return false;
+  }, [timelineData]);
+  // Show the page-wide empty prompt only when nothing is filtered AND both
+  // signals report empty (or the timeline endpoint hasn't returned anything
+  // yet — null timelineData with an empty alerts list still warrants the
+  // prompt rather than rendering an empty chart frame).
+  const showEmptyPrompt = tableEmpty && !isFiltered && !timelineHasData && !timelineLoading;
 
   return (
     <EuiResizableContainer style={{ flex: 1, minHeight: 0 }}>
@@ -687,7 +710,7 @@ export const AlertsDashboard: React.FC<AlertsDashboardProps> = ({
             paddingSize="none"
             style={{ paddingLeft: '4px', overflow: 'auto' }}
           >
-            {emptyState ? (
+            {showEmptyPrompt ? (
               <EuiEmptyPrompt
                 title={<h2>No Active Alerts</h2>}
                 body={<p>All systems operating normally.</p>}

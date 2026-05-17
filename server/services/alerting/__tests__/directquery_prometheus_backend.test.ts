@@ -75,6 +75,98 @@ describe('DirectQueryPrometheusBackend', () => {
     expect(groups[0].rules[0].name).toBe('HighCPU');
   });
 
+  it('getRuleGroups omits the query string when no filter is provided', async () => {
+    mockClient.transport.request.mockResolvedValueOnce({ body: { data: { groups: [] } } });
+    await backend.getRuleGroups(mockClient as never, ds);
+    expect(mockClient.transport.request).toHaveBeenCalledWith(
+      expect.objectContaining({
+        method: 'GET',
+        path: '/_plugins/_directquery/_resources/my-prom/api/v1/rules',
+      })
+    );
+  });
+
+  it('getRuleGroups appends rule_group / rule_name / type as query params', async () => {
+    mockClient.transport.request.mockResolvedValueOnce({ body: { data: { groups: [] } } });
+    await backend.getRuleGroups(mockClient as never, ds, {
+      ruleGroup: 'g1',
+      ruleName: 'HighCPU',
+      type: 'alert',
+    });
+    const path = (mockClient.transport.request.mock.calls[0][0] as { path: string }).path;
+    expect(path).toBe(
+      '/_plugins/_directquery/_resources/my-prom/api/v1/rules?rule_group=g1&rule_name=HighCPU&type=alert'
+    );
+  });
+
+  it('getRuleGroups URL-encodes filter values containing spaces or special chars', async () => {
+    mockClient.transport.request.mockResolvedValueOnce({ body: { data: { groups: [] } } });
+    await backend.getRuleGroups(mockClient as never, ds, {
+      ruleGroup: 'g 1',
+      ruleName: 'a&b',
+    });
+    const path = (mockClient.transport.request.mock.calls[0][0] as { path: string }).path;
+    expect(path).toContain('rule_group=g%201');
+    expect(path).toContain('rule_name=a%26b');
+  });
+
+  it('getRuleGroups strips embedded alerts[] by default (listing path)', async () => {
+    mockClient.transport.request.mockResolvedValueOnce({
+      body: {
+        data: {
+          groups: [
+            {
+              name: 'g1',
+              rules: [
+                {
+                  name: 'r1',
+                  type: 'alerting',
+                  alerts: [
+                    { labels: { alertname: 'r1' }, state: 'firing', annotations: {}, activeAt: '' },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      },
+    });
+    const groups = await backend.getRuleGroups(mockClient as never, ds);
+    const rule = groups[0].rules[0];
+    if (rule.type !== 'alerting') throw new Error('expected alerting rule');
+    expect(rule.alerts).toEqual([]);
+  });
+
+  it('getRuleGroups keeps embedded alerts[] when includeAlerts is true', async () => {
+    mockClient.transport.request.mockResolvedValueOnce({
+      body: {
+        data: {
+          groups: [
+            {
+              name: 'g1',
+              rules: [
+                {
+                  name: 'r1',
+                  type: 'alerting',
+                  alerts: [
+                    { labels: { alertname: 'r1' }, state: 'firing', annotations: {}, activeAt: '' },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      },
+    });
+    const groups = await backend.getRuleGroups(mockClient as never, ds, undefined, {
+      includeAlerts: true,
+    });
+    const rule = groups[0].rules[0];
+    if (rule.type !== 'alerting') throw new Error('expected alerting rule');
+    expect(rule.alerts).toHaveLength(1);
+    expect(rule.alerts[0].state).toBe('firing');
+  });
+
   // ---- getAlerts ----
   it('getAlerts returns alerts from /api/v1/alerts', async () => {
     mockClient.transport.request.mockResolvedValueOnce({

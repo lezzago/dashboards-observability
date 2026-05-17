@@ -25,6 +25,7 @@ import {
   DatasourceService,
   DatasourceWarning,
   Logger,
+  NotificationRouting,
   OpenSearchBackend,
   PrometheusBackend,
   OSAlert,
@@ -45,6 +46,7 @@ import {
   getAlertDetail as getAlertDetailImpl,
   getRuleDetail as getRuleDetailImpl,
 } from './alert_detail';
+import type { PromFilterProbe } from './prom_filter_probe';
 import {
   getUnifiedTimeline as getUnifiedTimelineImpl,
   GetUnifiedTimelineOptions,
@@ -492,13 +494,18 @@ export class MultiBackendAlertService {
     dsId: string,
     ruleId: string
   ): Promise<UnifiedRule | null> {
+    // Pull the lazy filter probe off the concrete Prom backend if present.
+    // The backend instance lives for the plugin process; the probe cache
+    // therefore persists across requests, exactly once per dsId.
+    const probe = (this.promBackend as { filterProbe?: PromFilterProbe } | undefined)?.filterProbe;
     return getRuleDetailImpl(
       this.datasourceService,
       this.osBackend,
       this.promBackend,
       client,
       dsId,
-      ruleId
+      ruleId,
+      probe
     );
   }
 
@@ -521,6 +528,58 @@ export class MultiBackendAlertService {
       alertId,
       monitorId
     );
+  }
+
+  /**
+   * Lazy notification-routing lookup for the rule flyout. Lifted out of the
+   * detail path so the destinations fetch (an O(N) ruler call) only fires
+   * when the user actually expands the Notification Routing accordion.
+   *
+   * Returns `null` when the rule does not exist; `[]` when it exists but
+   * has no routing wired (or for Prometheus, where routing is owned by
+   * Alertmanager and the flyout already shows the empty state).
+   */
+  async getRuleRouting(
+    client: AlertingOSClient,
+    dsId: string,
+    ruleId: string
+  ): Promise<NotificationRouting[] | null> {
+    const ds = await this.datasourceService.get(dsId);
+    if (!ds) return null;
+
+    if (ds.type === 'opensearch' && this.osBackend) {
+      const monitor = await this.osBackend.getMonitor(client, ruleId);
+      if (!monitor) return null;
+      const routing: NotificationRouting[] = [];
+      try {
+        const destinations = await this.osBackend.getDestinations(client);
+        const destMap = new Map(destinations.map((d) => [d.id, d]));
+        for (const trigger of monitor.triggers) {
+          for (const action of trigger.actions) {
+            const dest = destMap.get(action.destination_id);
+            routing.push({
+              channel: dest?.type || 'unknown',
+              destination: dest?.name || action.name || action.destination_id,
+              throttle: action.throttle
+                ? `${action.throttle.value} ${action.throttle.unit}`
+                : undefined,
+            });
+          }
+        }
+      } catch {
+        // Destinations is best-effort — if the lookup fails the accordion
+        // shows an empty list rather than surfacing an error.
+      }
+      return routing;
+    }
+
+    if (ds.type === 'prometheus') {
+      // Prometheus rule routing is owned by Alertmanager; the flyout shows
+      // an empty list today, so preserve that behavior.
+      return [];
+    }
+
+    return null;
   }
 
   /**
