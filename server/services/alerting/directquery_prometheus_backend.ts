@@ -713,20 +713,27 @@ export class DirectQueryPrometheusBackend implements PrometheusBackend, Promethe
   // =========================================================================
 
   private buildRulesPath(filter?: PromRuleGroupsFilter): string {
-    if (!filter) return '/api/v1/rules';
     const params: string[] = [];
-    if (filter.ruleGroup) params.push(`rule_group=${encodeURIComponent(filter.ruleGroup)}`);
-    if (filter.ruleName) params.push(`rule_name=${encodeURIComponent(filter.ruleName)}`);
-    if (filter.file) params.push(`file=${encodeURIComponent(filter.file)}`);
-    if (filter.type) params.push(`type=${encodeURIComponent(filter.type)}`);
+    if (filter?.ruleGroup) params.push(`rule_group=${encodeURIComponent(filter.ruleGroup)}`);
+    if (filter?.ruleName) params.push(`rule_name=${encodeURIComponent(filter.ruleName)}`);
+    if (filter?.file) params.push(`file=${encodeURIComponent(filter.file)}`);
+    // P6.2 — always push `type=alert` on the listing path. The unified
+    // mapper drops recording rules anyway (`fetchRulesRaw` keeps only
+    // `r.type === 'alerting'`); pushing the filter to the upstream cuts
+    // ~90% of payload on recording-rule-heavy deployments. Older
+    // upstreams that don't honor the param silently return the full set,
+    // and the JS post-filter still produces the correct output. No
+    // wrong-result mode (accept-or-ignore) so no probe is needed.
+    const type = filter?.type ?? 'alert';
+    params.push(`type=${encodeURIComponent(type)}`);
     // Phase 4 — Prom ≥ 2.40 / Cortex ≥ 1.13 honour `match[]` matchers on
     // /api/v1/rules. Older upstreams silently ignore them; the filter
     // probe gates whether to send these (caller responsibility) and the
     // service post-filters in JS for correctness regardless.
-    if (filter.state) {
+    if (filter?.state) {
       params.push(`match[]=${encodeURIComponent(`{alertstate="${filter.state}"}`)}`);
     }
-    if (filter.labels) {
+    if (filter?.labels) {
       for (const [k, vs] of Object.entries(filter.labels)) {
         for (const v of vs) {
           if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(k)) continue;
@@ -735,7 +742,7 @@ export class DirectQueryPrometheusBackend implements PrometheusBackend, Promethe
         }
       }
     }
-    return params.length === 0 ? '/api/v1/rules' : `/api/v1/rules?${params.join('&')}`;
+    return `/api/v1/rules?${params.join('&')}`;
   }
 
   private mapRule(r: PromRawRule, includeAlerts: boolean = false): PromRule {

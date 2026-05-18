@@ -75,13 +75,13 @@ describe('DirectQueryPrometheusBackend', () => {
     expect(groups[0].rules[0].name).toBe('HighCPU');
   });
 
-  it('getRuleGroups omits the query string when no filter is provided', async () => {
+  it('getRuleGroups always passes type=alert on the listing path (P6.2)', async () => {
     mockClient.transport.request.mockResolvedValueOnce({ body: { data: { groups: [] } } });
     await backend.getRuleGroups(mockClient as never, ds);
     expect(mockClient.transport.request).toHaveBeenCalledWith(
       expect.objectContaining({
         method: 'GET',
-        path: '/_plugins/_directquery/_resources/my-prom/api/v1/rules',
+        path: '/_plugins/_directquery/_resources/my-prom/api/v1/rules?type=alert',
       })
     );
   });

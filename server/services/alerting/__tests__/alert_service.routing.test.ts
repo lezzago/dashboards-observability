@@ -636,6 +636,51 @@ describe('MultiBackendAlertService — routing & list', () => {
     });
   });
 
+  describe('Prom rules listing payload (P6.3)', () => {
+    it('listing path drops query and truncates description (lightweight shape)', async () => {
+      const longDescription = 'x'.repeat(500);
+      mockOsBackend.getMonitors.mockResolvedValueOnce({
+        monitors: [],
+        total: 0,
+        hasMore: false,
+      });
+      mockPromBackend.getRuleGroups.mockReset();
+      mockPromBackend.getRuleGroups.mockResolvedValueOnce([
+        {
+          name: 'g1',
+          file: 'rules.yml',
+          interval: 60,
+          rules: [
+            {
+              type: 'alerting',
+              name: 'HighCPU',
+              query: 'rate(cpu[5m]) > 0.1',
+              duration: 60,
+              labels: { severity: 'critical' },
+              annotations: { description: longDescription, summary: 'short summary' },
+              alerts: [],
+              health: 'ok',
+              state: 'firing',
+            },
+          ],
+        },
+      ]);
+
+      const res = await svc.getPaginatedRules({} as never, {
+        page: 1,
+        pageSize: 10,
+      });
+
+      const promRule = res.results.find((r) => r.datasourceType === 'prometheus');
+      expect(promRule).toBeDefined();
+      // query stripped; description truncated to 120 with ellipsis.
+      expect(promRule?.query).toBe('');
+      const desc = promRule?.annotations.description ?? '';
+      expect(desc.length).toBeLessThanOrEqual(120);
+      expect(desc.endsWith('…')).toBe(true);
+    });
+  });
+
   describe('getPaginatedRules (Phase 4)', () => {
     it('skips Prom when backend=opensearch', async () => {
       mockOsBackend.getMonitors.mockResolvedValueOnce({

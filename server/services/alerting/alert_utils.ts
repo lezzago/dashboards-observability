@@ -474,16 +474,39 @@ export function parseThreshold(conditionSource: string): { operator: string; val
   return { operator: '>', value: 0 };
 }
 
+/**
+ * Cap on description length on the lightweight listing path. Annotations
+ * routinely run 200-1000 chars (Go template expressions, runbook links
+ * inlined); the rules table only renders `name` and a tooltip from
+ * `description`. 120 chars is enough for a tooltip preview; the full
+ * text comes from the detail flyout's `getRuleDetail` call.
+ */
+export const PROM_RULE_LISTING_DESCRIPTION_MAX = 120;
+
 export function promRuleToUnified(
   r: PromAlertingRule,
   groupName: string,
-  dsId: string
+  dsId: string,
+  options?: { lightweight?: boolean }
 ): UnifiedRuleSummary {
   const state = r.state;
   const severity = promSeverityFromLabels(r.labels);
   const status: MonitorStatus =
     state === 'firing' ? 'active' : state === 'pending' ? 'pending' : 'muted';
   const destNames: string[] = [];
+  const lightweight = options?.lightweight === true;
+
+  // P6.3 — listing path drops `query` (PromQL expression, often 100-300
+  // chars) and truncates `description`. Detail flyout opts back into
+  // the full shape via the default options. The annotation truncation
+  // intentionally trims to N-1 chars and appends '…' so the marker
+  // is visible without exceeding the cap.
+  const fullQuery = r.query;
+  const fullDescription = r.annotations.description || r.annotations.summary || '';
+  const trimmedDescription =
+    lightweight && fullDescription.length > PROM_RULE_LISTING_DESCRIPTION_MAX
+      ? fullDescription.slice(0, PROM_RULE_LISTING_DESCRIPTION_MAX - 1) + '…'
+      : fullDescription;
 
   return {
     id: `${dsId}-${groupName}-${r.name}`,
@@ -492,11 +515,15 @@ export function promRuleToUnified(
     name: r.name,
     enabled: true,
     severity,
-    query: r.query,
+    query: lightweight ? '' : fullQuery,
     condition: `> threshold for ${r.duration}s`,
     group: groupName,
     labels: r.labels,
-    annotations: r.annotations,
+    annotations: lightweight
+      ? trimmedDescription
+        ? { description: trimmedDescription }
+        : {}
+      : r.annotations,
     monitorType: 'metric',
     status,
     healthStatus: r.health === 'ok' ? 'healthy' : r.health === 'err' ? 'failing' : 'no_data',
@@ -507,13 +534,15 @@ export function promRuleToUnified(
     notificationDestinations: destNames,
     evaluationInterval: `${r.duration}s`,
     pendingPeriod: `${r.duration}s`,
-    threshold: (() => {
-      const parsed = parseThreshold(r.query);
-      return {
-        operator: parsed.operator,
-        value: parsed.value,
-        unit: inferUnitFromExpression(r.query),
-      };
-    })(),
+    threshold: lightweight
+      ? undefined
+      : (() => {
+          const parsed = parseThreshold(fullQuery);
+          return {
+            operator: parsed.operator,
+            value: parsed.value,
+            unit: inferUnitFromExpression(fullQuery),
+          };
+        })(),
   };
 }

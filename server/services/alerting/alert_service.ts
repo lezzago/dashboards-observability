@@ -1209,9 +1209,14 @@ export class MultiBackendAlertService {
       const groups = await this.promBackend.getRuleGroups(client, ds, promFilter, {
         noCache: filterOptions?.noCache === true,
       });
+      // P6.3 — listing path uses the lightweight mapper: drops `query`
+      // and truncates `description` since neither is rendered in the
+      // rules table. Full text comes from `getRuleDetail` on flyout open.
       for (const g of groups) {
         for (const r of g.rules) {
-          if (r.type === 'alerting') results.push(promRuleToUnified(r, g.name, ds.id));
+          if (r.type === 'alerting') {
+            results.push(promRuleToUnified(r, g.name, ds.id, { lightweight: true }));
+          }
         }
       }
     }
