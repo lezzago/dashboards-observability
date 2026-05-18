@@ -1226,7 +1226,645 @@ considers this alertname's instances. Document as a known limitation.
 
 ---
 
-### P6.6 — TBD (placeholder)
+### P6.6 — Restore per-datasource `withTimeout` on the paginated and facet paths
+
+The Phase 4 paginated alerts/rules paths and the Phase 5 facet paths
+fan out without the `withTimeout` wrapper that the legacy progressive
+paths still use. One slow datasource hangs the whole call.
+
+#### Why
+
+`MultiBackendAlertService` has a `withTimeout` helper
+(`alert_service.ts:1256-1281`) used by `fetchAlertsFromDatasource`
+(`alert_service.ts:976-977`) and `fetchRulesFromDatasource`
+(`alert_service.ts:1018-1019`) — both helpers wrap the per-datasource
+fetcher in a timeout that resolves to a `'timeout'` status on the
+per-datasource result envelope, so a slow datasource doesn't block
+the whole listing.
+
+Phase 4 added `getPaginatedAlerts` (`alert_service.ts:713`) and
+`getPaginatedRules` (line 654) — both fan out via
+`Promise.allSettled` over `fetchAlertsRaw` / `fetchRulesRaw`
+**without** wrapping in `withTimeout`:
+
+```ts
+const dsResults = await Promise.allSettled(
+  datasources.map(async (ds) => {
+    const client = isResolver ? await clientOrResolver(ds.id) : clientOrResolver;
+    return this.fetchAlertsRaw(client, ds, resolvedRange, options);
+  })
+);
+```
+
+Phase 5's facet path has the same gap
+(`alert_facets.ts:175-180, 227-232`). Both `fetchFilteredAlerts` and
+`fetchFilteredRules` call `fetchAlertsRaw` / `fetchRulesRaw` directly.
+
+The HTTP server has its own request-timeout backstop, but it kills
+the whole route — at that point the user sees a generic 504, not a
+per-datasource `'timeout'` status. The status panel in the UI loses
+its ability to say "DS-1 succeeded, DS-2 timed out" because the
+whole response failed.
+
+In practice on multi-datasource setups: one Cortex behaving badly
+(slow query, long-running backfill, transient network) will fail the
+entire alerts page. Phase 4 + Phase 5 quietly regressed the
+isolation Phase 0's progressive path provided.
+
+#### What's lost (and how to backfill)
+
+Nothing. The fix is purely additive: wrap the per-datasource fetcher
+in `withTimeout`, and on timeout map the result into a
+`DatasourceWarning` (paginated path) or `DatasourceFetchResult`
+shape (facet path) the same way today's slow / failed datasources
+are handled.
+
+#### Concrete shape
+
+Three call sites need the wrapper:
+
+**1. `getPaginatedAlerts`** (`alert_service.ts:713`):
+
+```ts
+const timeoutMs = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+const dsResults = await Promise.allSettled(
+  datasources.map(async (ds) => {
+    const client = isResolver ? await clientOrResolver(ds.id) : clientOrResolver;
+    return this.withTimeout(
+      this.fetchAlertsRaw(client, ds, resolvedRange, options),
+      timeoutMs,
+      `Datasource ${ds.name} timed out after ${timeoutMs}ms`,
+    );
+  })
+);
+```
+
+The catch block in the `for` loop below already catches `TimeoutError`
+implicitly through `settled.reason` and emits a warning entry.
+Verify; tweak the warning shape to flag `kind: 'timeout'` so the UI
+can distinguish (optional).
+
+**2. `getPaginatedRules`** (`alert_service.ts:654`): same shape.
+
+**3. `fetchFilteredAlerts` / `fetchFilteredRules`**
+(`alert_facets.ts:175-180, 227-232`): wrap each per-datasource fetch.
+The facet path already has a per-datasource warning shape; timeouts
+just become another flavor.
+
+The existing `DEFAULT_TIMEOUT_MS = 10_000` constant
+(`alert_service.ts:70`) is the right default. Both routes already
+parse a `timeout` query param and forward as `timeoutMs` (it just
+isn't being applied on the new paths).
+
+#### File-by-file change list
+
+- `server/services/alerting/alert_service.ts` — wrap two call sites
+  in `getPaginatedAlerts` / `getPaginatedRules`. ~15 lines.
+- `server/services/alerting/alert_facets.ts` — pass `alertSvc` (or
+  the timeout helper) into `fetchFilteredAlerts` /
+  `fetchFilteredRules` so they can wrap. **Or** inline a local
+  `withTimeout` mirror — the facet module already imports from
+  `alert_service`. ~15 lines.
+- `server/services/alerting/__tests__/alert_service.routing.test.ts`
+  — add timeout cases to the paginated path.
+- `server/services/alerting/__tests__/alert_facets.test.ts` — add
+  timeout cases.
+
+#### Acceptance criteria
+
+1. **Paginated path timeout** — point one Prom datasource at a slow
+   upstream (e.g. mock a 30s delay; default `timeoutMs = 10_000`).
+   Open the alerts page with that DS + a healthy DS selected. The
+   listing returns within ~10s with the healthy DS's results. The
+   slow DS appears in `warnings[]` with a timeout-shaped error.
+2. **Facet path timeout** — same, against the
+   `/_facets` endpoint.
+3. **Custom `timeout` param honored** — pass `?timeout=2000` on the
+   listing call; the timeout fires after 2s.
+4. **Healthy fan-out unchanged** — when no datasource times out, the
+   call shape and response are identical to today.
+5. **Phase 1-5 acceptance criteria still hold.**
+
+#### Risk register
+
+- **Caching interaction.** A timeout abandons the in-flight upstream
+  request, but `TtlCache.get` doesn't know — it'll still hold the
+  in-flight promise. Subsequent calls within the TTL window get the
+  same in-flight promise (which is already abandoned by the
+  timed-out caller). Mitigation: when a `withTimeout` fires, also
+  call `cache.invalidate(dsId)` to clear the in-flight slot. Verify
+  in tests.
+- **`withTimeout` coverage on the auxiliary historical query.**
+  `getHistoricalAlerts` is called inside `fetchAlertsRaw`'s Prom
+  branch (post-Phase-5 work). The outer `withTimeout` covers it
+  transitively, but if the historical query is the slow piece and
+  the current-firing call is fast, today the merge waits on both.
+  Acceptable — the outer timeout still bounds the wait.
+
+#### Out of scope
+
+- Adaptive timeout based on datasource history. Static
+  `DEFAULT_TIMEOUT_MS` is fine for Phase 6.
+- Surfacing per-datasource latency to the UI as a metric. That's a
+  Telemetry item, not a perf item.
+
+---
+
+### P6.7 — Cache the bounded historical-alerts query
+
+`getHistoricalAlerts` (`directquery_prometheus_backend.ts:367-452`)
+goes to Cortex on every call — it has no `TtlCache` participation,
+unlike `getAlerts` and `getRuleGroups`. Repeated picker/filter/refresh
+clicks re-issue an expensive `topk(N, last_over_time(...))` every
+time.
+
+#### Why
+
+`last_over_time(ALERTS{...}[range_seconds])` is structurally
+expensive on Cortex: the queryer has to scan every sample of
+`ALERTS{...}` over the range at evaluation time. A 7-day range with
+a moderate-cardinality matcher is seconds of upstream work. The
+plugin pays this cost on every single flyout open, every filter
+click, every picker fidget — even when the data hasn't changed
+upstream.
+
+The two existing TTL caches (`alertsCache`, `ruleGroupsCache`) keyed
+on `dsId` work because the corresponding upstream APIs accept no
+filters — one cache slot per `dsId` covers all callers. The
+historical-alerts query DOES accept filters (severity / labels /
+search become matchers on the selector), so its cache key needs to
+include those.
+
+#### What's lost (and how to backfill)
+
+Nothing functional. The cost is a slightly more complex cache key.
+
+#### Concrete shape
+
+A new cache instance:
+
+```ts
+readonly historicalAlertsCache: TtlCache<string, { candidates: PromHistoricalAlertCandidate[]; truncated: boolean }>;
+```
+
+Keyed on a stringified composite:
+
+```
+<dsId>:<startBucket>:<endBucket>:<severitySorted>:<labelsSorted>:<search>
+```
+
+Range bucketing matters: a user clicking through pickers or letting a
+"now" range tick forward shouldn't bust the cache for every second
+of drift. Bucket `start` and `end` to **30s granularity** before
+hashing into the key:
+
+```ts
+const bucketed = (ms: number) => Math.floor(ms / 30_000) * 30_000;
+```
+
+A 7-day range that's "now-7d → now" stays cache-hot for 30s windows;
+a `now-7d → now` query made 5 seconds later sees the same cache
+entry. After the bucket boundary advances, a new entry is created.
+
+TTL: same 30s as the other caches (matches the bucketing — one new
+upstream call per ~minute of "now"-tracking, which is acceptable).
+
+`noCache: true` (refresh button) invalidates by full-key match. Or —
+simpler — invalidate the whole cache on refresh; it's small and the
+refresh button is rare. Recommend the simpler shape.
+
+#### File-by-file change list
+
+- `server/services/alerting/directquery_prometheus_backend.ts` —
+  add `historicalAlertsCache` instance; route `getHistoricalAlerts`
+  through it. Build the composite key. ~30 lines.
+- `server/services/alerting/__tests__/directquery_prometheus_backend.test.ts`
+  — cache hit/miss cases, range-bucketing cases, `noCache` bypass,
+  composite-key collision tests. ~50 lines.
+
+No service / route / frontend changes.
+
+#### Acceptance criteria
+
+1. **Repeat-call hit** — issue two listing calls 5 seconds apart with
+   identical filter shape. Network panel: one upstream
+   `query_range`-style call (the topk historical query). Today: two.
+2. **Range drift within bucket** — advance the "now" anchor by 10s
+   between calls. Same upstream call count as #1 (range-bucketing
+   absorbs the drift).
+3. **Range drift past bucket** — advance the "now" anchor by 35s.
+   Two upstream calls (cache key changed at the 30s bucket boundary).
+4. **Filter change busts the cache** — apply a severity filter; new
+   key, new upstream call. Reverting the filter within 30s reuses
+   the prior cache entry (key matches).
+5. **Refresh button** — `noCache=1` invalidates; refetches.
+6. **Phase 1-5 acceptance criteria still hold.**
+
+#### Risk register
+
+- **Cache memory.** Each entry holds up to `PROM_HISTORICAL_ALERTS_TOPK
+  = 1000` candidates (~200 bytes each = 200 KB per entry). With
+  many distinct filter combinations, the cache could grow. Mitigate:
+  add a soft cap on the cache (e.g. 50 entries per `TtlCache`); LRU
+  eviction. Or accept the bound: 30s TTL means stale entries
+  self-expire fast.
+- **Consistency between current and historical.** When the merge
+  happens (`alert_service.ts:1118-1142`), `getAlerts` (current,
+  cached) and `getHistoricalAlerts` (cached separately) may produce
+  slight mismatches if their cache entries were populated at
+  different moments. Acceptable — both have 30s TTLs and the merge
+  is a union; the worst case is one alert showing as "current" for
+  ~30s after it resolved on the upstream.
+
+#### Out of scope
+
+- Pre-warming the historical cache on plugin startup. Lazy
+  population is fine.
+- Cross-`dsId` cache sharing. Each `dsId` is a distinct upstream;
+  no sharing semantics.
+
+---
+
+### P6.8 — Skip the historical query for short `endIsNow=true` ranges
+
+For "now-X to now" pickers where X is small (≤ 5 minutes), the
+current-firing call from `/api/v1/alerts` already covers the window.
+Firing the bounded historical query in addition is wasted Cortex
+work.
+
+#### Why
+
+Today's merge logic (`alert_service.ts:1115-1147`) for ranged
+listings:
+
+1. If `endIsNow=true`, fetch `/api/v1/alerts` (cached).
+2. Always fetch `getHistoricalAlerts` (uncached, expensive).
+3. Merge by fingerprint.
+
+For a "now-5m to now" picker, step 1 already returns every alert
+firing in the last 5 minutes (`/api/v1/alerts` is current-state with
+no time filter, but anything resolved more than ~5 minutes ago has
+already aged out of Cortex's resolved-alert retention anyway). Step 2
+would mostly return the same fingerprints with a much higher upstream
+cost.
+
+The threshold isn't exact — "what's in `/api/v1/alerts`" depends on
+Cortex's `-rules.alertmanager-resolve-timeout` (typically 5min) and
+`-rules.alert-timeout` (typically 1m). But for any range ≤ 5min that
+ends at "now", the historical query is essentially redundant.
+
+For ranges > 5min or ranges that don't end at "now", the historical
+query is the only source of alerts that resolved before the picker
+end. It must run.
+
+#### What's lost (and how to backfill)
+
+For ranges in the gray zone (5min < range ≤ ~10min) the change is
+optimistic — there could be a brief window where an alert resolved 6
+minutes ago (gone from `/api/v1/alerts`, present in historical
+samples) gets dropped. Mitigation: pick the threshold conservatively
+(e.g. 2 minutes, well under any plausible resolve-timeout) so we
+optimize the dominant common case (real-time monitoring with a
+"now-1h" or "now-5m" picker) without losing fidelity at the edge.
+
+Test fixtures should cover the boundary explicitly.
+
+#### Concrete shape
+
+In `fetchAlertsRaw` Prom branch (`alert_service.ts:1090-1147`),
+gate the historical call on range duration:
+
+```ts
+const SHORT_RANGE_MS = 2 * 60 * 1000;  // 2min — well under typical resolve-timeout
+const isShortNowRange = range.endIsNow && (range.endMs - range.startMs) <= SHORT_RANGE_MS;
+
+// (a) Current-firing
+if (range.endIsNow) {
+  const currentAlerts = await this.promBackend.getAlerts(client, ds, ...);
+  for (const a of currentAlerts) {
+    merged.set(promAlertFingerprint(...), promAlertToUnified(a, ds.id));
+  }
+}
+
+// (b) Historical — skipped for short now-anchored ranges where (a) covers it.
+if (!isShortNowRange) {
+  const historical = await this.promBackend.getHistoricalAlerts(client, ds, {...});
+  for (const c of historical.candidates) {...}
+}
+```
+
+The threshold (`SHORT_RANGE_MS = 2 * 60 * 1000`) is conservative.
+Worth surfacing as a uiSetting with the default 2min for power users
+on deployments with non-default resolve-timeouts:
+
+```
+observability:promListingShortRangeSkipMs   default 120_000
+```
+
+Lazy: skip the uiSetting for Phase 6, hard-code the constant. Add the
+setting later if anyone asks.
+
+#### File-by-file change list
+
+- `server/services/alerting/alert_service.ts` — gate the historical
+  call. ~10 lines diff.
+- `server/services/alerting/__tests__/alert_service.routing.test.ts`
+  — boundary cases: 1min range (skipped), 5min range (skipped),
+  10min range (fired), past-only range (fired).
+
+#### Acceptance criteria
+
+1. **`now-1m → now` picker** — listing fires only `/api/v1/alerts`,
+   no historical query. Upstream call count drops from 2 to 1
+   per render.
+2. **`now-5m → now` picker** — same: only `/api/v1/alerts` fires
+   (within the 2min threshold? no — 5min is > 2min, so the
+   historical call DOES fire). Verify the boundary explicitly in
+   tests.
+3. **`now-1h → now` picker** — both calls fire. No regression.
+4. **Past-only `now-2h..now-1h`** — only the historical call fires
+   (current-firing is skipped because `endIsNow=false`). No change
+   from today.
+5. **Phase 1-5 acceptance criteria still hold.**
+
+#### Risk register
+
+- **Threshold tuning.** If a deployment has Cortex configured with a
+  long `resolve_timeout` (10min instead of 5), the threshold might
+  miss alerts. Mitigation: keep the threshold conservative (2min)
+  so even the longest sane resolve-timeout windows pass through
+  unaffected.
+- **Edge race.** A "now-2m → now" picker at the boundary instant
+  where `range.endMs - range.startMs == 120_000`. The `<=`
+  comparison includes it (skipped); a subsequent `<` would exclude
+  it. Pick `<=` for consistency with "if the range fits within the
+  threshold, skip"; document.
+
+#### Out of scope
+
+- Auto-detecting Cortex's `resolve_timeout` via `/status`. Possible
+  but invasive; defer.
+- Skipping the current-firing call for past-only ranges. Already
+  done at `alert_service.ts:1118-1126` (the `if (range.endIsNow)`
+  gate).
+
+---
+
+### P6.9 — Cap the rule flyout's condition-preview query
+
+`fetchPromPreviewData` (`alert_preview.ts`) executes the rule's full
+PromQL expression to populate the condition-preview chart on every
+flyout open. The expression is **user-defined** — there's no
+cardinality cap. A pathological rule + a wide picker can produce a
+genuinely expensive Cortex query.
+
+#### Why
+
+The flyout's condition preview is a `query_range` against the rule's
+own expression (e.g. `rate(http_requests_total[5m]) > 0.1`). For
+this expression on a 100k-pod cluster with `now-7d → now`:
+
+- 100k label-sets × `7d / step` samples per series.
+- `step` from `computeStep` targets ~200 samples; with 100k series
+  that's 20M samples scanned.
+- Cortex's `-querier.max-samples` (50M default) doesn't trip — but
+  we're paying a substantial fraction of the budget on every flyout
+  open.
+
+This pattern recurs across the codebase:
+
+- Alerts table historical query: P6.7 added caching + P5 had
+  `topk(N, ...)` cap.
+- Timeline endpoint: bounded by `sum by(severity) (...)` (≤ 5
+  series) + `topk(200, ...)` on search.
+
+The condition preview has neither bound. It's the only "execute
+user PromQL" path with no series-cardinality protection.
+
+#### What's lost (and how to backfill)
+
+A user with a high-cardinality rule expression who opens the flyout
+loses the per-instance breakdown. The chart shows "top N series" or
+"sum across series" instead of the full breakdown. For most rules
+(low-cardinality, scalar-y) this is invisible. For pathological
+rules it's a tradeoff: bounded chart vs. potential timeouts.
+
+#### Concrete shape
+
+Two layers of protection, layered:
+
+**1. Wrap the user's expression in `topk(N, ...)`.** N tied to
+chart-rendering needs — say 20 (ECharts can render dozens of series
+without choking; more is unreadable anyway):
+
+```ts
+const cappedQuery = `topk(${PROM_PREVIEW_TOPK}, ${rule.query})`;
+```
+
+This is the dominant safety net. Even if the rule's raw expression
+returns 100k series, the upstream caps at 20.
+
+**2. `withTimeout` on the call itself** (separately from P6.6, which
+covers listing/facet paths). A 5-second per-flyout cap:
+
+```ts
+const PROM_PREVIEW_TIMEOUT_MS = 5_000;
+const samples = await withTimeout(
+  promBackend.queryRange(client, ds, cappedQuery, ...),
+  PROM_PREVIEW_TIMEOUT_MS,
+  'Preview query timed out',
+);
+```
+
+On timeout, the flyout shows an empty preview chart with a "preview
+unavailable" message (don't surface as an error — the rest of the
+flyout is still useful). The flyout already handles `[]` from the
+preview gracefully (`monitor_detail_flyout.tsx`).
+
+**3. Surface a callout when topk truncated.** Detect by comparing the
+returned series count to N; if equal, show a "showing top 20 of
+many series" callout. Same pattern as the alerts-page truncation
+hints.
+
+#### File-by-file change list
+
+- `server/services/alerting/alert_preview.ts` — wrap the expression
+  in `topk(N, ...)`; add timeout. ~20 lines.
+- `server/services/alerting/__tests__/alert_preview.test.ts` —
+  cap-engaged case, timeout case.
+- `public/components/alerting/monitor_detail_flyout.tsx` — render
+  the truncation callout when the preview signals it. ~10 lines.
+
+No route changes.
+
+#### Acceptance criteria
+
+1. **High-cardinality rule** — open a flyout for a rule whose
+   expression returns 1000 series. The preview chart shows ≤ 20
+   series. The truncation callout fires.
+2. **Low-cardinality rule** — open a flyout for a rule with a
+   scalar expression. Chart renders ≤ 20 series (typically just 1);
+   no callout.
+3. **Slow query** — mock a `queryRange` that takes 10s. The flyout
+   shows the empty-preview state after 5s; the rest of the flyout
+   renders normally.
+4. **Phase 1-5 acceptance criteria still hold.**
+
+#### Risk register
+
+- **`topk` semantics.** `topk(N, expr)` returns the top N series by
+  *value*. For an alerting rule whose `expr` is a comparison
+  (`>` / `<` / `==`), the value is 0 or 1 — `topk` returns an
+  arbitrary subset. Workaround: detect comparison expressions and
+  apply `topk` to the LHS instead, or just `count` the result.
+  Conservative: skip the `topk` wrap for comparison expressions and
+  rely on the timeout instead. Document the limitation; defer
+  smarter handling.
+- **Expression parsing.** Detecting "is this a comparison
+  expression?" requires PromQL parsing. Don't do it in Phase 6;
+  apply `topk` to all expressions and accept the comparison edge
+  case as "best-effort cap, may show arbitrary subset for boolean
+  rules."
+
+#### Out of scope
+
+- A full PromQL parser to apply `topk` semantically. Out of scope
+  for an optimization pass.
+- Pre-fetching the preview before the flyout opens. Today's behavior
+  (fetch on open) is fine; the cap makes it bounded.
+
+---
+
+### P6.10 — `?file=` pushdown for workspace-scoped Prom datasources
+
+`fetchRuleGroupsRaw` (`directquery_prometheus_backend.ts:255-261`)
+post-filters by workspace using `g.file.includes(ds.workspaceId!)`
+or label-match on `_workspace`. Push the filter to the upstream via
+`?file=<workspaceId>` when the upstream supports it.
+
+#### Why
+
+For workspace-scoped Prom datasources (the AMP multi-workspace
+shape), every `/api/v1/rules` call returns ALL workspaces' rules,
+then we drop the non-matching ones in JS. That's:
+
+- N× wire bytes (where N is the number of workspaces).
+- Cortex's serialization work for groups we throw away.
+- Cache pollution: the cache value is the union of all workspaces,
+  so a workspace-scoped query returns more than it needs.
+
+`/api/v1/rules?file=<pattern>` was added in Prom 2.40 / Cortex 1.13,
+same release as `?rule_group=&rule_name=`. The existing
+`prom_filter_probe` already tests pushdown for those params; extend
+it (or add a sibling probe) for `?file=`.
+
+#### What's lost (and how to backfill)
+
+Nothing. JS post-filter remains for correctness (same Phase 3
+contract).
+
+#### Concrete shape
+
+Two implementation choices:
+
+**Option A — Extend the existing probe.** Add a `file` test alongside
+the `rule_group=&rule_name=` test:
+
+```ts
+type ProbeResult =
+  | { status: 'pushdown-works'; capabilities: { ruleScope: boolean; fileScope: boolean } }
+  | { status: 'pushdown-ignored' }
+  | { status: 'unknown'; reason: string };
+```
+
+The probe issues a third call with `?file=<knownFile>` and checks
+the response is narrowed. Adds one round-trip per `dsId`'s first
+flyout. Cleaner API.
+
+**Option B — Best-effort with no probe.** Always pass `?file=`; the
+JS post-filter handles upstreams that ignore it. Simpler;
+imperceptible cost on supporting upstreams; same cost as today on
+non-supporting upstreams (we send the param, upstream ignores, we
+get the full payload, we post-filter).
+
+Option B is the better Phase 6 choice. The ground truth is that
+Cortex / AMP / recent Prom support `?file=`; older deployments are
+the rare case. Always-passing it costs nothing and saves payload
+when supported. The probe-based approach has additive cost for the
+probe itself.
+
+```ts
+// directquery_prometheus_backend.ts buildRulesPath
+private buildRulesPath(ds: Datasource, filter?: PromRuleGroupsFilter): string {
+  const params: string[] = [];
+  if (filter?.ruleGroup) params.push(`rule_group=...`);
+  if (filter?.ruleName) params.push(`rule_name=...`);
+  if (filter?.file) params.push(`file=${encodeURIComponent(filter.file)}`);
+  // Workspace-scoped datasource → always push file matcher; backstop
+  // with the existing JS post-filter at fetchRuleGroupsRaw:255-261.
+  else if (ds.workspaceId && ds.workspaceId !== 'default') {
+    params.push(`file=${encodeURIComponent(ds.workspaceId)}`);
+  }
+  // type=alert from P6.2
+  const type = filter?.type ?? 'alert';
+  params.push(`type=${encodeURIComponent(type)}`);
+  return `/api/v1/rules?${params.join('&')}`;
+}
+```
+
+Note `buildRulesPath` doesn't take `ds` today — signature change
+needed. Or thread `workspaceId` via the filter shape.
+
+#### File-by-file change list
+
+- `server/services/alerting/directquery_prometheus_backend.ts` —
+  signature change in `buildRulesPath`; pass `ds` (or
+  `ds.workspaceId`) through. ~15 lines.
+- `server/services/alerting/__tests__/directquery_prometheus_backend.test.ts`
+  — workspace-scoped URL construction. ~20 lines.
+
+No service / route / frontend changes.
+
+#### Acceptance criteria
+
+1. **Workspace-scoped DS (Cortex with `?file=` support)** — open
+   the rules page. Network panel: one
+   `/api/v1/rules?type=alert&file=<workspaceId>` call. Response
+   contains only this workspace's rules; no JS filtering needed
+   (post-filter is a no-op).
+2. **Workspace-scoped DS (older upstream that ignores `?file=`)** —
+   response contains all workspaces. Existing post-filter at
+   `fetchRuleGroupsRaw:255-261` drops the non-matching ones. Page
+   renders correctly.
+3. **Default workspace** — no `?file=` param sent. Same as today.
+4. **Cache key invariance** — workspace-scoped DSs have distinct
+   `dsId`s, so the cache key is unaffected. Unrelated workspaces
+   don't pollute each other's cache.
+5. **Phase 1-5 acceptance criteria still hold.**
+
+#### Risk register
+
+- **Wildcard semantics.** `?file=<workspaceId>` is an exact match in
+  most upstreams. If a deployment encodes the workspace into a
+  *substring* of the file path (e.g.
+  `rules/<workspaceId>/<rulefile>.yml`), exact match doesn't work.
+  Verify the current AMP / Cortex semantics before shipping; if
+  substring is needed, fall back to JS post-filter (which already
+  uses `g.file.includes(ds.workspaceId!)`).
+- **Probe vs no-probe.** Option B doesn't probe, so we don't know
+  whether the param worked. The post-filter catches the failure mode.
+  Acceptable — same as P6.2's `?type=alert`.
+
+#### Out of scope
+
+- Probe-based capability detection. Option A's design is documented
+  for reference but not pursued in Phase 6.
+- Multi-workspace rules access. Today each datasource maps to one
+  workspace; cross-workspace queries aren't a feature.
+
+---
+
+### P6.11 — TBD (placeholder)
 
 (To be filled in.)
 
