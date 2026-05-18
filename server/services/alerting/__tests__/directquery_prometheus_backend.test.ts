@@ -110,6 +110,32 @@ describe('DirectQueryPrometheusBackend', () => {
     expect(path).toContain('rule_name=a%26b');
   });
 
+  it('getRuleGroups pushes workspaceId as ?file= for workspace-scoped DS (P6.10)', async () => {
+    mockClient.transport.request.mockResolvedValueOnce({ body: { data: { groups: [] } } });
+    const wsDs: Datasource = { ...ds, workspaceId: 'ws-abc' };
+    await backend.getRuleGroups(mockClient as never, wsDs);
+    const path = (mockClient.transport.request.mock.calls[0][0] as { path: string }).path;
+    expect(path).toContain('file=ws-abc');
+    expect(path).toContain('type=alert');
+  });
+
+  it('getRuleGroups omits ?file= when workspaceId is the default sentinel (P6.10)', async () => {
+    mockClient.transport.request.mockResolvedValueOnce({ body: { data: { groups: [] } } });
+    const wsDs: Datasource = { ...ds, workspaceId: 'default' };
+    await backend.getRuleGroups(mockClient as never, wsDs);
+    const path = (mockClient.transport.request.mock.calls[0][0] as { path: string }).path;
+    expect(path).not.toContain('file=');
+  });
+
+  it('getRuleGroups respects an explicit filter.file over the workspaceId default (P6.10)', async () => {
+    mockClient.transport.request.mockResolvedValueOnce({ body: { data: { groups: [] } } });
+    const wsDs: Datasource = { ...ds, workspaceId: 'ws-abc' };
+    await backend.getRuleGroups(mockClient as never, wsDs, { file: 'rules/custom.yml' });
+    const path = (mockClient.transport.request.mock.calls[0][0] as { path: string }).path;
+    expect(path).toContain('file=rules%2Fcustom.yml');
+    expect(path).not.toContain('file=ws-abc');
+  });
+
   it('getRuleGroups strips embedded alerts[] by default (listing path)', async () => {
     mockClient.transport.request.mockResolvedValueOnce({
       body: {
@@ -555,6 +581,75 @@ describe('DirectQueryPrometheusBackend', () => {
       const out = await backend.getHistoricalAlerts(mockClient as never, wsDs, { startMs, endMs });
       expect(out.candidates).toHaveLength(1);
       expect(out.candidates[0].labels.alertname).toBe('A');
+    });
+
+    // ----- P6.7: historicalAlertsCache -----
+    describe('historicalAlertsCache (P6.7)', () => {
+      const stubResult = () => ({
+        body: {
+          resultType: 'vector',
+          result: [
+            {
+              metric: { alertname: 'A' },
+              value: [(endMs / 1000).toString(), '1'],
+            },
+          ],
+        },
+      });
+
+      it('reuses the cached response on a second identical call', async () => {
+        mockClient.transport.request.mockResolvedValueOnce(stubResult());
+        await backend.getHistoricalAlerts(mockClient as never, ds, { startMs, endMs });
+        await backend.getHistoricalAlerts(mockClient as never, ds, { startMs, endMs });
+        expect(mockClient.transport.request).toHaveBeenCalledTimes(1);
+      });
+
+      it('absorbs sub-30s drift in start/end via 30s bucketing', async () => {
+        mockClient.transport.request.mockResolvedValueOnce(stubResult());
+        await backend.getHistoricalAlerts(mockClient as never, ds, { startMs, endMs });
+        // Drift by 5s — should still hit the same 30s bucket → cache hit.
+        await backend.getHistoricalAlerts(mockClient as never, ds, {
+          startMs: startMs + 5000,
+          endMs: endMs + 5000,
+        });
+        expect(mockClient.transport.request).toHaveBeenCalledTimes(1);
+      });
+
+      it('issues a fresh upstream call when range drifts past the 30s bucket', async () => {
+        mockClient.transport.request.mockResolvedValueOnce(stubResult());
+        mockClient.transport.request.mockResolvedValueOnce(stubResult());
+        await backend.getHistoricalAlerts(mockClient as never, ds, { startMs, endMs });
+        // Drift by 35s — falls into the next 30s bucket → cache miss.
+        await backend.getHistoricalAlerts(mockClient as never, ds, {
+          startMs: startMs + 35_000,
+          endMs: endMs + 35_000,
+        });
+        expect(mockClient.transport.request).toHaveBeenCalledTimes(2);
+      });
+
+      it('different filter shape ⇒ different cache entry', async () => {
+        mockClient.transport.request.mockResolvedValueOnce(stubResult());
+        mockClient.transport.request.mockResolvedValueOnce(stubResult());
+        await backend.getHistoricalAlerts(mockClient as never, ds, { startMs, endMs });
+        await backend.getHistoricalAlerts(mockClient as never, ds, {
+          startMs,
+          endMs,
+          severity: ['critical'],
+        });
+        expect(mockClient.transport.request).toHaveBeenCalledTimes(2);
+      });
+
+      it('noCache:true bypasses the cache', async () => {
+        mockClient.transport.request.mockResolvedValueOnce(stubResult());
+        mockClient.transport.request.mockResolvedValueOnce(stubResult());
+        await backend.getHistoricalAlerts(mockClient as never, ds, { startMs, endMs });
+        await backend.getHistoricalAlerts(mockClient as never, ds, {
+          startMs,
+          endMs,
+          noCache: true,
+        });
+        expect(mockClient.transport.request).toHaveBeenCalledTimes(2);
+      });
     });
   });
 });

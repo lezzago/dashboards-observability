@@ -90,6 +90,19 @@ export class DirectQueryPrometheusBackend implements PrometheusBackend, Promethe
    */
   readonly alertsCache: TtlCache<string, PromAlert[]>;
   readonly ruleGroupsCache: TtlCache<string, PromRuleGroup[]>;
+  /**
+   * P6.7 — cache for the bounded historical-alerts query. The query is
+   * structurally expensive (`last_over_time(ALERTS{...}[range])` scans
+   * every sample of `ALERTS{...}` over the range at evaluation time);
+   * picker / filter / refresh clicks would otherwise re-issue it every
+   * render. Composite cache key includes filter shape AND a 30s
+   * bucketing of the start/end so a "now"-tracking range stays
+   * cache-hot for ~30s windows. Same 30s TTL as the other caches.
+   */
+  readonly historicalAlertsCache: TtlCache<
+    string,
+    { candidates: PromHistoricalAlertCandidate[]; truncated: boolean }
+  >;
 
   constructor(private readonly logger: Logger) {
     this.logger.info(
@@ -98,6 +111,10 @@ export class DirectQueryPrometheusBackend implements PrometheusBackend, Promethe
     this.filterProbe = createPromFilterProbe(this, logger);
     this.alertsCache = new TtlCache<string, PromAlert[]>(30_000);
     this.ruleGroupsCache = new TtlCache<string, PromRuleGroup[]>(30_000);
+    this.historicalAlertsCache = new TtlCache<
+      string,
+      { candidates: PromHistoricalAlertCandidate[]; truncated: boolean }
+    >(30_000);
   }
 
   // =========================================================================
@@ -243,7 +260,7 @@ export class DirectQueryPrometheusBackend implements PrometheusBackend, Promethe
     filter: PromRuleGroupsFilter | undefined,
     includeAlerts: boolean
   ): Promise<PromRuleGroup[]> {
-    const path = this.buildRulesPath(filter);
+    const path = this.buildRulesPath(filter, ds);
     const data = await this.get<PromRulesApiResponse>(client, ds, path);
 
     let rawGroups: PromRawRuleGroup[];
@@ -365,6 +382,67 @@ export class DirectQueryPrometheusBackend implements PrometheusBackend, Promethe
    * by the timeline endpoint.
    */
   async getHistoricalAlerts(
+    client: AlertingOSClient,
+    ds: Datasource,
+    options: {
+      startMs: number;
+      endMs: number;
+      severity?: UnifiedAlertSeverity[];
+      labels?: Record<string, string[]>;
+      search?: string;
+      topk?: number;
+      noCache?: boolean;
+    }
+  ): Promise<{ candidates: PromHistoricalAlertCandidate[]; truncated: boolean }> {
+    const fetcher = () => this.fetchHistoricalAlertsRaw(client, ds, options);
+    if (options.noCache) {
+      // Refresh-button driven — clear the whole cache so any other in-flight
+      // / cached entry for this dsId is invalidated. The cache is small
+      // (one entry per dsId × filter shape × 30s bucket) so a clear is
+      // cheaper than walking every key.
+      this.historicalAlertsCache.clear();
+      return fetcher();
+    }
+    const cacheKey = this.historicalAlertsCacheKey(ds, options);
+    return this.historicalAlertsCache.get(cacheKey, fetcher);
+  }
+
+  /**
+   * Bucket start/end timestamps to 30s granularity in the cache key so a
+   * "now"-tracking range doesn't bust the cache on every second of drift.
+   * Filter shape (severity/labels/search) is sorted-stringified so two
+   * callers with the same filters hit the same entry regardless of map
+   * iteration order. dsId is the first segment so cache.clear() can be
+   * cheap on refresh — the cache is short-lived (30s TTL) anyway.
+   */
+  private historicalAlertsCacheKey(
+    ds: Datasource,
+    options: {
+      startMs: number;
+      endMs: number;
+      severity?: UnifiedAlertSeverity[];
+      labels?: Record<string, string[]>;
+      search?: string;
+      topk?: number;
+    }
+  ): string {
+    const BUCKET_MS = 30_000;
+    const bucketed = (ms: number) => Math.floor(ms / BUCKET_MS) * BUCKET_MS;
+    const startBucket = bucketed(options.startMs);
+    const endBucket = bucketed(options.endMs);
+    const severitySorted = (options.severity ?? []).slice().sort().join(',');
+    const labelsSorted = options.labels
+      ? Object.entries(options.labels)
+          .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+          .map(([k, vs]) => `${k}=${vs.slice().sort().join('|')}`)
+          .join(';')
+      : '';
+    const search = options.search ?? '';
+    const topk = options.topk ?? PROM_HISTORICAL_ALERTS_TOPK;
+    return `${ds.id}:${startBucket}:${endBucket}:${severitySorted}:${labelsSorted}:${search}:${topk}`;
+  }
+
+  private async fetchHistoricalAlertsRaw(
     client: AlertingOSClient,
     ds: Datasource,
     options: {
@@ -712,11 +790,20 @@ export class DirectQueryPrometheusBackend implements PrometheusBackend, Promethe
   // Helpers
   // =========================================================================
 
-  private buildRulesPath(filter?: PromRuleGroupsFilter): string {
+  private buildRulesPath(filter?: PromRuleGroupsFilter, ds?: Datasource): string {
     const params: string[] = [];
     if (filter?.ruleGroup) params.push(`rule_group=${encodeURIComponent(filter.ruleGroup)}`);
     if (filter?.ruleName) params.push(`rule_name=${encodeURIComponent(filter.ruleName)}`);
-    if (filter?.file) params.push(`file=${encodeURIComponent(filter.file)}`);
+    if (filter?.file) {
+      params.push(`file=${encodeURIComponent(filter.file)}`);
+    } else if (ds?.workspaceId && ds.workspaceId !== 'default') {
+      // P6.10 — workspace-scoped DS: push the workspace id as `?file=` so
+      // the upstream returns only this workspace's rules. Older Prom /
+      // Cortex versions silently ignore the param; the JS post-filter at
+      // fetchRuleGroupsRaw (g.file.includes(ds.workspaceId!) /
+      // _workspace label match) catches that case for correctness.
+      params.push(`file=${encodeURIComponent(ds.workspaceId)}`);
+    }
     // P6.2 — always push `type=alert` on the listing path. The unified
     // mapper drops recording rules anyway (`fetchRulesRaw` keeps only
     // `r.type === 'alerting'`); pushing the filter to the upstream cuts

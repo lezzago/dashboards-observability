@@ -700,6 +700,85 @@ describe('MultiBackendAlertService — routing & list', () => {
   });
 
   // ============================================================================
+  // P6.8 — short "now-X to now" ranges skip the bounded historical call.
+  // /api/v1/alerts already covers the picked window when X ≤ 2min.
+  // ============================================================================
+  describe('short now-anchored range skips historical (P6.8)', () => {
+    it('range now-1m → now: skips getHistoricalAlerts, fires only /api/v1/alerts', async () => {
+      mockPromBackend.getAlerts.mockReset();
+      mockPromBackend.getHistoricalAlerts.mockReset();
+
+      mockOsBackend.getAlerts.mockResolvedValueOnce({
+        alerts: [],
+        totalAlerts: 0,
+        truncated: false,
+      });
+      mockPromBackend.getAlerts.mockResolvedValueOnce([]);
+
+      await svc.getPaginatedAlerts({} as never, {
+        page: 1,
+        pageSize: 50,
+        startTime: 'now-1m',
+        endTime: 'now',
+      });
+
+      expect(mockPromBackend.getAlerts).toHaveBeenCalled();
+      expect(mockPromBackend.getHistoricalAlerts).not.toHaveBeenCalled();
+    });
+
+    it('range now-5m → now: 5min > 2min threshold ⇒ both calls fire', async () => {
+      mockPromBackend.getAlerts.mockReset();
+      mockPromBackend.getHistoricalAlerts.mockReset();
+
+      mockOsBackend.getAlerts.mockResolvedValueOnce({
+        alerts: [],
+        totalAlerts: 0,
+        truncated: false,
+      });
+      mockPromBackend.getAlerts.mockResolvedValueOnce([]);
+      mockPromBackend.getHistoricalAlerts.mockResolvedValueOnce({
+        candidates: [],
+        truncated: false,
+      });
+
+      await svc.getPaginatedAlerts({} as never, {
+        page: 1,
+        pageSize: 50,
+        startTime: 'now-5m',
+        endTime: 'now',
+      });
+
+      expect(mockPromBackend.getAlerts).toHaveBeenCalled();
+      expect(mockPromBackend.getHistoricalAlerts).toHaveBeenCalled();
+    });
+
+    it('past-only range now-2h..now-1h: historical call fires regardless of duration', async () => {
+      mockPromBackend.getAlerts.mockReset();
+      mockPromBackend.getHistoricalAlerts.mockReset();
+
+      mockOsBackend.getAlerts.mockResolvedValueOnce({
+        alerts: [],
+        totalAlerts: 0,
+        truncated: false,
+      });
+      mockPromBackend.getHistoricalAlerts.mockResolvedValueOnce({
+        candidates: [],
+        truncated: false,
+      });
+
+      await svc.getPaginatedAlerts({} as never, {
+        page: 1,
+        pageSize: 50,
+        startTime: 'now-2h',
+        endTime: 'now-1h',
+      });
+
+      expect(mockPromBackend.getAlerts).not.toHaveBeenCalled();
+      expect(mockPromBackend.getHistoricalAlerts).toHaveBeenCalled();
+    });
+  });
+
+  // ============================================================================
   // P6.6 — per-datasource withTimeout on paginated paths.
   // Phase 4 dropped the wrapper; restoring it ensures one slow upstream
   // does not block the whole listing.

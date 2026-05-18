@@ -321,6 +321,11 @@ export interface PrometheusBackend {
       labels?: Record<string, string[]>;
       search?: string;
       topk?: number;
+      /**
+       * Bypass the per-process historical-alerts cache. Refresh-button
+       * driven request bumps thread this through.
+       */
+      noCache?: boolean;
     }
   ): Promise<{ candidates: PromHistoricalAlertCandidate[]; truncated: boolean }>;
 

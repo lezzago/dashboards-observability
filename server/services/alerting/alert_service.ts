@@ -33,6 +33,7 @@ import {
   OSAlert,
   OSMonitor,
   PromAlert,
+  PromHistoricalAlertCandidate,
   PromRuleGroup,
   ProgressiveResponse,
   PaginatedResponse,
@@ -1159,16 +1160,36 @@ export class MultiBackendAlertService {
         }
       }
 
+      // P6.8 — for short "now-X to now" ranges, /api/v1/alerts (which
+      // returns whatever Cortex still has in its resolved-alert
+      // retention window — typically ~5min) already covers the picked
+      // window. Firing the bounded historical query in addition is
+      // wasted Cortex work. Threshold is conservative (2min): well
+      // under any plausible resolve-timeout, so even at the boundary
+      // we don't miss alerts that resolved seconds before the picker
+      // cutoff. Past-only ranges (endIsNow=false) ALWAYS need the
+      // historical call — /api/v1/alerts wasn't fired for them.
+      const SHORT_NOW_RANGE_MS = 2 * 60 * 1000;
+      const isShortNowRange = range.endIsNow && range.endMs - range.startMs <= SHORT_NOW_RANGE_MS;
+
       // (b) Historical candidates — bounded by `topk` cap on the upstream
       // query. Surface `prometheus-search-truncated` if the cap engaged,
-      // mirroring the timeline endpoint's boundary signal.
-      const historical = await this.promBackend.getHistoricalAlerts(client, ds, {
-        startMs: range.startMs,
-        endMs: range.endMs,
-        severity: filterOptions?.severity,
-        labels: filterOptions?.labels,
-        search: filterOptions?.search,
-      });
+      // mirroring the timeline endpoint's boundary signal. `noCache`
+      // bypasses the per-process historicalAlertsCache (P6.7).
+      let historical: { candidates: PromHistoricalAlertCandidate[]; truncated: boolean } = {
+        candidates: [],
+        truncated: false,
+      };
+      if (!isShortNowRange) {
+        historical = await this.promBackend.getHistoricalAlerts(client, ds, {
+          startMs: range.startMs,
+          endMs: range.endMs,
+          severity: filterOptions?.severity,
+          labels: filterOptions?.labels,
+          search: filterOptions?.search,
+          noCache: filterOptions?.noCache === true,
+        });
+      }
       for (const c of historical.candidates) {
         const fp = promAlertFingerprint(c.labels);
         if (merged.has(fp)) continue; // current-firing wins

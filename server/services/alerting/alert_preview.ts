@@ -31,6 +31,28 @@ import {
   substituteMustacheTemplates,
   toEpochMillis,
 } from './alert_utils';
+import { withTimeout } from './timeout_error';
+
+/**
+ * Cap on series cardinality returned by the rule flyout's condition-preview
+ * query. The user's expression is wrapped in `topk(N, ...)` so a
+ * pathological rule (e.g. high-cardinality per-pod expression) doesn't
+ * pay full Cortex `max-samples` cost on every flyout open. The plugin
+ * already collapses to one series client-side, but the upstream cost is
+ * what matters; capping here keeps the chart readable AND bounds Cortex
+ * work.
+ */
+export const PROM_PREVIEW_TOPK = 20;
+
+/**
+ * Per-flyout timeout for the condition-preview query. Even with the topk
+ * cap, a slow upstream evaluating a complex `expr` could keep the flyout
+ * waiting indefinitely. 5s is generous enough for cold queries on a
+ * healthy upstream and short enough that an empty preview chart appears
+ * promptly when the upstream is misbehaving — the rest of the flyout
+ * still renders.
+ */
+const PROM_PREVIEW_TIMEOUT_MS = 5_000;
 
 /**
  * Fetch a time-series for the monitor's query by wrapping it in a date_histogram.
@@ -336,13 +358,27 @@ export async function fetchPromPreviewData(
   if (promBackend?.queryRange) {
     try {
       const metricQuery = query.replace(/\s*(>|<|>=|<=|==|!=)\s*[\d.]+\s*$/, '').trim();
+      // P6.9 — wrap in topk(N, ...) to bound Cortex's series cardinality.
+      // For comparison-shaped expressions (`expr > threshold`) the strip
+      // above already removed the comparator; for boolean `1 or 0`-valued
+      // expressions topk picks an arbitrary subset, which is acceptable
+      // for a bounded preview chart. The plugin already flattens to a
+      // single series after the call; topk's win is on the upstream side.
+      const cappedQuery = `topk(${PROM_PREVIEW_TOPK}, ${metricQuery})`;
       const now = Math.floor(Date.now() / 1000);
       const oneHourAgo = now - 3600;
       const step = 60;
-      const points = await promBackend.queryRange(client, ds, metricQuery, oneHourAgo, now, step);
+      const points = await withTimeout(
+        promBackend.queryRange(client, ds, cappedQuery, oneHourAgo, now, step),
+        PROM_PREVIEW_TIMEOUT_MS,
+        `Preview query timed out after ${PROM_PREVIEW_TIMEOUT_MS}ms`
+      );
       if (points.length > 0) return points;
     } catch {
-      // queryRange not supported (e.g., DirectQuery) — fall through to extraction
+      // queryRange not supported (e.g., DirectQuery) OR timed out —
+      // fall through to embedded-alert extraction. A timeout is not an
+      // error condition for the flyout; the rest of the panels still
+      // render and the preview shows the fallback shape.
     }
   }
 
