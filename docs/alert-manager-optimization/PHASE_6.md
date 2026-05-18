@@ -950,7 +950,283 @@ No service / route / frontend changes.
 
 ---
 
-### P6.5 — TBD (placeholder)
+### P6.5 — Replace the rule flyout's "Alert History" with a sparkline + AM current-active list
+
+The Prom rule flyout's "Alert History" panel today is mislabeled —
+it's currently-active alert instances from `rule.alerts[]`, not
+history. Replace it with a count-over-time sparkline (genuine
+history, bounded cardinality) plus a current-active list sourced
+from Alertmanager (richer than today's payload — adds silence,
+inhibition, receivers).
+
+#### Why
+
+The flyout's "Alert History" panel is built from `rule.alerts[]`
+embedded on the `/api/v1/rules` response (`alert_detail.ts:203-208`).
+That array is **not** historical:
+
+- It contains currently-active alert instances per rule (`firing` +
+  `pending` states).
+- When an alert resolves and Prom's resolved-alert-retention window
+  closes (typically 15min), the entry disappears.
+- One row per active label-set: a rule alerting per-pod across 5000
+  pods returns up to 5000 entries.
+
+Two consequences:
+
+1. **The label is wrong.** Users opening "Alert History" expecting
+   "what fired this week" see an empty panel for any rule that's
+   currently quiet, even if it fired heavily yesterday.
+2. **The cost is bounded by current-active cardinality, not
+   historical volume — but that bound can still be large.** A rule
+   with thousands of currently-active label-sets returns thousands
+   of entries every flyout open. Bounded ≠ cheap.
+
+A genuine "alert history" view needs two different things, and
+neither maps cleanly to today's panel:
+
+- **A sense of how often this rule fired over time.** A scalar count
+  per time bucket, not per-instance.
+- **What's firing right now, with full context.** Including silences
+  / inhibitions / receivers — not just labels and the timestamp the
+  rule first turned on.
+
+This item replaces the single panel with two purpose-built pieces.
+
+#### What's lost (and how to backfill)
+
+The old per-active-instance list — labels, `activeAt`, `value`,
+`message` — is replaced by:
+
+| Old field | New source | Notes |
+|---|---|---|
+| Per-instance row | AM current-active list (Option C) | Same per-label-set granularity for currently-firing alerts. AM retains alerts ~5min past resolution; older instances are not in AM either. |
+| `value` (numeric trigger value) | AM doesn't carry this | Backfill from `rule.alerts[]` via the rules-detail call we already make (the call already runs with `includeAlerts: true` for the existing flyout, so the data is already in hand). Join by label fingerprint. |
+| `activeAt` | AM `startsAt` | Approximation — AM `startsAt` is set when AM first received the alert, close to `activeAt`. Acceptable. |
+| Resolved-alert visibility (was 0–15min for Prom, 0–5min for AM) | Sparkline shows the resolved alerts implicitly via the count drop | Per-instance drilldown for resolved alerts is gone unless the user clicks "Show episode history" (opt-in, Option B from the discussion above — out of scope for P6.5; deferred to a future item). |
+
+Net: users gain a real over-time sense of the rule's activity AND the
+operationally-critical silence/inhibition info; they lose
+per-resolved-instance drilldown for the past 15min. Acceptable
+tradeoff — the panel was already empty for any alert resolved past
+that window.
+
+#### Concrete shape
+
+Two new flyout sub-panels replacing the existing "Alert History"
+accordion:
+
+##### 1. Sparkline (Option D from the discussion)
+
+Bar chart, severity-stacked, over the picker's range. Source:
+
+```
+POST /api/v1/query_range
+{
+  "query": "count(ALERTS{alertname=\"<rule.name>\", alertstate=\"firing\"})",
+  "start": <pickerStart>,
+  "end": <pickerEnd>,
+  "step": <derived>
+}
+```
+
+Cardinality: 1 series. Sample count: `range / step`, target ~200
+samples per the existing convention. Cost is constant in
+historical volume.
+
+When the rule has a per-severity differentiation (rules whose
+`alertname` repeats across severity levels), use:
+
+```
+sum by(severity) (ALERTS{alertname="<rule.name>", alertstate="firing"})
+```
+
+≤ 5 series. Same shape as the alerts-page timeline endpoint
+(`alert_timeline.ts:438-441`). **Reuse the existing
+`fetchPromTimelineBuckets` helper** with the rule's `alertname` as a
+matcher — no new server-side aggregation logic needed.
+
+Renders as a stacked bar chart, 12-24 buckets, same visual style as
+`AlertTimeline` on the alerts page (`alerts_charts.tsx:83-155`). The
+sparkline is read-only (no click-to-drill); future work could wire
+bar-clicks to the alerts table filtered by alertname.
+
+##### 2. Current-active list (Option C from the discussion)
+
+Below the sparkline, a table of alerts currently firing for this
+rule. Source — when AM is available (P6.1's probe says yes):
+
+```
+GET /alertmanager/api/v2/alerts?filter=alertname="<rule.name>"&active=true&silenced=true&inhibited=true
+```
+
+Filter pushdown is native to AM v2 (it accepts label matchers,
+including `alertname`). The response contains:
+
+- Currently firing or recently-resolved-within-AM-retention alerts
+  matching the rule.
+- Silence info on each alert (`status.silencedBy[]`, with full silence
+  records joinable via `getAlertmanagerSilences`).
+- Inhibition info (`status.inhibitedBy[]` listing parent fingerprints).
+- Receiver list (`receivers[].name`).
+- `endsAt` (resolution horizon).
+
+Rendered as a table with columns: labels, severity, started at,
+duration, silenced (badge), inhibited (badge), receivers. Click on
+silenced badge → mini-popup with silence details. Click on receivers →
+the existing routing accordion.
+
+**When AM is unavailable** (P6.1's probe says no): fall back to the
+existing `rule.alerts[]` from the rules-detail call. Render the same
+table without the silence / inhibition / receivers columns. Surface
+the existing `prometheus-alertmanager-unavailable` callout (added by
+P6.1) above the panel so users know they're seeing the legacy view.
+
+##### Per-rule AM matcher generation
+
+The matcher needs to identify the right alertname; the rule's other
+labels (e.g. `severity`) are NOT used as matchers because the
+flyout-as-a-whole is about the rule, not a specific alert instance.
+So:
+
+```ts
+function buildRuleAlertmanagerFilter(rule: PromAlertingRule): string[] {
+  return [`alertname="${escapeAmMatcherValue(rule.name)}"`];
+}
+```
+
+If the rule's `alertname` collides with another rule (rare but
+possible — same alertname in different groups), the AM response will
+include both. Acceptable for the per-rule view; users see what AM
+considers this alertname's instances. Document as a known limitation.
+
+##### File-by-file change list
+
+**Backend / service:**
+
+- `server/services/alerting/directquery_prometheus_backend.ts` —
+  no changes; reuses existing `getAlertmanagerAlerts` (extended by
+  P6.1) and existing `queryRangeMatrix`. ~0 lines.
+- `server/services/alerting/alert_service.ts` — extend
+  `getRuleDetail` to include sparkline buckets + AM current-active
+  alerts in the response. Or — recommended — leave `getRuleDetail`
+  unchanged and add **two new lazy endpoints** the flyout calls
+  separately on mount:
+  - `GET /api/alerting/rules/{dsId}/{ruleId}/sparkline?startTime=&endTime=`
+  - `GET /api/alerting/rules/{dsId}/{ruleId}/active-alerts`
+
+  Lazy keeps the detail call cheap and lets each piece error
+  independently — same pattern as Phase 3's `/routing` endpoint.
+  ~80 lines diff for the two handlers + service methods.
+- `server/routes/alerting/index.ts` — register the two new routes,
+  reuse the existing `validateDateMath` validators. ~30 lines.
+- `server/routes/alerting/handlers.ts` — `handleGetRuleSparkline`
+  and `handleGetRuleActiveAlerts` thin wrappers. ~40 lines.
+
+**Frontend:**
+
+- `public/components/alerting/query_services/alerting_opensearch_service.ts`
+  — `getRuleSparkline` / `getRuleActiveAlerts` methods. ~30 lines.
+- `public/components/alerting/hooks/use_rule_sparkline.ts` (new) —
+  fetches sparkline buckets, mirrors `use_alerts_timeline.ts`'s
+  abort + monotonic-request-id guard. ~80 lines.
+- `public/components/alerting/hooks/use_rule_active_alerts.ts` (new)
+  — fetches AM current-active list. ~80 lines.
+- `public/components/alerting/monitor_detail_flyout.tsx` —
+  replace the existing "Alert History" accordion content with the
+  sparkline (always rendered) + current-active table. ~100 lines.
+- `public/components/alerting/alerts_charts.tsx` — extract a
+  reusable sparkline variant of `AlertTimeline` if shape differs;
+  ideally just pass a single-color spec. ~20 lines.
+
+**Tests:**
+
+- `alert_service.routing.test.ts` — sparkline / active-alerts
+  service paths. AM-available, AM-unavailable, alertname matcher
+  escaping.
+- New hooks `__tests__/`.
+- `monitor_detail_flyout.test.tsx` — assert the new accordion
+  content + the AM-unavailable fallback rendering.
+
+#### Acceptance criteria
+
+1. **Sparkline renders for a rule** — open a Prom rule flyout for a
+   rule that fired several times over the picker window. The
+   sparkline shows bars at the firing times, with severity stacking
+   when applicable. Cold load: one upstream `query_range` call, ≤ 200
+   samples.
+2. **Current-active list (AM available)** — the rule has 3 alerts
+   currently firing, 1 silenced. The table shows 4 rows; the silenced
+   one has a badge. Network panel: one
+   `/alertmanager/api/v2/alerts?filter=alertname=...` call.
+3. **Current-active list (AM unavailable)** — point at a Prom-only
+   deployment without AM. Probe resolves to `unavailable`. The
+   current-active table renders from `rule.alerts[]` (already in the
+   detail response), with no silence / inhibition / receiver columns
+   and the new fallback callout above.
+4. **Sparkline cost is bounded** — open a flyout for a rule that
+   fired 100k times over 7 days (test fixture). Sparkline call is
+   1 series × ~200 samples regardless of historical volume.
+5. **Current-active is bounded by current cardinality, not history**
+   — same rule's current-active table shows however many label-sets
+   are firing right now (typically dozens, not 100k).
+6. **Picker change updates the sparkline** — change the time range;
+   sparkline re-fetches with the new window. Current-active list
+   does NOT re-fetch (it's "right now" by definition).
+7. **Refresh button** — invalidates both calls; sparkline + table
+   re-fetch with `noCache=1` flowing through to the AM call.
+8. **Phase 1-5 acceptance criteria still hold.**
+9. **Phase 6 P6.1 + P6.4 must land first** — P6.5 depends on P6.1
+   for the AM probe + filter shape, and benefits from P6.4's
+   includeAlerts cache for the legacy fallback.
+
+#### Risk register
+
+- **Alertname collision.** Two rules with the same `alertname` in
+  different groups (rare but happens) means the per-rule AM filter
+  returns both rules' alerts mixed together. Mitigation: AM v2's
+  filter param accepts multiple matchers; we could add the rule's
+  `severity` label to disambiguate when set, but most rules don't
+  have a unique-by-severity label-set. Document as a limitation in
+  the flyout copy when collision is detected.
+- **Sparkline cost on huge ranges.** A user picking "now-90d → now"
+  on a rule that fires every minute is 90 × 1440 = ~130k samples
+  before step downsampling. `step` derived from `pickBucketCount`
+  keeps the sample count at ~200 regardless. Verify the sparkline
+  hook uses the same step-derivation as the alerts-page timeline.
+- **AM `resolve_timeout` confuses users.** The current-active list
+  shows alerts up to ~5min after resolution (AM retention). A user
+  may see a row labeled "resolved 4min ago" and wonder why other
+  resolved alerts aren't there. Add a footer note: "Showing
+  currently active and recently resolved (last 5min). For older
+  events, see the sparkline above."
+- **The two new endpoints are flyout-only.** The rules table doesn't
+  use them. Don't add them to the unified listing surface — they're
+  per-rule by design.
+- **Documentation drift.** `ARCHITECTURE.md` §6.3 (rule flyout)
+  describes the current `alerts[]`-driven panel. After P6.5 lands,
+  update §6.3 + §10 (key file index) to mention the two new
+  endpoints + hooks.
+
+#### Out of scope for P6.5
+
+- **"Show episode history" button (Option B from the discussion).**
+  The opt-in `last_over_time` per-episode walk for genuine
+  per-instance history. Defer to a future item; P6.5's sparkline +
+  current-active covers the dominant operator use cases. The episode
+  walk is for forensic deep-dives on specific incidents.
+- **Click-to-drill on sparkline bars.** Wiring sparkline bar-clicks
+  to filter the alerts page table by `alertname=<rule.name>` +
+  bucket time range. Useful but a separate UX change; the sparkline
+  is read-only in P6.5.
+- **OS rule flyout.** The OS path's "Alert History" panel sources
+  from a scoped `getAlerts` call (Phase 1) which is genuine alert
+  history per monitor. The OS history is fine as-is; P6.5 is
+  Prom-only.
+
+---
+
+### P6.6 — TBD (placeholder)
 
 (To be filled in.)
 
