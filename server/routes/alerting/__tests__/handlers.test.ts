@@ -102,7 +102,38 @@ describe('handlers', () => {
   it('handleGetAlertDetail forwards monitorId to the service', async () => {
     mockAlertSvc.getAlertDetail.mockResolvedValueOnce({ id: 'a-1' });
     await handleGetAlertDetail(mockAlertSvc as never, mockClient, 'ds-1', 'a-1', 'mon-42');
-    expect(mockAlertSvc.getAlertDetail).toHaveBeenCalledWith(mockClient, 'ds-1', 'a-1', 'mon-42');
+    expect(mockAlertSvc.getAlertDetail).toHaveBeenCalledWith(
+      mockClient,
+      'ds-1',
+      'a-1',
+      'mon-42',
+      undefined,
+      undefined,
+      undefined
+    );
+  });
+
+  it('handleGetAlertDetail forwards labels + range to the service for Prom episode walks', async () => {
+    mockAlertSvc.getAlertDetail.mockResolvedValueOnce({ id: 'a-1' });
+    await handleGetAlertDetail(
+      mockAlertSvc as never,
+      mockClient,
+      'ds-prom',
+      'a-1',
+      undefined,
+      JSON.stringify({ alertname: 'HighCPU', instance: 'host-1' }),
+      'now-1h',
+      'now'
+    );
+    expect(mockAlertSvc.getAlertDetail).toHaveBeenCalledWith(
+      mockClient,
+      'ds-prom',
+      'a-1',
+      undefined,
+      { alertname: 'HighCPU', instance: 'host-1' },
+      'now-1h',
+      'now'
+    );
   });
 
   it('handleGetRuleDetail returns 404 when not found', async () => {

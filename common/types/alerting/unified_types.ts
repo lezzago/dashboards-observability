@@ -107,7 +107,15 @@ export interface DatasourceWarning {
   datasourceId: string;
   datasourceName: string;
   datasourceType: DatasourceType;
-  error: string;
+  /** Hard error message; absent when the warning is a soft fallback. */
+  error?: string;
+  /**
+   * Soft signal — the request succeeded but the backend took a fallback
+   * path (e.g. `prometheus-search-truncated` when the historical alerts
+   * `topk` cap engaged). Lets the UI surface a "results may be partial"
+   * callout without conflating it with hard errors.
+   */
+  fallback?: DatasourceFetchFallback;
 }
 
 export interface PaginatedResponse<T> {
@@ -175,6 +183,14 @@ export interface UnifiedAlertSummary {
    * to scope `getAlertDetail` to one monitor's alerts (avoids full-scan).
    */
   monitorId?: string;
+  /**
+   * Marks a Prometheus alert that was reconstructed from
+   * `last_over_time(ALERTS{alertstate="firing"}[<range>])` rather than from
+   * the current `/api/v1/alerts` set. Surfaces the "Historical" badge in
+   * the table; precise episode start/end times require opening the detail
+   * flyout, which fetches `ALERTS{<exact label-set>}[<range>]` on demand.
+   */
+  isHistorical?: boolean;
 }
 
 /** Full alert with backend-specific raw data. Use for detail views only. */

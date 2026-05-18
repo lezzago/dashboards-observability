@@ -21,6 +21,7 @@ import {
   Datasource,
   DatasourceService,
   OpenSearchBackend,
+  PromAlertEpisode,
   PromAlertingRule,
   PromRuleGroup,
   PrometheusBackend,
@@ -28,6 +29,8 @@ import {
   UnifiedRule,
 } from '../../../common/types/alerting';
 import type { PromFilterProbe } from './prom_filter_probe';
+import { parseDateMathMs } from '../../../common/services/alerting';
+import type { DirectQueryPrometheusBackend } from './directquery_prometheus_backend';
 import {
   detectMonitorKind,
   osAlertToUnified,
@@ -246,10 +249,13 @@ export async function getPromRuleDetail(
  * full-cluster scan that this function used to do. Without it, the
  * legacy unscoped path is preserved for any direct-API consumer.
  *
- * For Prometheus we no longer scan every firing alert to find one — the
- * matrix is unbounded by alert cardinality and the flyout already has the
- * labels/annotations it needs. Returns `null` so the client renders the
- * Raw Alert Data accordion from the summary's labels/annotations.
+ * Prometheus path: when `labels` + a range are supplied, query
+ * `ALERTS{<labels>}[<range>]` over a single series and walk contiguous
+ * samples to emit per-episode start/end times. This is the deferred work
+ * the listing endpoint avoids — opening the flyout for one row pays the
+ * range-walk cost for that row only. Without `labels`/range we return
+ * null so the flyout falls back to rendering the summary's
+ * labels/annotations.
  */
 export async function getAlertDetail(
   datasourceService: DatasourceService,
@@ -258,7 +264,10 @@ export async function getAlertDetail(
   client: AlertingOSClient,
   dsId: string,
   alertId: string,
-  monitorId?: string
+  monitorId?: string,
+  labels?: Record<string, string>,
+  startTime?: string,
+  endTime?: string
 ): Promise<UnifiedAlert | null> {
   const ds = await datasourceService.get(dsId);
   if (!ds) return null;
@@ -270,7 +279,105 @@ export async function getAlertDetail(
     const summary = osAlertToUnified(alert, ds!.id);
     return { ...summary, raw: alert };
   } else if (ds.type === 'prometheus' && promBackend) {
-    return null;
+    if (!labels || !startTime || !endTime) return null;
+    return fetchPromAlertEpisodes(promBackend, client, ds!, alertId, labels, startTime, endTime);
   }
   return null;
+}
+
+/**
+ * Range-walk a single Prom alert series to emit per-episode start/end
+ * times. One `queryRangeMatrix` call over `ALERTS{<exact label-set>}` —
+ * cardinality is one series, cost is `range / step` samples.
+ *
+ * Step resolution determines how precisely episode boundaries can be
+ * placed; we target ~200 samples across the picked window, clamped to
+ * `[15, 600]` seconds so a 30-day range stays cheap (240 × 6h = 0.7 day
+ * step is too coarse, 5s step over 30d is too expensive).
+ */
+async function fetchPromAlertEpisodes(
+  promBackend: PrometheusBackend,
+  client: AlertingOSClient,
+  ds: Datasource,
+  alertId: string,
+  labels: Record<string, string>,
+  startTime: string,
+  endTime: string
+): Promise<UnifiedAlert | null> {
+  const dq = (promBackend as unknown) as Partial<DirectQueryPrometheusBackend>;
+  if (!dq.queryRangeMatrix) return null;
+
+  const startMs = parseDateMathMs(startTime, /* isEndTime */ false);
+  const endMs = parseDateMathMs(endTime, /* isEndTime */ true);
+  const startSec = Math.floor(startMs / 1000);
+  const endSec = Math.floor(endMs / 1000);
+  const rangeSec = Math.max(1, endSec - startSec);
+  const TARGET_SAMPLES = 200;
+  const stepSec = Math.max(15, Math.min(600, Math.floor(rangeSec / TARGET_SAMPLES) || 15));
+
+  // Build `ALERTS{<labels>}` with each label literally pinned. We only
+  // accept labels whose key matches Prom's identifier grammar; everything
+  // else is dropped. Values are escaped per Prom string-literal rules
+  // (RE2 regex metacharacters then `\`/`"`).
+  const labelMatchers: string[] = [];
+  for (const [k, v] of Object.entries(labels)) {
+    if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(k)) continue;
+    const safe = v.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+    labelMatchers.push(`${k}="${safe}"`);
+  }
+  if (labelMatchers.length === 0) return null;
+  const query = `ALERTS{${labelMatchers.join(', ')}}`;
+
+  const series = await dq.queryRangeMatrix!(client, ds, query, startSec, endSec, stepSec);
+  // queryRangeMatrix returns one entry per metric — for an exact-labels
+  // selector we expect 0 or 1; defensively use the first.
+  const points = series[0]?.values ?? [];
+
+  const episodes = walkPromEpisodes(points, stepSec * 1000);
+  const alertname = labels.alertname || 'Unknown';
+  return {
+    id: alertId,
+    datasourceId: ds.id,
+    datasourceType: 'prometheus',
+    name: alertname,
+    state: episodes.length > 0 ? 'resolved' : 'resolved',
+    severity: 'info',
+    startTime: new Date(startMs).toISOString(),
+    lastUpdated: new Date(endMs).toISOString(),
+    labels,
+    annotations: {},
+    isHistorical: true,
+    raw: ({ episodes, labels, stepSec } as unknown) as UnifiedAlert['raw'],
+  };
+}
+
+/**
+ * Walk a single series's sample stream and emit one episode per
+ * contiguous run of samples. A gap larger than `1.5 × step` terminates
+ * the current run — `last_over_time` lookback aside, that's the standard
+ * "did this stop firing?" heuristic from Prom dashboards.
+ */
+export function walkPromEpisodes(
+  points: Array<{ timestamp: number; value: number }>,
+  stepMs: number
+): PromAlertEpisode[] {
+  if (points.length === 0) return [];
+  const gapThresholdMs = stepMs * 1.5;
+  const episodes: PromAlertEpisode[] = [];
+  let runStart = points[0].timestamp;
+  let runEnd = points[0].timestamp;
+  let runCount = 1;
+  for (let i = 1; i < points.length; i++) {
+    const ts = points[i].timestamp;
+    if (ts - runEnd > gapThresholdMs) {
+      episodes.push({ startMs: runStart, endMs: runEnd, sampleCount: runCount });
+      runStart = ts;
+      runCount = 1;
+    } else {
+      runCount += 1;
+    }
+    runEnd = ts;
+  }
+  episodes.push({ startMs: runStart, endMs: runEnd, sampleCount: runCount });
+  return episodes;
 }

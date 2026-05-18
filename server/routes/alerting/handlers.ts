@@ -472,10 +472,31 @@ export async function handleGetAlertDetail(
   client: AlertingOSClient,
   dsId: string,
   alertId: string,
-  monitorId?: string
+  monitorId?: string,
+  labelsJson?: string,
+  startTime?: string,
+  endTime?: string
 ): Promise<HandlerResult> {
   try {
-    const alert = await alertSvc.getAlertDetail(client, dsId, alertId, monitorId);
+    let labels: Record<string, string> | undefined;
+    if (labelsJson !== undefined) {
+      // Route schema (`isValidLabelsJson`) already validated this — the
+      // parse can't throw, but be defensive in case the schema is bypassed.
+      try {
+        labels = JSON.parse(labelsJson) as Record<string, string>;
+      } catch {
+        labels = undefined;
+      }
+    }
+    const alert = await alertSvc.getAlertDetail(
+      client,
+      dsId,
+      alertId,
+      monitorId,
+      labels,
+      startTime,
+      endTime
+    );
     if (!alert) return { status: 404, body: { error: 'Alert not found' } };
     return { status: 200, body: alert };
   } catch (e: unknown) {

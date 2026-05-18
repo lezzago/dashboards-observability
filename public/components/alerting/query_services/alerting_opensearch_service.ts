@@ -270,11 +270,29 @@ export class AlertingOpenSearchService {
     })) as RuleFacetCountsResponse;
   }
 
-  /** Single alert detail for the flyout. */
-  async getAlertDetail(dsId: string, alertId: string, monitorId?: string): Promise<UnifiedAlert> {
+  /**
+   * Single alert detail for the flyout.
+   *
+   * `labels` + `startTime` + `endTime` are Prom-only — they feed the
+   * server-side range query that walks `ALERTS{<labels>}[<range>]` to
+   * produce per-episode start/end times. OS callers omit them.
+   */
+  async getAlertDetail(
+    dsId: string,
+    alertId: string,
+    monitorId?: string,
+    labels?: Record<string, string>,
+    startTime?: string,
+    endTime?: string
+  ): Promise<UnifiedAlert> {
+    const query: Record<string, string> = {};
+    if (monitorId) query.monitorId = monitorId;
+    if (labels) query.labels = JSON.stringify(labels);
+    if (startTime) query.startTime = startTime;
+    if (endTime) query.endTime = endTime;
     return (await this.requireHttp().get(
       `/api/alerting/alerts/${encodeURIComponent(dsId)}/${encodeURIComponent(alertId)}`,
-      monitorId ? { query: { monitorId } } : undefined
+      Object.keys(query).length > 0 ? { query } : undefined
     )) as UnifiedAlert;
   }
 

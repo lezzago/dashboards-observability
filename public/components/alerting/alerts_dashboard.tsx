@@ -9,6 +9,7 @@
  */
 import React, { useState, useMemo, useEffect } from 'react';
 import {
+  EuiBadge,
   EuiBasicTable,
   EuiBasicTableColumn,
   EuiFlexGroup,
@@ -550,10 +551,19 @@ export const AlertsDashboard: React.FC<AlertsDashboardProps> = ({
       {
         field: 'state',
         name: 'State',
-        width: '140px',
+        width: '180px',
         sortable: true,
-        render: (state: string) => (
-          <EuiHealth color={STATE_HEALTH[state] || 'subdued'}>{state}</EuiHealth>
+        render: (state: string, item: UnifiedAlertSummary) => (
+          <EuiFlexGroup gutterSize="xs" alignItems="center" responsive={false}>
+            <EuiFlexItem grow={false}>
+              <EuiHealth color={STATE_HEALTH[state] || 'subdued'}>{state}</EuiHealth>
+            </EuiFlexItem>
+            {item.isHistorical && (
+              <EuiFlexItem grow={false}>
+                <EuiBadge color="hollow">Historical</EuiBadge>
+              </EuiFlexItem>
+            )}
+          </EuiFlexGroup>
         ),
       },
       {
@@ -880,7 +890,7 @@ export const AlertsDashboard: React.FC<AlertsDashboardProps> = ({
                       title={i18n.translate(
                         'observability.alerting.dashboard.fallbackCallout.title',
                         {
-                          defaultMessage: 'Showing current alerts only',
+                          defaultMessage: 'Some alert data may be incomplete',
                         }
                       )}
                       color="warning"
@@ -890,14 +900,24 @@ export const AlertsDashboard: React.FC<AlertsDashboardProps> = ({
                     >
                       {fallbackHints.map((h, i) => (
                         <p key={i}>
-                          <FormattedMessage
-                            id="observability.alerting.dashboard.fallbackCallout.entry"
-                            defaultMessage="{datasourceName}: historical alert data unavailable; showing currently active alerts instead ({fallback})."
-                            values={{
-                              datasourceName: <strong>{h.datasourceName}</strong>,
-                              fallback: h.fallback,
-                            }}
-                          />
+                          {h.fallback === 'prometheus-search-truncated' ? (
+                            <FormattedMessage
+                              id="observability.alerting.dashboard.fallbackCallout.truncated"
+                              defaultMessage="{datasourceName}: too many distinct alerts in the selected window — only the top results are shown. Narrow the time range or refine your filters."
+                              values={{
+                                datasourceName: <strong>{h.datasourceName}</strong>,
+                              }}
+                            />
+                          ) : (
+                            <FormattedMessage
+                              id="observability.alerting.dashboard.fallbackCallout.entry"
+                              defaultMessage="{datasourceName}: historical alert data unavailable; showing currently active alerts instead ({fallback})."
+                              values={{
+                                datasourceName: <strong>{h.datasourceName}</strong>,
+                                fallback: h.fallback,
+                              }}
+                            />
+                          )}
                         </p>
                       ))}
                     </EuiCallOut>

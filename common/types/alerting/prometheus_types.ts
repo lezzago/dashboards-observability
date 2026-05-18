@@ -43,6 +43,38 @@ export interface PromAlert {
   value: string;
 }
 
+/**
+ * One label-set that fired (`ALERTS{alertstate="firing"}` was non-empty)
+ * somewhere in the picked window. Produced by the cardinality-bounded
+ * historical listing query
+ * `topk(N, last_over_time(ALERTS{alertstate="firing", ...}[<range>]))`,
+ * which collapses each series to a single sample so cost is O(N) instead
+ * of O(N × bucket-count) like the raw matrix.
+ *
+ * Lacks `state` and `activeAt` — those are recoverable only by walking
+ * the per-label-set range query in the detail flyout. The listing-side
+ * `lastSeenMs` is the timestamp of the `last_over_time` sample (i.e. the
+ * most recent moment in the window when the alert was firing).
+ */
+export interface PromHistoricalAlertCandidate {
+  labels: Record<string, string>;
+  /** Epoch milliseconds of the most recent firing sample in the window. */
+  lastSeenMs: number;
+}
+
+/**
+ * One contiguous run of `ALERTS{alertstate="firing"}` samples for a given
+ * label-set. Produced by walking the range query the detail flyout issues;
+ * the gap between `endMs` and the next `startMs` exceeded `1.5 × step`,
+ * which we treat as the alert resolving and re-firing later.
+ */
+export interface PromAlertEpisode {
+  startMs: number;
+  endMs: number;
+  /** Number of samples in the run; useful for "fired N times" displays. */
+  sampleCount: number;
+}
+
 export interface PromAlertingRule {
   name: string;
   query: string;
@@ -270,6 +302,27 @@ export interface PrometheusBackend {
     ds: Datasource,
     options?: PromGetAlertsOptions
   ): Promise<PromAlert[]>;
+
+  /**
+   * Cardinality-bounded historical alerts query. Issues
+   * `topk(N, last_over_time(ALERTS{alertstate="firing", ...}[<range>]))`
+   * as an instant query at `endMs` and returns one candidate per
+   * label-set that fired anywhere in the window. Optional because not
+   * every backend implementation supports DirectQuery PromQL; callers
+   * fall back to current-firing-only when undefined.
+   */
+  getHistoricalAlerts?(
+    client: AlertingOSClient,
+    ds: Datasource,
+    options: {
+      startMs: number;
+      endMs: number;
+      severity?: Array<import('./unified_types').UnifiedAlertSeverity>;
+      labels?: Record<string, string[]>;
+      search?: string;
+      topk?: number;
+    }
+  ): Promise<{ candidates: PromHistoricalAlertCandidate[]; truncated: boolean }>;
 
   // Workspace discovery
   listWorkspaces(client: AlertingOSClient, ds: Datasource): Promise<PrometheusWorkspace[]>;

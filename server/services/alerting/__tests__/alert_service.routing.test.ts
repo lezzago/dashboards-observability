@@ -64,6 +64,12 @@ const mockPromBackend = {
   type: 'prometheus' as const,
   getRuleGroups: jest.fn(async (): Promise<unknown[]> => []),
   getAlerts: jest.fn(async (): Promise<unknown[]> => []),
+  getHistoricalAlerts: jest.fn(
+    async (): Promise<{ candidates: unknown[]; truncated: boolean }> => ({
+      candidates: [],
+      truncated: false,
+    })
+  ),
   listWorkspaces: jest.fn(async (): Promise<unknown[]> => []),
 };
 
@@ -199,44 +205,65 @@ describe('MultiBackendAlertService — routing & list', () => {
     );
   });
 
-  it('range on Prom backend uses legacy /api/v1/alerts and surfaces current-only fallback', async () => {
-    // Phase 1 dropped historical episode reconstruction from the alerts list.
-    // The unified path now always calls `promBackend.getAlerts` and tags the
-    // result with the `prometheus-alerts-current-only` fallback for the UI
-    // callout.
+  it('range + endIsNow on Prom backend calls both /api/v1/alerts and getHistoricalAlerts (no current-only fallback)', async () => {
     mockOsBackend.getAlerts.mockResolvedValueOnce({
       alerts: [],
       totalAlerts: 0,
       truncated: false,
     });
     mockPromBackend.getAlerts.mockResolvedValueOnce([]);
+    mockPromBackend.getHistoricalAlerts.mockResolvedValueOnce({ candidates: [], truncated: false });
     const resolver = jest.fn(async () => ({} as never));
     const response = await svc.getUnifiedAlerts(resolver, {
       startTime: 'now-1h',
       endTime: 'now',
     });
     expect(mockPromBackend.getAlerts).toHaveBeenCalled();
-    // Historical reconstruction is no longer invoked from the alerts list.
-    // Historical reconstruction was removed in Phase 2.
+    expect(mockPromBackend.getHistoricalAlerts).toHaveBeenCalled();
+    // No fallback when the historical path succeeds without truncation.
     const promStatus = response.datasourceStatus.find((s) => s.datasourceId === 'ds-prom');
-    expect(promStatus?.fallback).toBe('prometheus-alerts-current-only');
+    expect(promStatus?.fallback).toBeUndefined();
   });
 
-  it('past-only window also tags the Prom result with current-only fallback', async () => {
+  it('past-only window calls only getHistoricalAlerts; current-firing call is skipped', async () => {
+    mockOsBackend.getAlerts.mockResolvedValueOnce({
+      alerts: [],
+      totalAlerts: 0,
+      truncated: false,
+    });
+    mockPromBackend.getHistoricalAlerts.mockResolvedValueOnce({ candidates: [], truncated: false });
+    const resolver = jest.fn(async () => ({} as never));
+    const response = await svc.getUnifiedAlerts(resolver, {
+      startTime: 'now-2h',
+      endTime: 'now-1h',
+    });
+    expect(mockPromBackend.getAlerts).not.toHaveBeenCalled();
+    expect(mockPromBackend.getHistoricalAlerts).toHaveBeenCalled();
+    const promStatus = response.datasourceStatus.find((s) => s.datasourceId === 'ds-prom');
+    expect(promStatus?.fallback).toBeUndefined();
+  });
+
+  it('falls back to current-only with prometheus-alerts-current-only when backend lacks getHistoricalAlerts', async () => {
     mockOsBackend.getAlerts.mockResolvedValueOnce({
       alerts: [],
       totalAlerts: 0,
       truncated: false,
     });
     mockPromBackend.getAlerts.mockResolvedValueOnce([]);
-    const resolver = jest.fn(async () => ({} as never));
-    const response = await svc.getUnifiedAlerts(resolver, {
-      startTime: 'now-2h',
-      endTime: 'now-1h',
-    });
-    // Historical reconstruction was removed in Phase 2.
-    const promStatus = response.datasourceStatus.find((s) => s.datasourceId === 'ds-prom');
-    expect(promStatus?.fallback).toBe('prometheus-alerts-current-only');
+    // Simulate an older backend implementation that doesn't have getHistoricalAlerts.
+    const original = mockPromBackend.getHistoricalAlerts;
+    (mockPromBackend as { getHistoricalAlerts?: unknown }).getHistoricalAlerts = undefined;
+    try {
+      const resolver = jest.fn(async () => ({} as never));
+      const response = await svc.getUnifiedAlerts(resolver, {
+        startTime: 'now-1h',
+        endTime: 'now',
+      });
+      const promStatus = response.datasourceStatus.find((s) => s.datasourceId === 'ds-prom');
+      expect(promStatus?.fallback).toBe('prometheus-alerts-current-only');
+    } finally {
+      (mockPromBackend as { getHistoricalAlerts: typeof original }).getHistoricalAlerts = original;
+    }
   });
 
   it('undefined range ⇒ legacy path for both backends', async () => {
@@ -292,20 +319,21 @@ describe('MultiBackendAlertService — routing & list', () => {
     ).rejects.toThrow(/Invalid date-math/);
   });
 
-  it('fallback hint propagates into datasourceStatus', async () => {
+  it('fallback hint propagates into datasourceStatus when historical query is truncated', async () => {
     mockOsBackend.getAlerts.mockResolvedValueOnce({
       alerts: [],
       totalAlerts: 0,
       truncated: false,
     });
     mockPromBackend.getAlerts.mockResolvedValueOnce([]);
+    mockPromBackend.getHistoricalAlerts.mockResolvedValueOnce({ candidates: [], truncated: true });
     const resolver = jest.fn(async () => ({} as never));
     const response = await svc.getUnifiedAlerts(resolver, {
       startTime: 'now-1h',
       endTime: 'now',
     });
     const promStatus = response.datasourceStatus.find((s) => s.datasourceId === 'ds-prom');
-    expect(promStatus?.fallback).toBe('prometheus-alerts-current-only');
+    expect(promStatus?.fallback).toBe('prometheus-search-truncated');
   });
 
   // ---- getRuleRouting (Phase 3 / B3) ----
@@ -476,6 +504,135 @@ describe('MultiBackendAlertService — routing & list', () => {
       // Last arg passed to Prom getAlerts contains the noCache hint.
       const lastCall = mockPromBackend.getAlerts.mock.calls.at(-1)! as unknown[];
       expect(lastCall[2]).toMatchObject({ noCache: true });
+    });
+
+    // ---- Prom historical merge ----
+    it('range + endIsNow ⇒ merges current-firing and historical, current-firing wins on overlap', async () => {
+      // Reset the queued-impl history; jest.clearAllMocks() in beforeEach
+      // only clears call records, not the mockResolvedValueOnce queue.
+      // Earlier tests in this describe queue a [] empty-array stub for
+      // getAlerts that they never consume (when backend=opensearch
+      // short-circuits, etc.), and that stale queue entry would otherwise
+      // be returned to this test's getAlerts call, hiding the merge.
+      mockPromBackend.getAlerts.mockReset();
+      mockPromBackend.getHistoricalAlerts.mockReset();
+
+      mockOsBackend.getAlerts.mockResolvedValueOnce({
+        alerts: [],
+        totalAlerts: 0,
+        truncated: false,
+      });
+      // Current-firing: one alert (HighCPU on host-1).
+      mockPromBackend.getAlerts.mockResolvedValueOnce([
+        {
+          labels: { alertname: 'HighCPU', instance: 'host-1', severity: 'critical' },
+          annotations: {},
+          state: 'firing',
+          activeAt: '2026-05-18T12:00:00Z',
+          value: '1',
+        },
+      ]);
+      // Historical: SAME label-set (should be deduped) + a different one.
+      mockPromBackend.getHistoricalAlerts.mockResolvedValueOnce({
+        candidates: [
+          {
+            labels: { alertname: 'HighCPU', instance: 'host-1', severity: 'critical' },
+            lastSeenMs: 1_777_000_000_000,
+          },
+          {
+            labels: { alertname: 'HighMem', instance: 'host-2', severity: 'high' },
+            lastSeenMs: 1_777_000_000_000,
+          },
+        ],
+        truncated: false,
+      });
+
+      const res = await svc.getPaginatedAlerts({} as never, {
+        page: 1,
+        pageSize: 50,
+        startTime: 'now-1h',
+        endTime: 'now',
+      });
+
+      expect(mockPromBackend.getAlerts).toHaveBeenCalled();
+      expect(mockPromBackend.getHistoricalAlerts).toHaveBeenCalled();
+      // Two unique label-sets total (HighCPU collapsed).
+      const promRows = res.results.filter((r) => r.datasourceType === 'prometheus');
+      expect(promRows).toHaveLength(2);
+      const cpuRow = promRows.find((r) => r.name === 'HighCPU')!;
+      const memRow = promRows.find((r) => r.name === 'HighMem')!;
+      // Current-firing wins → state:'active', isHistorical undefined.
+      expect(cpuRow.state).toBe('active');
+      expect(cpuRow.isHistorical).toBeUndefined();
+      // Historical-only → state:'resolved', isHistorical:true.
+      expect(memRow.state).toBe('resolved');
+      expect(memRow.isHistorical).toBe(true);
+    });
+
+    it('range + !endIsNow ⇒ skips current-firing call, historical only', async () => {
+      mockPromBackend.getAlerts.mockReset();
+      mockPromBackend.getHistoricalAlerts.mockReset();
+
+      mockOsBackend.getAlerts.mockResolvedValueOnce({
+        alerts: [],
+        totalAlerts: 0,
+        truncated: false,
+      });
+      mockPromBackend.getHistoricalAlerts.mockResolvedValueOnce({
+        candidates: [
+          {
+            labels: { alertname: 'OldAlert', instance: 'host-3' },
+            lastSeenMs: 1_700_000_000_000,
+          },
+        ],
+        truncated: false,
+      });
+
+      const res = await svc.getPaginatedAlerts({} as never, {
+        page: 1,
+        pageSize: 50,
+        startTime: 'now-2h',
+        endTime: 'now-1h',
+      });
+
+      expect(mockPromBackend.getAlerts).not.toHaveBeenCalled();
+      expect(mockPromBackend.getHistoricalAlerts).toHaveBeenCalled();
+      const promRows = res.results.filter((r) => r.datasourceType === 'prometheus');
+      expect(promRows).toHaveLength(1);
+      expect(promRows[0].isHistorical).toBe(true);
+    });
+
+    it('topk truncation surfaces prometheus-search-truncated fallback', async () => {
+      mockPromBackend.getAlerts.mockReset();
+      mockPromBackend.getHistoricalAlerts.mockReset();
+
+      mockOsBackend.getAlerts.mockResolvedValueOnce({
+        alerts: [],
+        totalAlerts: 0,
+        truncated: false,
+      });
+      mockPromBackend.getAlerts.mockResolvedValueOnce([]);
+      mockPromBackend.getHistoricalAlerts.mockResolvedValueOnce({
+        candidates: [
+          {
+            labels: { alertname: 'A' },
+            lastSeenMs: Date.now(),
+          },
+        ],
+        truncated: true,
+      });
+
+      const res = await svc.getPaginatedAlerts({} as never, {
+        page: 1,
+        pageSize: 50,
+        startTime: 'now-1h',
+        endTime: 'now',
+      });
+
+      const promStatus = res.warnings?.find((w) => w.datasourceId === 'ds-prom');
+      // The warnings array on PaginatedResponse surfaces fallback codes
+      // when present; assert the historical truncation made it through.
+      expect(promStatus?.fallback).toBe('prometheus-search-truncated');
     });
   });
 

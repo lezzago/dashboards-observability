@@ -63,6 +63,7 @@ import {
   osAlertToUnified,
   osMonitorToUnifiedRuleSummary,
   promAlertToUnified,
+  promHistoricalAlertToUnified,
   promRuleToUnified,
   requireDatasource as requireDatasourceImpl,
 } from './alert_utils';
@@ -168,6 +169,23 @@ function parseSort(
   const field = rawField || defaultField;
   const dir = rawDir === 'asc' ? 'asc' : 'desc';
   return { field, dir };
+}
+
+/**
+ * Stable fingerprint over a Prom alert's externally-visible labels. Used
+ * to merge currently-firing rows (`/api/v1/alerts`) with historical
+ * candidates (`topk(N, last_over_time(ALERTS{...}))`) so a re-firing
+ * alert appears once in the table with current-firing identity.
+ *
+ * Drops the synthetic `_workspace` label (added by the workspace-scoping
+ * filter on the backend); two alerts with the same upstream label-set
+ * but coming through different workspace lenses must collapse to one row.
+ */
+export function promAlertFingerprint(labels: Record<string, string>): string {
+  const entries = Object.entries(labels)
+    .filter(([k]) => k !== '_workspace')
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  return entries.map(([k, v]) => `${k}=${v}`).join('\x1f');
 }
 
 export function applyAlertFilters(
@@ -660,9 +678,14 @@ export class MultiBackendAlertService {
       }
     }
 
-    if (allRules.length === 0 && warnings.length === datasources.length && datasources.length > 0) {
+    const ruleHardErrors = warnings.filter((w) => w.error !== undefined);
+    if (
+      allRules.length === 0 &&
+      ruleHardErrors.length === datasources.length &&
+      datasources.length > 0
+    ) {
       throw new Error(
-        `All datasources failed: ${warnings
+        `All datasources failed: ${ruleHardErrors
           .map((w) => `${w.datasourceName}: ${w.error}`)
           .join('; ')}`
       );
@@ -715,6 +738,18 @@ export class MultiBackendAlertService {
       const settled = dsResults[i];
       if (settled.status === 'fulfilled') {
         allAlerts.push(...settled.value.alerts);
+        // Soft signal — request succeeded but the backend took a fallback
+        // path. Surface it as a non-error warning so the UI can render a
+        // "results may be partial" callout without conflating with hard
+        // failures.
+        if (settled.value.fallback) {
+          warnings.push({
+            datasourceId: datasources[i].id,
+            datasourceName: datasources[i].name,
+            datasourceType: datasources[i].type,
+            fallback: settled.value.fallback,
+          });
+        }
       } else {
         this.logger.error(
           `Failed to fetch alerts from ${datasources[i].name} (${datasources[i].id}): ${settled.reason}`
@@ -728,13 +763,14 @@ export class MultiBackendAlertService {
       }
     }
 
+    const hardErrors = warnings.filter((w) => w.error !== undefined);
     if (
       allAlerts.length === 0 &&
-      warnings.length === datasources.length &&
+      hardErrors.length === datasources.length &&
       datasources.length > 0
     ) {
       throw new Error(
-        `All datasources failed: ${warnings
+        `All datasources failed: ${hardErrors
           .map((w) => `${w.datasourceName}: ${w.error}`)
           .join('; ')}`
       );
@@ -797,7 +833,10 @@ export class MultiBackendAlertService {
     client: AlertingOSClient,
     dsId: string,
     alertId: string,
-    monitorId?: string
+    monitorId?: string,
+    labels?: Record<string, string>,
+    startTime?: string,
+    endTime?: string
   ): Promise<UnifiedAlert | null> {
     return getAlertDetailImpl(
       this.datasourceService,
@@ -806,7 +845,10 @@ export class MultiBackendAlertService {
       client,
       dsId,
       alertId,
-      monitorId
+      monitorId,
+      labels,
+      startTime,
+      endTime
     );
   }
 
@@ -1038,13 +1080,71 @@ export class MultiBackendAlertService {
     }
 
     if (ds.type === 'prometheus' && this.promBackend) {
-      const alerts = await this.promBackend.getAlerts(client, ds, {
-        noCache: filterOptions?.noCache === true,
+      // No range supplied → preserve legacy current-firing-only listing.
+      if (!range) {
+        const alerts = await this.promBackend.getAlerts(client, ds, {
+          noCache: filterOptions?.noCache === true,
+        });
+        return { alerts: alerts.map((a) => promAlertToUnified(a, ds.id)) };
+      }
+
+      // Range supplied: emit a single-page listing that merges
+      //   (a) currently-firing alerts (from /api/v1/alerts)
+      //   (b) historical candidates (one per label-set that fired anywhere
+      //       in the window, from `topk(N, last_over_time(ALERTS{...}))`).
+      // Identity: label-set fingerprint. Current-firing wins when both
+      // sides see the same fingerprint, so a single re-firing alert
+      // appears once with `state: 'active'` (and the flyout's deferred
+      // episode walk shows all prior episodes).
+      //
+      // (b) is only safe to do when the backend actually implements
+      // `getHistoricalAlerts`; otherwise we fall back to the legacy
+      // current-only behaviour with the existing callout.
+      if (!this.promBackend.getHistoricalAlerts) {
+        const alerts = await this.promBackend.getAlerts(client, ds, {
+          noCache: filterOptions?.noCache === true,
+        });
+        return {
+          alerts: alerts.map((a) => promAlertToUnified(a, ds.id)),
+          fallback: 'prometheus-alerts-current-only',
+        };
+      }
+
+      const merged = new Map<string, UnifiedAlertSummary>();
+
+      // (a) Current-firing — only meaningful when the picked range
+      // includes "now". A `now-2h..now-1h` window must NOT mix in
+      // /api/v1/alerts (which ignores time entirely).
+      if (range.endIsNow) {
+        const currentAlerts = await this.promBackend.getAlerts(client, ds, {
+          noCache: filterOptions?.noCache === true,
+        });
+        for (const a of currentAlerts) {
+          const summary = promAlertToUnified(a, ds.id);
+          merged.set(promAlertFingerprint(summary.labels), summary);
+        }
+      }
+
+      // (b) Historical candidates — bounded by `topk` cap on the upstream
+      // query. Surface `prometheus-search-truncated` if the cap engaged,
+      // mirroring the timeline endpoint's boundary signal.
+      const historical = await this.promBackend.getHistoricalAlerts(client, ds, {
+        startMs: range.startMs,
+        endMs: range.endMs,
+        severity: filterOptions?.severity,
+        labels: filterOptions?.labels,
+        search: filterOptions?.search,
       });
-      const mapped = alerts.map((a) => promAlertToUnified(a, ds.id));
-      return range
-        ? { alerts: mapped, fallback: 'prometheus-alerts-current-only' }
-        : { alerts: mapped };
+      for (const c of historical.candidates) {
+        const fp = promAlertFingerprint(c.labels);
+        if (merged.has(fp)) continue; // current-firing wins
+        merged.set(fp, promHistoricalAlertToUnified(c, ds.id));
+      }
+
+      return {
+        alerts: Array.from(merged.values()),
+        ...(historical.truncated ? { fallback: 'prometheus-search-truncated' as const } : {}),
+      };
     }
 
     return { alerts: [] };

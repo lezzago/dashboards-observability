@@ -32,6 +32,7 @@ import {
   PrometheusMetricMetadata,
   PromAlert,
   PromAlertingRule,
+  PromHistoricalAlertCandidate,
   PromRecordingRule,
   PromRule,
   PromRuleGroup,
@@ -50,7 +51,22 @@ import {
   PromAlertsApiResponse,
   DatasourceDefinition,
   PromTimeSeriesPoint,
+  UnifiedAlertSeverity,
 } from '../../../common/types/alerting';
+import {
+  buildPromSelectorMatchers,
+  buildAlertStateMatcher,
+  escapePromRegexLiteral,
+} from './alert_timeline';
+
+/**
+ * Cap on series cardinality returned by the historical alerts query. The
+ * `topk(N, ...)` wrapper bounds Cortex's response shape to at most this many
+ * label-sets even when the picked window saw an explosion of distinct alerts;
+ * callers see `truncated: true` so the UI can surface a warning. Mirrors
+ * `PROM_TIMELINE_SEARCH_TOPK` in the timeline path.
+ */
+export const PROM_HISTORICAL_ALERTS_TOPK = 1000;
 
 export interface PromSeriesMatrix {
   metric: Record<string, string>;
@@ -326,6 +342,113 @@ export class DirectQueryPrometheusBackend implements PrometheusBackend, Promethe
       }
     }
     return alerts;
+  }
+
+  /**
+   * Cardinality-bounded historical alerts listing.
+   *
+   * Issues
+   *
+   *   topk(N, last_over_time(ALERTS{alertstate="firing", <matchers>}[<rangeS>s]))
+   *
+   * as a single instant query at `endMs`. Each returned vector entry is one
+   * label-set that fired *somewhere* in `[startMs, endMs]`; the sample
+   * timestamp is the most recent moment within the window when that
+   * label-set was firing. Per-episode (start/end) reconstruction is NOT
+   * done here — that's the deferred per-row range walk in the detail
+   * flyout (`alert_detail.ts`), so listing cost stays O(label-set count).
+   *
+   * `topk(N, ...)` caps the returned series count regardless of how many
+   * distinct label-sets fired; when N rows come back we set
+   * `truncated: true` so the UI can warn the user the table may be
+   * incomplete. Mirrors the `prometheus-search-truncated` boundary used
+   * by the timeline endpoint.
+   */
+  async getHistoricalAlerts(
+    client: AlertingOSClient,
+    ds: Datasource,
+    options: {
+      startMs: number;
+      endMs: number;
+      severity?: UnifiedAlertSeverity[];
+      labels?: Record<string, string[]>;
+      search?: string;
+      topk?: number;
+    }
+  ): Promise<{ candidates: PromHistoricalAlertCandidate[]; truncated: boolean }> {
+    const startSec = Math.floor(options.startMs / 1000);
+    const endSec = Math.floor(options.endMs / 1000);
+    const rangeSec = Math.max(1, endSec - startSec);
+    const topk = options.topk ?? PROM_HISTORICAL_ALERTS_TOPK;
+
+    const stateMatcher = buildAlertStateMatcher(['active']);
+    const extraMatchers = buildPromSelectorMatchers({
+      severity: options.severity,
+      labels: options.labels,
+    });
+    const matcherList = [stateMatcher, ...extraMatchers];
+    const searchTrim = options.search?.trim();
+    if (searchTrim) {
+      matcherList.push(`alertname=~".*${escapePromRegexLiteral(searchTrim)}.*"`);
+    }
+    const selector = `ALERTS{${matcherList.join(', ')}}`;
+    const inner = `last_over_time(${selector}[${rangeSec}s])`;
+    const query = `topk(${topk}, ${inner})`;
+
+    const dqName = this.resolveDqName(ds);
+    const path = `/_plugins/_directquery/_query/${encodeURIComponent(dqName)}`;
+    this.logger.debug(`DirectQuery historical alerts: ${query.substring(0, 80)}...`);
+
+    let resp;
+    try {
+      resp = await client.transport.request({
+        method: 'POST',
+        path,
+        body: {
+          datasource: dqName,
+          query,
+          language: 'PROMQL',
+          options: {
+            queryType: 'instant',
+            time: endSec.toString(),
+          },
+        },
+      });
+    } catch (err) {
+      this.logger.warn(`Historical alerts query failed for ${ds.name}: ${err}`);
+      return { candidates: [], truncated: false };
+    }
+
+    const promResult = this.extractPrometheusResult(resp.body as Record<string, unknown>);
+    if (!promResult) return { candidates: [], truncated: false };
+
+    const rawVector = (promResult.result ?? []) as Array<{
+      metric?: Record<string, string>;
+      value?: unknown[];
+    }>;
+
+    const candidates: PromHistoricalAlertCandidate[] = [];
+    for (const entry of rawVector) {
+      if (!Array.isArray(entry.value) || entry.value.length < 2) continue;
+      const ts = Number(entry.value[0]);
+      if (isNaN(ts)) continue;
+      const labels = entry.metric || {};
+      // Workspace-scoped datasources need the same `_workspace` filter the
+      // current /api/v1/alerts path applies; otherwise an AMP workspace user
+      // would see other workspaces' historical alerts.
+      if (ds.workspaceId && ds.workspaceId !== 'default') {
+        if (labels._workspace !== ds.workspaceId) continue;
+      }
+      candidates.push({
+        labels,
+        lastSeenMs: ts * 1000,
+      });
+    }
+
+    return {
+      candidates,
+      truncated: candidates.length >= topk,
+    };
   }
 
   // =========================================================================

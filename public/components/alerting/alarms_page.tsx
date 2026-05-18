@@ -1381,6 +1381,8 @@ export const AlarmsPage: React.FC<AlarmsPageProps> = ({
         <AlertDetailFlyout
           alert={selectedAlert}
           datasources={datasources}
+          startTime={startTime}
+          endTime={endTime}
           onClose={() => setSelectedAlert(null)}
           onAcknowledge={(id) => {
             handleAcknowledgeAlert(id);

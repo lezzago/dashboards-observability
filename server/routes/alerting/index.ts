@@ -29,7 +29,7 @@ import { DirectQueryPrometheusBackend } from '../../services/alerting/directquer
 import { MonitorMutationService } from '../../services/alerting/monitor_mutation_service';
 import { registerAlertingMutationRoutes } from './mutations';
 import { toErrorBody } from './route_utils';
-import { alertingIdSchema, prometheusLabelNameSchema } from './schema_helpers';
+import { alertingIdSchema, isValidLabelsJson, prometheusLabelNameSchema } from './schema_helpers';
 
 /**
  * Shape of the OSD request-handler context we rely on. `dataSource` is
@@ -659,7 +659,29 @@ export function registerAlertingRoutes(router: IRouter, deps: AlertingRoutesDeps
       path: '/api/alerting/alerts/{dsId}/{alertId}',
       validate: {
         params: schema.object({ dsId: alertingIdSchema, alertId: alertingIdSchema }),
-        query: schema.object({ monitorId: schema.maybe(alertingIdSchema) }),
+        // `labels`, `startTime`, `endTime` are Prom-only and feed the
+        // deferred episode-detection range query
+        // (`ALERTS{<labels>}[<range>]`); omitted by the OS branch.
+        query: schema.object({
+          monitorId: schema.maybe(alertingIdSchema),
+          labels: schema.maybe(
+            schema.string({
+              validate: (v: string) => (isValidLabelsJson(v) ? undefined : 'invalid labels JSON'),
+            })
+          ),
+          startTime: schema.maybe(
+            schema.string({
+              validate: (v: string) =>
+                validateDateMath(v) ? undefined : `invalid date-math: ${v}`,
+            })
+          ),
+          endTime: schema.maybe(
+            schema.string({
+              validate: (v: string) =>
+                validateDateMath(v) ? undefined : `invalid date-math: ${v}`,
+            })
+          ),
+        }),
       },
     },
     async (ctx, req, res) => {
@@ -669,7 +691,10 @@ export function registerAlertingRoutes(router: IRouter, deps: AlertingRoutesDeps
         await getAlertingClient(ctx, req.params.dsId),
         req.params.dsId,
         req.params.alertId,
-        req.query.monitorId
+        req.query.monitorId,
+        req.query.labels,
+        req.query.startTime,
+        req.query.endTime
       );
       return sendResult(res, result);
     }

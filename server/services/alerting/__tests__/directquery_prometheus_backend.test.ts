@@ -448,4 +448,113 @@ describe('DirectQueryPrometheusBackend', () => {
       expect(path).toContain(`match[]=${encodeURIComponent('{alertstate="firing"}')}`);
     });
   });
+
+  // ---- getHistoricalAlerts ----
+  describe('getHistoricalAlerts', () => {
+    const startMs = 1_700_000_000_000;
+    const endMs = startMs + 60 * 60 * 1000; // 1h window
+
+    it('issues a topk(...)/last_over_time(...) instant query and parses one candidate per series', async () => {
+      mockClient.transport.request.mockResolvedValueOnce({
+        body: {
+          resultType: 'vector',
+          result: [
+            {
+              metric: { alertname: 'HighCPU', instance: 'host-1', severity: 'critical' },
+              value: [(endMs / 1000).toString(), '1'],
+            },
+            {
+              metric: { alertname: 'HighMem', instance: 'host-2', severity: 'high' },
+              value: [(endMs / 1000 - 300).toString(), '1'],
+            },
+          ],
+        },
+      });
+
+      const result = await backend.getHistoricalAlerts(mockClient as never, ds, {
+        startMs,
+        endMs,
+      });
+
+      expect(result.candidates).toHaveLength(2);
+      expect(result.candidates[0].labels.alertname).toBe('HighCPU');
+      expect(result.candidates[1].labels.alertname).toBe('HighMem');
+      expect(result.candidates[0].lastSeenMs).toBe(endMs);
+      expect(result.truncated).toBe(false);
+
+      const callBody = mockClient.transport.request.mock.calls[0][0].body as Record<string, string>;
+      expect(callBody.query).toMatch(/^topk\(\d+, last_over_time\(ALERTS\{alertstate="firing"\}\[/);
+      expect((callBody.options as { queryType?: string }).queryType).toBe('instant');
+    });
+
+    it('returns truncated:true when the response saturates the topk cap', async () => {
+      const cap = 3;
+      const result = [];
+      for (let i = 0; i < cap; i++) {
+        result.push({
+          metric: { alertname: `Alert${i}` },
+          value: [(endMs / 1000).toString(), '1'],
+        });
+      }
+      mockClient.transport.request.mockResolvedValueOnce({
+        body: { resultType: 'vector', result },
+      });
+
+      const out = await backend.getHistoricalAlerts(mockClient as never, ds, {
+        startMs,
+        endMs,
+        topk: cap,
+      });
+
+      expect(out.candidates).toHaveLength(cap);
+      expect(out.truncated).toBe(true);
+    });
+
+    it('appends severity / labels / search matchers to the selector', async () => {
+      mockClient.transport.request.mockResolvedValueOnce({
+        body: { resultType: 'vector', result: [] },
+      });
+      await backend.getHistoricalAlerts(mockClient as never, ds, {
+        startMs,
+        endMs,
+        severity: ['critical'],
+        labels: { service: ['cart', 'checkout'] },
+        search: 'High',
+      });
+
+      const callBody = mockClient.transport.request.mock.calls[0][0].body as { query?: string };
+      expect(callBody.query).toContain('severity="critical"');
+      expect(callBody.query).toContain('service=~"cart|checkout"');
+      expect(callBody.query).toContain('alertname=~".*High.*"');
+    });
+
+    it('returns an empty result on upstream error (no throw)', async () => {
+      mockClient.transport.request.mockRejectedValueOnce(new Error('boom'));
+      const out = await backend.getHistoricalAlerts(mockClient as never, ds, { startMs, endMs });
+      expect(out.candidates).toEqual([]);
+      expect(out.truncated).toBe(false);
+    });
+
+    it('drops candidates whose _workspace label does not match a workspace-scoped datasource', async () => {
+      mockClient.transport.request.mockResolvedValueOnce({
+        body: {
+          resultType: 'vector',
+          result: [
+            {
+              metric: { alertname: 'A', _workspace: 'ws-1' },
+              value: [(endMs / 1000).toString(), '1'],
+            },
+            {
+              metric: { alertname: 'B', _workspace: 'ws-2' },
+              value: [(endMs / 1000).toString(), '1'],
+            },
+          ],
+        },
+      });
+      const wsDs: Datasource = { ...ds, workspaceId: 'ws-1' };
+      const out = await backend.getHistoricalAlerts(mockClient as never, wsDs, { startMs, endMs });
+      expect(out.candidates).toHaveLength(1);
+      expect(out.candidates[0].labels.alertname).toBe('A');
+    });
+  });
 });

@@ -340,7 +340,7 @@ async function runDatasourceTimeline(
  * label values are quoted with `\\` and `"` escaped per Prom string
  * literal rules.
  */
-function buildPromSelectorMatchers(options: TimelineFilterOptions): string[] {
+export function buildPromSelectorMatchers(options: TimelineFilterOptions): string[] {
   const matchers: string[] = [];
 
   if (options.severity && options.severity.length > 0) {
@@ -379,7 +379,7 @@ function sanitizePromLabelName(name: string): string {
  * default Prom alerts list path skips `pending` (step-flapping reasons,
  * see Phase 1 commit). An explicit `state[]` filter can override that.
  */
-function buildAlertStateMatcher(state?: TimelineFilterOptions['state']): string {
+export function buildAlertStateMatcher(state?: TimelineFilterOptions['state']): string {
   if (!state || state.length === 0) return 'alertstate="firing"';
   const promStates = new Set<string>();
   for (const s of state) {
@@ -399,7 +399,7 @@ function buildAlertStateMatcher(state?: TimelineFilterOptions['state']): string 
  * and `"`; the regex layer escapes its own metacharacters. We do both,
  * since the input is treated as a literal substring.
  */
-function escapePromRegexLiteral(input: string): string {
+export function escapePromRegexLiteral(input: string): string {
   // Escape RE2 metacharacters first, then the string-literal escape.
   const re = input.replace(/[\\^$.*+?()[\]{}|]/g, '\\$&');
   return re.replace(/\\/g, '\\\\').replace(/"/g, '\\"');

@@ -44,3 +44,29 @@ export const prometheusLabelNameSchema = schema.string({
   validate: (value: string) =>
     LABEL_NAME_PATTERN.test(value) ? undefined : 'must match /^[a-zA-Z_:][a-zA-Z0-9_:]*$/',
 });
+
+/**
+ * Validate a JSON-encoded `Record<string, string>` (Prom alert label-set)
+ * payload. Defense-in-depth: the values flow through to a PromQL string
+ * literal in `escapePromRegexLiteral`, but rejecting malformed JSON or
+ * the wrong shape at the edge is cheaper than catching it deep in the
+ * service layer.
+ */
+const LABELS_JSON_MAX_LENGTH = 8 * 1024;
+export function isValidLabelsJson(value: string): boolean {
+  if (typeof value !== 'string' || value.length > LABELS_JSON_MAX_LENGTH) return false;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    return false;
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return false;
+  const obj = parsed as Record<string, unknown>;
+  for (const [k, v] of Object.entries(obj)) {
+    if (typeof v !== 'string') return false;
+    if (!LABEL_NAME_PATTERN.test(k)) return false;
+    if (k.length > LABEL_NAME_MAX_LENGTH) return false;
+  }
+  return true;
+}

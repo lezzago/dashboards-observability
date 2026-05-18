@@ -50,6 +50,14 @@ const INTERNAL_LABEL_KEYS = new Set([
 export interface AlertDetailFlyoutProps {
   alert: UnifiedAlertSummary;
   datasources: Datasource[];
+  /**
+   * Picked time-range strings (date-math). Forwarded to `getAlertDetail`
+   * for Prom alerts so the server can range-walk
+   * `ALERTS{<labels>}[<range>]` and emit per-episode start/end times.
+   * OS callers can omit; the OS detail path doesn't use them.
+   */
+  startTime?: string;
+  endTime?: string;
   onClose: () => void;
   onAcknowledge: (alertId: string) => void;
 }
@@ -57,6 +65,8 @@ export interface AlertDetailFlyoutProps {
 export const AlertDetailFlyout: React.FC<AlertDetailFlyoutProps> = ({
   alert,
   datasources,
+  startTime,
+  endTime,
   onClose,
   onAcknowledge,
 }) => {
@@ -64,15 +74,24 @@ export const AlertDetailFlyout: React.FC<AlertDetailFlyoutProps> = ({
   const [detailData, setDetailData] = useState<UnifiedAlert | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
 
-  // Detail (raw alert data) is fetched only when the user expands the Raw
-  // Alert Data accordion — opening the flyout makes zero network calls.
-  // Prom returns null from the detail endpoint (no full scan); the accordion
-  // falls back to the summary's labels/annotations.
+  // Detail (raw alert data + Prom episode timeline) is fetched only when
+  // the user expands an accordion that needs it — opening the flyout
+  // makes zero network calls. For OS alerts the detail brings the raw OS
+  // alert document; for Prom, the detail brings episode start/end times
+  // computed from a single per-row range query.
   const fetchDetailIfNeeded = useCallback(() => {
     if (detailData || detailLoading) return;
     setDetailLoading(true);
+    const isProm = alert.datasourceType === 'prometheus';
     osService
-      .getAlertDetail(alert.datasourceId, alert.id, alert.monitorId)
+      .getAlertDetail(
+        alert.datasourceId,
+        alert.id,
+        alert.monitorId,
+        isProm ? alert.labels : undefined,
+        isProm ? startTime : undefined,
+        isProm ? endTime : undefined
+      )
       .then((data: UnifiedAlert) => {
         if (data) setDetailData(data);
       })
@@ -80,7 +99,18 @@ export const AlertDetailFlyout: React.FC<AlertDetailFlyoutProps> = ({
         console.error('Failed to load alert details:', err);
       })
       .finally(() => setDetailLoading(false));
-  }, [alert.datasourceId, alert.id, alert.monitorId, detailData, detailLoading, osService]);
+  }, [
+    alert.datasourceId,
+    alert.datasourceType,
+    alert.id,
+    alert.labels,
+    alert.monitorId,
+    detailData,
+    detailLoading,
+    endTime,
+    osService,
+    startTime,
+  ]);
 
   // Merge detail data over summary — detail has `raw` and potentially richer labels
   const alertData = detailData ? { ...alert, ...detailData } : alert;
@@ -329,6 +359,28 @@ export const AlertDetailFlyout: React.FC<AlertDetailFlyoutProps> = ({
 
         <EuiSpacer size="m" />
 
+        {/* Episodes — Prom-only; populated by the deferred range walk. */}
+        {alert.datasourceType === 'prometheus' && (
+          <>
+            <EuiAccordion
+              id={`alertEpisodes-${alert.id}`}
+              buttonContent={<strong>Alert episodes</strong>}
+              initialIsOpen={!!alert.isHistorical}
+              paddingSize="m"
+              onToggle={(isOpen) => {
+                if (isOpen) fetchDetailIfNeeded();
+              }}
+            >
+              {detailLoading ? (
+                <EuiLoadingContent lines={4} />
+              ) : (
+                <PromEpisodesList raw={detailData?.raw} />
+              )}
+            </EuiAccordion>
+            <EuiSpacer size="m" />
+          </>
+        )}
+
         {/* Raw Data */}
         <EuiAccordion
           id={`alertRaw-${alert.id}`}
@@ -553,3 +605,37 @@ function getSuggestedActions(alert: UnifiedAlertSummary): SuggestedAction[] {
 
   return actions;
 }
+
+/**
+ * Render the per-episode timeline produced by the server-side range walk.
+ * `raw` is the opaque payload from `getAlertDetail`; for Prom it carries
+ * `{ episodes: PromAlertEpisode[], stepSec }`. When the upstream returned
+ * no samples (alert never fired in the picked window) the episodes array
+ * is empty.
+ */
+const PromEpisodesList: React.FC<{ raw: unknown }> = ({ raw }) => {
+  const episodes =
+    (raw as { episodes?: Array<{ startMs: number; endMs: number; sampleCount: number }> })
+      ?.episodes ?? [];
+  if (episodes.length === 0) {
+    return (
+      <EuiText size="s" color="subdued">
+        No firing samples found in the selected time range.
+      </EuiText>
+    );
+  }
+  return (
+    <>
+      {episodes.map((ep, i) => {
+        const durationMs = ep.endMs - ep.startMs;
+        const minutes = Math.max(1, Math.round(durationMs / 60_000));
+        return (
+          <EuiText key={`${ep.startMs}-${i}`} size="s">
+            <strong>#{i + 1}</strong> {new Date(ep.startMs).toLocaleString()} →{' '}
+            {new Date(ep.endMs).toLocaleString()} ({minutes} min, {ep.sampleCount} samples)
+          </EuiText>
+        );
+      })}
+    </>
+  );
+};

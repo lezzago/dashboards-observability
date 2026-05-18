@@ -35,6 +35,7 @@ import {
   OSMonitor,
   PromAlert,
   PromAlertingRule,
+  PromHistoricalAlertCandidate,
   PrometheusBackend,
   UnifiedAlertSeverity,
   UnifiedAlertState,
@@ -299,6 +300,37 @@ export function promAlertToUnified(a: PromAlert, dsId: string): UnifiedAlertSumm
     lastUpdated: a.activeAt,
     labels: a.labels,
     annotations: a.annotations,
+  };
+}
+
+/**
+ * Map a `PromHistoricalAlertCandidate` (one label-set that fired somewhere
+ * in the picked window) to a unified summary. The listing-side row is
+ * marked `isHistorical: true` and `state: 'resolved'`; precise per-episode
+ * timing isn't known until the detail flyout fetches the full
+ * `ALERTS{<labels>}` range.
+ *
+ * `startTime` is set to `lastSeenMs` because the listing query collapses
+ * the series to a single sample. Treat it as "last firing time" — the
+ * flyout's episode timeline will show the actual range of episodes.
+ */
+export function promHistoricalAlertToUnified(
+  candidate: PromHistoricalAlertCandidate,
+  dsId: string
+): UnifiedAlertSummary {
+  const lastSeenIso = new Date(candidate.lastSeenMs).toISOString();
+  return {
+    id: `${dsId}-${candidate.labels.alertname || 'unknown'}-${candidate.labels.instance || ''}`,
+    datasourceId: dsId,
+    datasourceType: 'prometheus',
+    name: candidate.labels.alertname || 'Unknown',
+    state: 'resolved',
+    severity: promSeverityFromLabels(candidate.labels),
+    startTime: lastSeenIso,
+    lastUpdated: lastSeenIso,
+    labels: candidate.labels,
+    annotations: {},
+    isHistorical: true,
   };
 }
 
