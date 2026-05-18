@@ -452,6 +452,50 @@ describe('DirectQueryPrometheusBackend', () => {
       expect(mockClient.transport.request.mock.calls.length).toBe(firstCalls + 1);
     });
 
+    // ----- P6.4: second TtlCache for the includeAlerts shape -----
+    describe('ruleGroupsWithAlertsCache (P6.4)', () => {
+      it('successive includeAlerts:true calls reuse the populated cache', async () => {
+        mockClient.transport.request.mockResolvedValue({
+          body: { data: { groups: [{ name: 'g1', file: 'f', interval: 60, rules: [] }] } },
+        });
+        await backend.getRuleGroups(mockClient as never, ds, undefined, { includeAlerts: true });
+        const firstCalls = mockClient.transport.request.mock.calls.length;
+        await backend.getRuleGroups(mockClient as never, ds, undefined, { includeAlerts: true });
+        expect(mockClient.transport.request.mock.calls.length).toBe(firstCalls);
+      });
+
+      it('listing-cache and includeAlerts-cache do NOT share entries', async () => {
+        mockClient.transport.request.mockResolvedValue({
+          body: { data: { groups: [{ name: 'g1', file: 'f', interval: 60, rules: [] }] } },
+        });
+        // Listing-shape call populates ruleGroupsCache.
+        await backend.getRuleGroups(mockClient as never, ds);
+        const afterListing = mockClient.transport.request.mock.calls.length;
+        // First includeAlerts call cannot reuse the listing cache (different
+        // value shape) — must hit the upstream.
+        await backend.getRuleGroups(mockClient as never, ds, undefined, { includeAlerts: true });
+        expect(mockClient.transport.request.mock.calls.length).toBe(afterListing + 1);
+      });
+
+      it('noCache invalidates BOTH caches', async () => {
+        mockClient.transport.request.mockResolvedValue({
+          body: { data: { groups: [{ name: 'g1', file: 'f', interval: 60, rules: [] }] } },
+        });
+        // Populate both caches.
+        await backend.getRuleGroups(mockClient as never, ds);
+        await backend.getRuleGroups(mockClient as never, ds, undefined, { includeAlerts: true });
+        const beforeRefresh = mockClient.transport.request.mock.calls.length;
+        // Refresh-button bump on the listing path. Must clear both.
+        await backend.getRuleGroups(mockClient as never, ds, undefined, { noCache: true });
+        // Subsequent flyout-shape call after the noCache bump must be a
+        // cache miss because both caches were invalidated.
+        await backend.getRuleGroups(mockClient as never, ds, undefined, { includeAlerts: true });
+        // Two upstream calls after the refresh: one for the listing
+        // (driven by noCache), one for the flyout (cache miss).
+        expect(mockClient.transport.request.mock.calls.length).toBe(beforeRefresh + 2);
+      });
+    });
+
     it('appends `match[]={severity="critical"}` when labels filter is used', async () => {
       mockClient.transport.request.mockResolvedValue({
         body: { data: { groups: [] } },

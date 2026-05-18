@@ -91,6 +91,22 @@ export class DirectQueryPrometheusBackend implements PrometheusBackend, Promethe
   readonly alertsCache: TtlCache<string, PromAlert[]>;
   readonly ruleGroupsCache: TtlCache<string, PromRuleGroup[]>;
   /**
+   * P6.4 — second cache for the rule-detail flyout's includeAlerts
+   * shape. ruleGroupsCache (above) only caches the listing-path shape
+   * (alerts[] stripped). Without a separate cache, every flyout open
+   * on a `pushdown-ignored` upstream re-fetches the full /api/v1/rules
+   * listing because the cache value type can't satisfy a caller that
+   * needs alerts[] populated. Two typed caches keep call-site casts
+   * out of the hot path; both share the same 30s TTL so refresh
+   * symmetry is straightforward (noCache invalidates both).
+   *
+   * Memory cost is bounded by dsId count × 2 caches × full payload —
+   * acceptable for a Node process; if it ever isn't, add an LRU bound
+   * to TtlCache. The two caches don't share entries because their
+   * value shapes differ (alerts[] populated vs stripped).
+   */
+  readonly ruleGroupsWithAlertsCache: TtlCache<string, PromRuleGroup[]>;
+  /**
    * P6.7 — cache for the bounded historical-alerts query. The query is
    * structurally expensive (`last_over_time(ALERTS{...}[range])` scans
    * every sample of `ALERTS{...}` over the range at evaluation time);
@@ -111,6 +127,7 @@ export class DirectQueryPrometheusBackend implements PrometheusBackend, Promethe
     this.filterProbe = createPromFilterProbe(this, logger);
     this.alertsCache = new TtlCache<string, PromAlert[]>(30_000);
     this.ruleGroupsCache = new TtlCache<string, PromRuleGroup[]>(30_000);
+    this.ruleGroupsWithAlertsCache = new TtlCache<string, PromRuleGroup[]>(30_000);
     this.historicalAlertsCache = new TtlCache<
       string,
       { candidates: PromHistoricalAlertCandidate[]; truncated: boolean }
@@ -227,15 +244,32 @@ export class DirectQueryPrometheusBackend implements PrometheusBackend, Promethe
     const includeAlerts = options?.includeAlerts === true;
     const fetcher = async () => this.fetchRuleGroupsRaw(client, ds, filter, includeAlerts);
 
-    // Cache only the listing path (no filter, no includeAlerts). Detail
-    // flyout calls pass a `ruleGroup`+`ruleName` filter and bypass the
-    // cache implicitly because the cache key would collide with the
-    // listing entries; keeping cacheing scoped to the unfiltered listing
-    // also avoids stale-result bugs when the probe says pushdown works
-    // and one filter result poisons another's read.
-    const cacheable = !options?.noCache && !includeAlerts && this.isCacheableRuleFilter(filter);
+    // P6.4 — refresh-button bumps must invalidate BOTH caches for this
+    // dsId, not just the one matching the current call's shape. The
+    // listing-path call (refresh button) flows through here without
+    // includeAlerts, but a rule-detail flyout open right after the
+    // refresh should pay the upstream call too — otherwise the user's
+    // refresh wouldn't propagate to the flyout.
+    if (options?.noCache) {
+      this.ruleGroupsCache.invalidate(ds.id);
+      this.ruleGroupsWithAlertsCache.invalidate(ds.id);
+    }
+
+    // Cache only the no-filter listing shape per cache (rule-name /
+    // rule-group / file / labels / state filters bypass entirely; see
+    // isCacheableRuleFilter).
+    //
+    // Two typed caches share the same dsId key but differ on value
+    // shape: ruleGroupsCache stores alerts[]-stripped groups (listing
+    // path), ruleGroupsWithAlertsCache stores alerts[]-populated groups
+    // (rule-detail flyout's includeAlerts call). The first flyout open
+    // after a listing load is still a cache miss because the two
+    // caches don't share entries; subsequent flyout opens within the
+    // 30s window reuse the populated cache.
+    const cacheable = !options?.noCache && this.isCacheableRuleFilter(filter);
     if (!cacheable) return fetcher();
-    return this.ruleGroupsCache.get(ds.id, fetcher);
+    const cache = includeAlerts ? this.ruleGroupsWithAlertsCache : this.ruleGroupsCache;
+    return cache.get(ds.id, fetcher);
   }
 
   /**
