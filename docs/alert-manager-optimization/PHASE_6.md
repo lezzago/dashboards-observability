@@ -425,13 +425,329 @@ Tests:
 
 ---
 
-### P6.2 — TBD (placeholder)
+### P6.2 — Always pass `?type=alert` on the Prom rules listing
 
-(To be filled in.)
+Pass `?type=alert` unconditionally on the listing-path call to
+`/api/v1/rules` so recording rules don't bloat the response.
+
+#### Why
+
+`fetchRulesRaw` (`alert_service.ts:1173-1182`) walks the response and
+keeps only `r.type === 'alerting'`:
+
+```ts
+for (const r of g.rules) {
+  if (r.type === 'alerting') results.push(promRuleToUnified(r, g.name, ds.id));
+}
+```
+
+Recording rules are dropped at the JS layer. But the upstream
+`/api/v1/rules` call we make today doesn't pass `?type=alert` on cold
+load — `buildPromRuleFilter` (`alert_service.ts:1097-1108`) only
+returns a filter when the user has a severity / state / labels filter
+applied, and `?type=alert` rides along on that filter object.
+
+In production deployments that use recording rules to pre-aggregate
+metrics for dashboards (the common shape), recording rules outnumber
+alerting rules by ~10×. The cold-load wire payload is therefore
+~90% data we throw away.
+
+Pushing `?type=alert` to the upstream:
+- Reduces wire bytes proportionally.
+- Reduces Cortex's serialization work (fewer rules to render).
+- Reduces the `mapRule` cost on the plugin side (we map only what we'll
+  keep).
+
+#### What's lost (and how to backfill)
+
+Nothing. The JS post-filter at line 1181 keeps the correctness
+contract: even on a Cortex / Prom version that silently ignores
+`?type=alert` (older than Prom 2.40 / Cortex 1.13), the same
+`r.type === 'alerting'` filter runs and produces the same result. So
+the win is purely a payload reduction on supporting upstreams; on
+non-supporting upstreams the behavior is unchanged.
+
+This is a strict subset of the Phase 3 filter-probe pattern: the probe
+exists to gate `?rule_group=&rule_name=` pushdown (where wrong-result
+risk exists if an upstream half-honors filters); `?type=alert` has no
+wrong-result mode — it's accept-or-ignore. So no probe needed.
+
+#### Concrete shape
+
+`buildRulesPath` in `directquery_prometheus_backend.ts:592-616` is the
+single point that constructs the URL. Today:
+
+```ts
+private buildRulesPath(filter?: PromRuleGroupsFilter): string {
+  if (!filter) return '/api/v1/rules';
+  const params: string[] = [];
+  if (filter.ruleGroup) params.push(`rule_group=${encodeURIComponent(filter.ruleGroup)}`);
+  if (filter.ruleName) params.push(`rule_name=${encodeURIComponent(filter.ruleName)}`);
+  if (filter.file) params.push(`file=${encodeURIComponent(filter.file)}`);
+  if (filter.type) params.push(`type=${encodeURIComponent(filter.type)}`);
+  return params.length === 0 ? '/api/v1/rules' : `/api/v1/rules?${params.join('&')}`;
+}
+```
+
+Change so the listing path always sends `type=alert`. Two options:
+
+**Option A:** unconditionally add `type=alert` in `buildRulesPath` when
+`filter?.type` is undefined. Keeps the call-site signatures clean.
+Risk: rule-detail callers that pass `{ includeAlerts: true }` without
+a `type` would also get `type=alert` — fine, since rule-detail only
+cares about alerting rules anyway.
+
+**Option B:** make `fetchRulesRaw` always construct a `{ type: 'alert' }`
+filter even on cold load. More explicit at the call site; doesn't
+change the backend default.
+
+Go with **Option A.** It's a one-line change in `buildRulesPath`, and
+it makes the cache key invariant correctly: the unfiltered listing
+fetches a strictly smaller set than today's, but `getRuleGroups`'s
+cache key is still `dsId` only (`isCacheableRuleFilter` accepts a
+`type`-only filter at line 217-221). One cache slot, smaller payload.
+
+```ts
+private buildRulesPath(filter?: PromRuleGroupsFilter): string {
+  const params: string[] = [];
+  if (filter?.ruleGroup) params.push(`rule_group=${encodeURIComponent(filter.ruleGroup)}`);
+  if (filter?.ruleName) params.push(`rule_name=${encodeURIComponent(filter.ruleName)}`);
+  if (filter?.file) params.push(`file=${encodeURIComponent(filter.file)}`);
+  // type=alert is the unified-listing contract: we never render recording
+  // rules (the JS post-filter at fetchRulesRaw drops them anyway), so
+  // pushing the filter to the upstream cuts ~90% of payload on
+  // recording-rule-heavy deployments. Older upstreams that don't honor
+  // the param silently return the full set; the post-filter still
+  // produces the correct output.
+  const type = filter?.type ?? 'alert';
+  params.push(`type=${encodeURIComponent(type)}`);
+  return `/api/v1/rules?${params.join('&')}`;
+}
+```
+
+The `prom_filter_probe` baseline call at `prom_filter_probe.ts:51`
+already passes `{ type: 'alert' }`, so the probe shape is unaffected.
+
+#### File-by-file change list
+
+- `server/services/alerting/directquery_prometheus_backend.ts` —
+  `buildRulesPath` always emits `type=`. ~5 lines diff.
+- `server/services/alerting/__tests__/directquery_prometheus_backend.test.ts`
+  — update URL-construction tests. ~10 lines diff.
+
+No service / route / frontend changes.
+
+#### Acceptance criteria
+
+1. **Cold load on a recording-rule-heavy deployment** — open the rules
+   page with a Prom datasource that has 1k alerting rules and 10k
+   recording rules. Network panel: one call to
+   `/_plugins/_directquery/_resources/{ds}/api/v1/rules?type=alert`.
+   Response is the alerting-only set; the page renders correctly.
+2. **Behavior on older upstreams** — point at a Prom < 2.40 / Cortex <
+   1.13 (or simulate via mock that ignores the param). Response
+   includes recording rules; JS post-filter drops them. Page renders
+   identically.
+3. **Cache reuse** — listing call fires, then opening the rules page
+   again within 30s reuses the cached response. Detail flyout opens
+   on a rule visible in the listing — uses the same cached set when
+   the probe says pushdown is unavailable, OR sends a scoped
+   `?rule_group=&rule_name=&type=alert` when pushdown works (Phase 3
+   path unchanged).
+4. **Phase 1-5 acceptance criteria still hold.**
+
+#### Risk register
+
+- **None significant.** This is a pure narrow-the-upstream-set change
+  with a correctness-equivalent JS post-filter as backstop.
+
+#### Out of scope
+
+- Pushing `?type=` from elsewhere in the codebase. The probe and
+  detail path already pass it; this item is about the listing path.
+- `?file=` pushdown for workspace-scoped datasources — that's a
+  separate item (would need its own probe, since older upstreams
+  may not honor it).
 
 ---
 
-### P6.3 — TBD (placeholder)
+### P6.3 — Strip `query` and trim `description` from the rules listing payload
+
+Drop the heavy fields from `UnifiedRuleSummary` on the listing path.
+The rules table doesn't render them; the rule flyout fetches them on
+demand via `getRuleDetail`.
+
+#### Why
+
+`promRuleToUnified` (`alert_utils.ts`) populates every
+`UnifiedRuleSummary` with:
+- `query` — the rule's full PromQL expression. Often 100-300 chars.
+- `description` — pulled from `annotations.description` /
+  `annotations.summary`. Often 200-1000 chars including templated
+  Go expressions.
+
+Neither is rendered on the rules page. The table columns
+(`monitors_table_columns.tsx`) show: name, severity, status, health,
+monitor type, eval interval, last triggered. The query and full
+description only surface in the **rule detail flyout**, which already
+fetches the full `UnifiedRule` shape via
+`/api/alerting/rules/{dsId}/{ruleId}` on flyout open
+(`monitor_detail_flyout.tsx:215-234`).
+
+So we're paying wire bytes for the listing on every cold load and
+every refresh, when the bytes only matter when the user opens a
+specific rule. For 10k rules at ~500 bytes of `query` +
+`description` per row, that's **~5 MB of payload that nothing renders**.
+
+The OS path has the same issue (the OS `_search` returns full triggers
+including their condition scripts), but the win is smaller because OS
+doesn't have annotations and the trigger script is the actionable
+display. Scope this item to **the Prom path**, where the win is
+clearest and the alternative payload (load on flyout open) already
+exists.
+
+#### What's lost (and how to backfill)
+
+The mapped `UnifiedRuleSummary` for Prom on the listing path drops:
+- `query: ''` — empty string instead of the PromQL expression.
+- `description: ''` (or a truncated stub like the first 120 chars of
+  `annotations.summary`).
+
+Anywhere the listing-path consumer reads these fields and renders
+them, we'd lose data. Auditing the consumers:
+
+| Consumer | Reads `query`? | Reads `description`? |
+|---|---|---|
+| `monitors_table_columns.tsx` | No | No (only the `name` and a tooltip; the tooltip uses `description` if present — see below) |
+| `alarms_page.tsx` `fetchRules` callback | No | No |
+| `useRulesFacets` / `computeRuleFacets` | No | No |
+| `monitor_detail_flyout.tsx` | Yes — but it consumes from `getRuleDetail`'s response, not from the listing summary it was opened from | Yes — same |
+| `mapRuleFilters` / `applyRuleFilters` | No | No (`search` matches over `name` + label values, not `description` or `query`) |
+
+The one ambiguous case is **the table tooltip**. Verify before shipping
+whether the table renders a tooltip from `description` on the row;
+if it does, either keep the first 120 chars of `description`
+(reasonable tooltip length) or drop the tooltip and rely on the
+flyout for full text. Recommendation: **truncate to 120 chars on the
+listing**; full text comes from the flyout.
+
+`query` has no tooltip / preview consumer on the listing — drop it
+entirely.
+
+#### Concrete shape
+
+Two seams to choose from, mirroring Phase 3's analysis for `alerts[]`:
+
+**Option A — Strip in `promRuleToUnified`** (the mapper). Add an
+optional `lightweight` flag; when `true`, set `query: ''` and
+truncate `description`. Cleanest.
+
+**Option B — Strip in `mapRule`** (the upstream parser). Same
+location Phase 3 used for `alerts[]` — but the mapping from
+`PromAlertingRule` → `UnifiedRuleSummary` happens in `alert_utils.ts`,
+not in `mapRule`. So this option doesn't quite apply; `mapRule`
+produces the intermediate `PromAlertingRule` shape.
+
+Go with **Option A.** Add `{ lightweight?: boolean }` to
+`promRuleToUnified`'s signature, pass `true` from `fetchRulesRaw`,
+leave the detail path's call (which goes through `getPromRuleDetail`
+in `alert_detail.ts:163`) using the default (full).
+
+```ts
+// alert_utils.ts
+export function promRuleToUnified(
+  rule: PromAlertingRule,
+  groupName: string,
+  dsId: string,
+  options?: { lightweight?: boolean },
+): UnifiedRuleSummary {
+  const desc =
+    rule.annotations.description ||
+    rule.annotations.summary ||
+    '';
+  const truncatedDesc = options?.lightweight
+    ? (desc.length > 120 ? desc.slice(0, 117) + '…' : desc)
+    : desc;
+  return {
+    ...existingFields,
+    query: options?.lightweight ? '' : rule.query,
+    description: truncatedDesc,
+  };
+}
+
+// alert_service.ts fetchRulesRaw — line 1180
+for (const r of g.rules) {
+  if (r.type === 'alerting') {
+    results.push(promRuleToUnified(r, g.name, ds.id, { lightweight: true }));
+  }
+}
+```
+
+The detail-path caller in `alert_detail.ts:200`
+(`getPromRuleDetail` → `promRuleToUnified(alertingRule, group.name, ds.id)`)
+keeps no options — full shape.
+
+#### File-by-file change list
+
+- `server/services/alerting/alert_utils.ts` — `promRuleToUnified`
+  signature gains optional `{ lightweight }`. ~10 lines diff.
+- `server/services/alerting/alert_service.ts` — `fetchRulesRaw` Prom
+  branch passes `{ lightweight: true }`. ~3 lines diff.
+- `server/services/alerting/__tests__/alert_utils.test.ts` —
+  add cases for the lightweight shape.
+- `server/services/alerting/__tests__/alert_service.routing.test.ts`
+  — assert the listing path emits empty `query` and truncated
+  `description`.
+- `public/components/alerting/monitors_table/monitors_table_columns.tsx`
+  — verify no consumer breaks. If a tooltip currently renders
+  `description`, this still works (truncated text is fine for a
+  tooltip).
+
+No frontend logic changes; no route changes.
+
+#### Acceptance criteria
+
+1. **Listing payload size** — eyeball-compare `/api/alerting/unified/rules`
+   response size before vs after on a Prom datasource with 1k+ rules.
+   Expect significant reduction (target: 60-80% smaller for the
+   alerting-rule slice, depending on how much annotation text the
+   deployment uses).
+2. **Table renders identically** — no visible changes on the rules
+   table. Severity / status / health / type / eval interval / last
+   triggered all populate as before.
+3. **Detail flyout still has full text** — open a rule flyout. The
+   PromQL expression and full description render correctly via
+   `getRuleDetail`.
+4. **Search push-down still works** — search filter targets `name`
+   and label values, not `description` or `query` (verify in
+   `applyRuleFilters` at `alert_service.ts:249-258`). Truncating
+   description doesn't change search behavior.
+5. **Phase 1-5 acceptance criteria still hold.**
+
+#### Risk register
+
+- **Tooltip / inline description regression.** If a future code path
+  starts rendering `description` on the listing (e.g. inline preview
+  in the table), the truncation will be visible. Add a test that
+  asserts the listing-path `description` is bounded to 120 chars; a
+  future change that needs full text has to opt out of `lightweight`,
+  which is intentional friction.
+- **Search-mismatch surprise.** Today's `applyRuleFilters` search
+  doesn't match `description` (verified above). If a user expects
+  search to find rules by their description text, they'd need the
+  flyout. This is the existing behavior — note it in the doc.
+
+#### Out of scope
+
+- Stripping the OS rules listing. Smaller win, harder to scope (OS
+  triggers carry the actionable script — closer to "always-shown" than
+  Prom annotations are).
+- Server-side response compression. Would help wire bytes generally
+  but doesn't address Cortex's serialization work.
+
+---
+
+### P6.4 — TBD (placeholder)
 
 (To be filled in.)
 
