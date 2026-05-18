@@ -123,10 +123,6 @@ describe('getUnifiedTimeline', () => {
       getDestinations: jest.fn(),
       createDestination: jest.fn(),
       deleteDestination: jest.fn(),
-      searchAlertHistoryAggregation: jest.fn(async () => ({
-        indexMissing: false,
-        buckets: [],
-      })),
     } as unknown) as OpenSearchBackend;
     const result = await getUnifiedTimeline(
       {
@@ -304,82 +300,13 @@ describe('getUnifiedTimeline', () => {
     expect(status?.fallback).toBe('prometheus-search-truncated');
   });
 
-  it('OpenSearch path emits a date_histogram aggregation against the alert history index', async () => {
+  it('OpenSearch path buckets alerts from getAlerts and applies severity post-filter', async () => {
     const datasourceService = makeDatasourceService([osDatasource]);
-    const searchAlertHistoryAggregation = jest.fn(
-      async (
-        ...args: unknown[]
-      ): Promise<{
-        indexMissing: false;
-        buckets: Array<{
-          key: number;
-          docCount: number;
-          severityBuckets: Array<{ key: string; docCount: number }>;
-        }>;
-      }> => {
-        void args;
-        return {
-          indexMissing: false,
-          buckets: [
-            {
-              key: START_MS + 60_000,
-              docCount: 3,
-              severityBuckets: [
-                { key: '1', docCount: 2 },
-                { key: '3', docCount: 1 },
-              ],
-            },
-          ],
-        };
-      }
-    );
-    const osBackend = ({
-      type: 'opensearch' as const,
-      getMonitors: jest.fn(),
-      getMonitor: jest.fn(),
-      runMonitor: jest.fn(),
-      searchQuery: jest.fn(),
-      createMonitor: jest.fn(),
-      updateMonitor: jest.fn(),
-      deleteMonitor: jest.fn(),
-      getAlerts: jest.fn(),
-      acknowledgeAlerts: jest.fn(),
-      getDestinations: jest.fn(),
-      createDestination: jest.fn(),
-      deleteDestination: jest.fn(),
-      searchAlertHistoryAggregation,
-    } as unknown) as OpenSearchBackend;
-    const result = await getUnifiedTimeline(
-      {
-        datasourceService,
-        osBackend,
-        promBackend: undefined,
-        clientResolver,
-        logger: mockLogger,
-      },
-      { startTime: 'now-1h', endTime: 'now', severity: ['critical'] }
-    );
-    expect(searchAlertHistoryAggregation).toHaveBeenCalled();
-    const body = searchAlertHistoryAggregation.mock.calls[0][1] as Record<string, unknown>;
-    const filters = ((body.query as Record<string, { filter: unknown[] }>).bool
-      .filter as unknown) as Array<Record<string, unknown>>;
-    // First filter is the start_time range; second is the severity terms filter.
-    expect(filters.some((f) => 'terms' in f && (f.terms as { severity?: unknown }).severity)).toBe(
-      true
-    );
-    const totalCritical = result.buckets.reduce((s, b) => s + b.severity.critical, 0);
-    const totalMedium = result.buckets.reduce((s, b) => s + b.severity.medium, 0);
-    expect(totalCritical).toBe(2);
-    expect(totalMedium).toBe(1);
-  });
-
-  it('OpenSearch path falls back when index_not_found_exception sentinel is returned', async () => {
-    const datasourceService = makeDatasourceService([osDatasource]);
-    const searchAlertHistoryAggregation = jest.fn(async () => ({ indexMissing: true as const }));
+    // Mix of severities; severity:['critical'] filter should drop the medium one.
     const getAlerts = jest.fn(async () => ({
       alerts: [
         {
-          id: 'a',
+          id: 'a-crit-1',
           version: 1,
           monitor_id: 'm',
           monitor_name: 'm',
@@ -395,8 +322,42 @@ describe('getUnifiedTimeline', () => {
           acknowledged_time: null,
           action_execution_results: [],
         },
+        {
+          id: 'a-crit-2',
+          version: 1,
+          monitor_id: 'm',
+          monitor_name: 'm',
+          monitor_version: 1,
+          trigger_id: 't',
+          trigger_name: 't',
+          state: 'COMPLETED' as const,
+          severity: '1' as const,
+          error_message: null,
+          start_time: START_MS + 120_000,
+          last_notification_time: START_MS + 120_000,
+          end_time: START_MS + 180_000,
+          acknowledged_time: null,
+          action_execution_results: [],
+        },
+        {
+          id: 'a-medium',
+          version: 1,
+          monitor_id: 'm',
+          monitor_name: 'm',
+          monitor_version: 1,
+          trigger_id: 't',
+          trigger_name: 't',
+          state: 'ACTIVE' as const,
+          severity: '3' as const,
+          error_message: null,
+          start_time: START_MS + 180_000,
+          last_notification_time: START_MS + 180_000,
+          end_time: null,
+          acknowledged_time: null,
+          action_execution_results: [],
+        },
       ],
-      totalAlerts: 1,
+      totalAlerts: 3,
       truncated: false,
     }));
     const osBackend = ({
@@ -413,7 +374,6 @@ describe('getUnifiedTimeline', () => {
       getDestinations: jest.fn(),
       createDestination: jest.fn(),
       deleteDestination: jest.fn(),
-      searchAlertHistoryAggregation,
     } as unknown) as OpenSearchBackend;
     const result = await getUnifiedTimeline(
       {
@@ -423,12 +383,19 @@ describe('getUnifiedTimeline', () => {
         clientResolver,
         logger: mockLogger,
       },
-      { startTime: 'now-1h', endTime: 'now' }
+      { startTime: 'now-1h', endTime: 'now', severity: ['critical'] }
     );
-    const status = result.datasourceStatus.find((s) => s.datasourceId === 'ds-os');
-    expect(status?.fallback).toBe('opensearch-history-index-missing');
+    expect(getAlerts).toHaveBeenCalledTimes(1);
+    // The OS timeline path goes through the alerting REST API
+    // (`/_plugins/_alerting/monitors/alerts`); it must NEVER read
+    // `.opendistro-alerting-alert-history-*` directly because the
+    // security plugin silently masks system indices to 0 hits.
+    const callArgs = getAlerts.mock.calls[0];
+    expect(callArgs[1]).toEqual(expect.objectContaining({ startMs: expect.any(Number) }));
     const totalCritical = result.buckets.reduce((s, b) => s + b.severity.critical, 0);
-    expect(totalCritical).toBe(1);
+    const totalMedium = result.buckets.reduce((s, b) => s + b.severity.medium, 0);
+    expect(totalCritical).toBe(2);
+    expect(totalMedium).toBe(0);
   });
 
   it('multi-datasource merge: sums per-bucket severity across both datasources', async () => {
@@ -442,21 +409,33 @@ describe('getUnifiedTimeline', () => {
       createMonitor: jest.fn(),
       updateMonitor: jest.fn(),
       deleteMonitor: jest.fn(),
-      getAlerts: jest.fn(),
+      getAlerts: jest.fn(async () => ({
+        alerts: [
+          {
+            id: 'a-os',
+            version: 1,
+            monitor_id: 'm',
+            monitor_name: 'm',
+            monitor_version: 1,
+            trigger_id: 't',
+            trigger_name: 't',
+            state: 'ACTIVE' as const,
+            severity: '1' as const,
+            error_message: null,
+            start_time: START_MS + 60_000,
+            last_notification_time: START_MS + 60_000,
+            end_time: null,
+            acknowledged_time: null,
+            action_execution_results: [],
+          },
+        ],
+        totalAlerts: 1,
+        truncated: false,
+      })),
       acknowledgeAlerts: jest.fn(),
       getDestinations: jest.fn(),
       createDestination: jest.fn(),
       deleteDestination: jest.fn(),
-      searchAlertHistoryAggregation: jest.fn(async () => ({
-        indexMissing: false as const,
-        buckets: [
-          {
-            key: START_MS + 60_000,
-            docCount: 1,
-            severityBuckets: [{ key: '1', docCount: 1 }],
-          },
-        ],
-      })),
     } as unknown) as OpenSearchBackend;
     const promBackend = ({
       type: 'prometheus' as const,

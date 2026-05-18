@@ -28,15 +28,10 @@ import type { PromAlert, PromAlertingRule } from './prometheus_types';
  *   - `prometheus-no-severity-labels`: timeline aggregation found no
  *     `severity` label on `ALERTS{}` series; backend bucketed unlabeled
  *     samples into `medium`. Silent for the chart — no callout.
- *   - `opensearch-history-index-missing`: timeline path could not query
- *     `.opendistro-alerting-alert-history-*` (index missing) and fell
- *     back to bucketing `osBackend.getAlerts(...)` server-side. Silent
- *     for the chart — operational signal only.
  */
 export type DatasourceFetchFallback =
   | 'prometheus-alerts-current-only'
   | 'prometheus-no-severity-labels'
-  | 'opensearch-history-index-missing'
   /**
    * Set by the Prom timeline backend when a `search` query is in play; the
    * matcher is wrapped in `topk(200, …)` so series count is bounded. The

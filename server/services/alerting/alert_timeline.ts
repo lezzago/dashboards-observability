@@ -9,15 +9,18 @@
  * the routes layer can call it directly with the backends + client +
  * datasource service injected.
  *
- * Per-backend strategy (Phase 2):
+ * Per-backend strategy:
  *   - Prometheus: range query `sum by(severity) (ALERTS{alertstate="firing"})`
  *     — series count is bounded by severity cardinality (≤ 5), unlike the
  *     raw `ALERTS{}` matrix whose cardinality is the number of distinct
  *     alert label sets.
- *   - OpenSearch: date_histogram + nested terms aggregation against
- *     `.opendistro-alerting-alert-history-*`. Falls back to bucketing
- *     `osBackend.getAlerts({ startMs, endMs })` server-side when the
- *     index is missing (alerting plugin creates it lazily on first fire).
+ *   - OpenSearch: paginate `osBackend.getAlerts({ startMs, endMs })` and
+ *     bucket server-side. We deliberately do NOT issue `_search` directly
+ *     against `.opendistro-alerting-alert-history-*` — that index is a
+ *     system index protected by the OS security plugin, which silently
+ *     masks reads to 0 hits for every caller other than the alerting
+ *     plugin's own internal client. All OS alerting reads go through the
+ *     alerting REST API for that reason.
  *
  * Each per-datasource result is merged into a single timeline by summing
  * `(bucketIndex, severity)` cells across datasources. Failed datasources
@@ -522,146 +525,20 @@ function labelToSeverity(raw: string): UnifiedAlertSeverity {
 // OpenSearch implementation
 // ============================================================================
 
-export async function fetchOSTimelineBuckets(
-  osBackend: OpenSearchBackend,
-  client: AlertingOSClient,
-  startMs: number,
-  endMs: number,
-  bucketCount: number,
-  bucketDurationMs: number,
-  options: TimelineFilterOptions
-): Promise<{ buckets: AlertsTimelineBucket[]; fallback?: DatasourceFetchFallback }> {
-  const filters: Array<Record<string, unknown>> = [
-    { range: { start_time: { gte: startMs, lte: endMs } } },
-  ];
-
-  if (options.severity && options.severity.length > 0) {
-    // Translate unified severities to OS numeric severity strings ('1'..'5').
-    // OS alerts store severity as a string; we accept either form (string
-    // unified value OR numeric digit) so the same field can carry either.
-    const osSeverities = options.severity
-      .map(unifiedSeverityToOSValue)
-      .filter((v): v is string => v !== undefined);
-    if (osSeverities.length > 0) {
-      filters.push({ terms: { severity: osSeverities } });
-    }
-  }
-
-  if (options.state && options.state.length > 0) {
-    const osStates = options.state
-      .map(unifiedStateToOS)
-      .filter((v): v is string => v !== undefined);
-    if (osStates.length > 0) {
-      filters.push({ terms: { state: osStates } });
-    }
-  }
-
-  // labels{} not supported on OS alert history docs — schema doesn't
-  // normalize labels. Skipped per Phase 2 plan.
-
-  // searchQuery push-down: alert-history docs index `monitor_name` /
-  // `trigger_name`; do a case-insensitive substring on both via
-  // `wildcard` inside the same `filter` clause so the chart matches the
-  // table's `searchString` semantics.
-  const searchTrim = options.search?.trim();
-  if (searchTrim) {
-    const escaped = searchTrim.replace(/[\\]/g, '\\\\').replace(/[*?]/g, '\\$&').toLowerCase();
-    filters.push({
-      bool: {
-        should: [
-          {
-            wildcard: {
-              'monitor_name.keyword': { value: `*${escaped}*`, case_insensitive: true },
-            },
-          },
-          {
-            wildcard: {
-              'trigger_name.keyword': { value: `*${escaped}*`, case_insensitive: true },
-            },
-          },
-        ],
-        minimum_should_match: 1,
-      },
-    });
-  }
-
-  const body = {
-    size: 0,
-    query: {
-      bool: { filter: filters },
-    },
-    aggs: {
-      time_buckets: {
-        date_histogram: {
-          field: 'start_time',
-          fixed_interval: `${bucketDurationMs}ms`,
-          min_doc_count: 0,
-          extended_bounds: { min: startMs, max: endMs },
-        },
-        aggs: {
-          by_severity: {
-            terms: { field: 'severity', size: 5 },
-          },
-        },
-      },
-    },
-  };
-
-  if (!osBackend.searchAlertHistoryAggregation) {
-    return fetchOSTimelineFromGetAlerts(
-      osBackend,
-      client,
-      startMs,
-      endMs,
-      bucketCount,
-      bucketDurationMs,
-      options
-    );
-  }
-
-  const aggResult = await osBackend.searchAlertHistoryAggregation(client, body);
-  if (aggResult.indexMissing) {
-    const fallback = await fetchOSTimelineFromGetAlerts(
-      osBackend,
-      client,
-      startMs,
-      endMs,
-      bucketCount,
-      bucketDurationMs,
-      options
-    );
-    return {
-      buckets: fallback.buckets,
-      fallback: 'opensearch-history-index-missing',
-    };
-  }
-
-  const buckets = makeEmptyBuckets(startMs, bucketCount, bucketDurationMs);
-  for (const b of aggResult.buckets) {
-    const idx = sampleToBucketIndex(b.key, startMs, bucketDurationMs, bucketCount);
-    if (idx < 0) continue;
-    if (b.severityBuckets.length === 0) {
-      // Document had no `severity` field — bucket the doc count under
-      // `info` (OS alerts default to severity '5' / info when missing).
-      buckets[idx].severity.info += b.docCount;
-      continue;
-    }
-    for (const sb of b.severityBuckets) {
-      const sev = osSeverityToUnified(sb.key);
-      buckets[idx].severity[sev] += sb.docCount;
-    }
-  }
-  return { buckets };
-}
-
 /**
- * Fallback path for OS datasources where the alert history index is not
- * yet created (alerting plugin creates it lazily on first alert fire).
- * Bucketing is performed server-side from `osBackend.getAlerts(...)`'s
- * filtered result so the chart still renders something correct, just
- * without the index-side aggregation perf win.
+ * OS timeline implementation. Buckets are computed server-side from
+ * `osBackend.getAlerts({ startMs, endMs })`, which goes through the
+ * alerting plugin's REST API (`/_plugins/_alerting/monitors/alerts`).
+ *
+ * We intentionally do NOT issue `_search` directly against
+ * `.opendistro-alerting-alert-history-*`: that index is registered as a
+ * system index by the alerting plugin and the OS security plugin
+ * silently masks it (returns `hits.total: 0` with `successful: 1`
+ * shards) to every caller other than the alerting plugin's own internal
+ * client. A direct aggregation produces an empty chart on
+ * security-enabled clusters even when alerts exist.
  */
-async function fetchOSTimelineFromGetAlerts(
+export async function fetchOSTimelineBuckets(
   osBackend: OpenSearchBackend,
   client: AlertingOSClient,
   startMs: number,
@@ -708,37 +585,5 @@ function osAlertStateForFilter(
       return 'error';
     default:
       return 'active';
-  }
-}
-
-function unifiedSeverityToOSValue(sev: UnifiedAlertSeverity): string | undefined {
-  switch (sev) {
-    case 'critical':
-      return '1';
-    case 'high':
-      return '2';
-    case 'medium':
-      return '3';
-    case 'low':
-      return '4';
-    case 'info':
-      return '5';
-    default:
-      return undefined;
-  }
-}
-
-function unifiedStateToOS(s: string): string | undefined {
-  switch (s) {
-    case 'active':
-      return 'ACTIVE';
-    case 'acknowledged':
-      return 'ACKNOWLEDGED';
-    case 'resolved':
-      return 'COMPLETED';
-    case 'error':
-      return 'ERROR';
-    default:
-      return undefined;
   }
 }
