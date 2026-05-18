@@ -23,6 +23,19 @@ The five optimization commits are:
 | `3aab5bdf` | phase-4 | Server-paged listings + Prom listing cache + filter pushdown |
 | `110bd5e0` | phase-5 | Server-side facets + controlled-table pagination + search push-down |
 
+**Post-Phase-5 work also covered here.** A bounded historical-alerts
+mode for Prometheus was reintroduced in a separate working session
+*after* the five commits above, on the same branch. It uses
+`topk(N, last_over_time(ALERTS{...}))` so series cardinality stays
+bounded (Phase 1 had stripped the original unbounded matrix
+reconstruction). This work is not part of any of the five plan docs
+(`PLAN.md`, `PHASE_1.md`–`PHASE_5.md`); it lives in the codebase as
+`getHistoricalAlerts` at `directquery_prometheus_backend.ts:367-452`
+and the merge logic at `alert_service.ts:1090-1147`. The "NEW" sections
+below describe the system as it actually behaves, including this
+post-Phase-5 work; the "OLD" sections describe `origin/main`. See
+§3.2 and §6.1 for where it shows up.
+
 ## Table of contents
 
 1. [Overview](#1-overview)
@@ -349,11 +362,38 @@ to native upstream params (`size`, `startIndex`, `sortString`,
 severity / state fall back to JS post-filter (the upstream accepts only
 one value), and `labels` always post-filters.
 
-**Prom pushdown** for alerts: the `/api/v1/alerts` endpoint accepts no
-filters, so this case is purely (a) cache the response per-`dsId` for
-30s via `TtlCache`, (b) JS-post-filter, sort, and slice
-(`alert_service.ts:1021-1051`). Refresh-button bumps add `noCache=1` to
-bypass the cache (`hooks/use_alerts.ts:79-87`).
+**Prom listing path** for alerts (`alert_service.ts:1082-1148`,
+post-Phase-5):
+
+- **No range** — `promBackend.getAlerts(client, ds)` against
+  `/api/v1/alerts` (current-firing only). Cached 30s via
+  `alertsCache`. JS-post-filter / sort / slice in the unified-page
+  layer.
+- **Range with `endIsNow=true`** (e.g. `now-7d → now`) — fan out
+  *both* `/api/v1/alerts` (current) and a bounded historical query,
+  merge by label-set fingerprint, current-firing wins on collision.
+- **Past-only range** (`now-2h..now-1h`) — historical query only.
+  `/api/v1/alerts` is skipped because it ignores time entirely.
+
+The bounded historical query is
+`topk(N, last_over_time(ALERTS{alertstate="firing", ...filters...}[range_seconds]))`
+with `N = PROM_HISTORICAL_ALERTS_TOPK = 1000`
+(`directquery_prometheus_backend.ts:69, 367-452`). Returned series
+count is at most `N`; if the cap engaged, `fallback:
+'prometheus-search-truncated'` surfaces. Severity / labels / search
+filters become matchers on the selector at the upstream, so
+cardinality is bounded by *the filtered set*, not the whole
+population.
+
+`/api/v1/alerts` itself accepts no filter parameters (which is why we
+cache it). Refresh-button bumps add `noCache=1` to bypass the cache
+(`hooks/use_alerts.ts:79-87`).
+
+**This historical-alerts merge is post-Phase-5 work.** Phase 1
+explicitly removed the original (unbounded matrix) historical
+reconstruction; the bounded `topk(N, last_over_time(...))` shape was
+added later, outside the five-phase series, and reintroduces
+historical alerts safely. See the doc-header note for context.
 
 **Refire triggers (NEW):**
 
@@ -372,9 +412,11 @@ bypass the cache (`hooks/use_alerts.ts:79-87`).
 
 - Listing: O(pageSize) wire bytes (≤ 200 alerts), O(matched × log
   matched) for sort, O(page) for slice. The OS upstream does the
-  pushdown filtering for the cheap dimensions; Prom does the cache
-  lookup for free, post-filter is bounded by upstream cardinality
-  (which is current-firing only, not historical).
+  pushdown filtering for the cheap dimensions; Prom serves
+  `/api/v1/alerts` from the 30s cache when warm, and the bounded
+  `topk(N, last_over_time(...))` historical query is capped at
+  `PROM_HISTORICAL_ALERTS_TOPK=1000` series regardless of how many
+  distinct label-sets fired in the window.
 - Timeline: 1 PromQL with ≤ 5 series ×
   `bucketCount` (12–48) samples, OR one OS `_search` aggregation
   bounded by `bucketCount × 5` cells. Both query complexity classes
@@ -596,10 +638,18 @@ it through the route as a query param, the handler forwards it
 upstream URL (`opensearch_backend.ts:406-408`). The OS upstream then
 returns only that one monitor's alerts, typically a handful.
 
-For Prometheus, the flyout's detail call is dropped entirely
-(`alert_detail.ts:272-274` returns `null`). The summary already carries
-the labels/annotations; there's no upstream "scan-all-alerts-by-id"
-shape that's worth chasing.
+For Prometheus, Phase 1 dropped the detail call entirely (returned
+`null`); the post-Phase-5 historical-alerts work (see doc-header)
+reintroduced a *bounded* per-alert episode walk. When the flyout has
+the alert's labels and the picker's range, the detail handler issues
+`fetchPromAlertEpisodes` (`alert_detail.ts:281-285, 298-` onward),
+which runs *one* `queryRangeMatrix` over `ALERTS{<exact label-set>}`
+— cardinality is exactly one series, cost is `range / step` samples
+with step targeting ~200 samples and clamped to `[15, 600]` seconds.
+This is why the route's query schema accepts optional `labels`,
+`startTime`, `endTime` (`server/routes/alerting/index.ts:660-684`).
+Without them the handler returns `null` and the flyout renders from
+the summary alone — same fallback as Phase 1's behavior.
 
 **Phase 1 — lazy-load the Raw Data accordion
 (`alert_detail_flyout.tsx:64-83`).** The flyout no longer fires the
@@ -624,7 +674,7 @@ fields, closes it) the detail call is never made.
 | | OLD plugin call | OLD upstream cost | NEW plugin call (no expand) | NEW plugin call (Raw Data expanded) |
 |---|---|---|---|---|
 | OS flyout | 1 detail call | up to ~100 OS pagination reads (capped at `SCAN_CAP=10_000`) | 0 | 1 detail call → 1 monitor's alerts only |
-| Prom flyout | 1 detail call | 1 `/api/v1/alerts` (every firing alert) | 0 | 0 — handler returns `null`, accordion renders summary's labels/annotations |
+| Prom flyout | 1 detail call | 1 `/api/v1/alerts` (every firing alert) | 0 | 1 detail call → one bounded `queryRangeMatrix` against `ALERTS{<this label-set>}`, fixed at 1 series × ~200 samples (post-Phase-5 work — Phase 1 returned `null`) |
 
 ### 6.2 Rule detail flyout — OS path
 
@@ -986,10 +1036,10 @@ default filters.
 
 | Scale | OLD wire bytes | OLD upstream load | NEW wire bytes | NEW upstream load |
 |---|---|---|---|---|
-| 100 alerts | ~50 KB | 1 OS call, 1 Prom matrix | ~30 KB across 3 calls | 1 OS list + 1 OS agg + 1 Prom (cached) |
-| 10k alerts | ~5 MB | 100 OS pages, 1 Prom matrix (~10k series) | ~30 KB | same as above |
-| 100k alerts | ~50 MB / `SCAN_CAP=10k` | 100 OS pages then truncate; Prom matrix **trips Cortex `max-samples`** | ~30 KB | same as above |
-| 1M alerts | won't load | won't load (Prom side) | ~30 KB; facets surface `truncated: true` past `MAX_FACET_SCAN=10_000` | same as above |
+| 100 alerts | ~50 KB | 1 OS call, 1 Prom matrix | ~30 KB across 3 calls | 1 OS list + 1 OS agg + 1 Prom current (cached) + 1 Prom topk historical |
+| 10k alerts | ~5 MB | 100 OS pages, 1 Prom matrix (~10k series) | ~30 KB | same as above; topk historical capped at 1000 series |
+| 100k alerts | ~50 MB / `SCAN_CAP=10k` | 100 OS pages then truncate; Prom matrix **trips Cortex `max-samples`** | ~30 KB | same as above; topk cap engages, `prometheus-search-truncated` surfaces |
+| 1M alerts | won't load | won't load (Prom side) | ~30 KB; facets surface `truncated: true` past `MAX_FACET_SCAN=10_000` | same; topk cap firmly engaged but query stays well under Cortex `max-samples` because `last_over_time` returns one sample per series |
 
 Where the OLD code falls over at scale:
 
@@ -997,9 +1047,15 @@ Where the OLD code falls over at scale:
   `ALERTS{alertstate="firing"}` returns one series per distinct alert
   label-set in the window. At ≥ ~50k alerts and a 7-day range with a
   reasonable step, Cortex rejects with `query processing would load
-  too many samples into memory`. The NEW timeline endpoint sums
-  by severity at the matcher level — at most 5 series, regardless of
-  N. **Fix:** §7.5.
+  too many samples into memory`. The NEW code avoids this in *two*
+  places: (1) the timeline endpoint sums by severity at the matcher
+  level — at most 5 series regardless of N (see §7.5); (2) the listing
+  endpoint's bounded historical-alerts query (post-Phase-5,
+  `directquery_prometheus_backend.ts:367-452`) uses
+  `topk(1000, last_over_time(ALERTS{...}[range_seconds]))` as an
+  *instant* query — series are clipped at the topk cap and each series
+  contributes one sample, so total samples = at most 1000 regardless
+  of N or range duration.
 - **`SCAN_CAP=10_000`** in the OS backend (still present on both old
   and new at `opensearch_backend.ts:402`). On main the cap fires for
   the page-level table fetch; on the new branch the listing endpoint
@@ -1037,7 +1093,7 @@ Where the OLD code falls over:
 | Action | OLD upstream calls | NEW upstream calls (no expand) | NEW (full expand) |
 |---|---|---|---|
 | Open OS alert flyout (100k alerts) | up to ~100 OS pages | 0 | 1 scoped (≤ 1 monitor's alerts) |
-| Open Prom alert flyout (10k firing) | 1 `/api/v1/alerts` | 0 | 0 |
+| Open Prom alert flyout (10k firing) | 1 `/api/v1/alerts` | 0 (Phase 1) | 1 bounded `queryRangeMatrix` over `ALERTS{<this label-set>}` (post-Phase-5; ~200 samples × 1 series) when the flyout has labels + range, else 0 |
 | Open OS rule flyout | 1 full `getAlerts` + 1 `getDestinations` (+ optional dry-run!) | 1 scoped `getAlerts` | + 1 `/routing` if user expands |
 | Open Prom rule flyout (1k rules × 50 alerts) | 1 full `/api/v1/rules` (~5 MB) | 1 scoped `/api/v1/rules?rule_group=&rule_name=` | same; cache hit if listing was loaded recently |
 
