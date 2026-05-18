@@ -21,6 +21,7 @@
  *   - RestDirectQueryResourcesManagementAction.java
  *   - PrometheusQueryHandler.java / PrometheusClient.java
  */
+import { createAlertmanagerProbe, AlertmanagerProbe } from './alertmanager_probe';
 import { createPromFilterProbe, PromFilterProbe } from './prom_filter_probe';
 import { TtlCache } from './ttl_cache';
 import {
@@ -79,6 +80,14 @@ export class DirectQueryPrometheusBackend implements PrometheusBackend, Promethe
   // upstream check per dsId. Shared across requests intentionally — probe
   // result is a property of the upstream, not the caller.
   readonly filterProbe: PromFilterProbe;
+  /**
+   * P6.1 — Alertmanager availability probe. First AM-sourced call per
+   * dsId issues `/alertmanager/api/v2/status`; result cached for the
+   * plugin process lifetime. When unavailable, callers fall back to
+   * legacy /api/v1/alerts + topk historical and the UI surfaces the
+   * `prometheus-alertmanager-unavailable` callout.
+   */
+  readonly alertmanagerProbe: AlertmanagerProbe;
 
   /**
    * Per-process listing caches keyed on `dsId`. 30s TTL so repeated
@@ -119,12 +128,21 @@ export class DirectQueryPrometheusBackend implements PrometheusBackend, Promethe
     string,
     { candidates: PromHistoricalAlertCandidate[]; truncated: boolean }
   >;
+  /**
+   * P6.1 — Alertmanager alerts cache. Different shape from
+   * `alertsCache` (richer payload — silence/inhibition/receivers); the
+   * cache value type is `AlertmanagerAlert[]` keyed by a composite of
+   * `dsId` plus the AM filter shape. Same 30s TTL as the listing
+   * caches.
+   */
+  readonly alertmanagerAlertsCache: TtlCache<string, AlertmanagerAlert[]>;
 
   constructor(private readonly logger: Logger) {
     this.logger.info(
       'DirectQuery Prometheus backend configured: routing via OSD scoped cluster client'
     );
     this.filterProbe = createPromFilterProbe(this, logger);
+    this.alertmanagerProbe = createAlertmanagerProbe(this, logger);
     this.alertsCache = new TtlCache<string, PromAlert[]>(30_000);
     this.ruleGroupsCache = new TtlCache<string, PromRuleGroup[]>(30_000);
     this.ruleGroupsWithAlertsCache = new TtlCache<string, PromRuleGroup[]>(30_000);
@@ -132,6 +150,7 @@ export class DirectQueryPrometheusBackend implements PrometheusBackend, Promethe
       string,
       { candidates: PromHistoricalAlertCandidate[]; truncated: boolean }
     >(30_000);
+    this.alertmanagerAlertsCache = new TtlCache<string, AlertmanagerAlert[]>(30_000);
   }
 
   // =========================================================================
@@ -595,10 +614,93 @@ export class DirectQueryPrometheusBackend implements PrometheusBackend, Promethe
 
   async getAlertmanagerAlerts(
     client: AlertingOSClient,
-    ds: Datasource
+    ds: Datasource,
+    options?: {
+      filter?: string[];
+      active?: boolean;
+      silenced?: boolean;
+      inhibited?: boolean;
+      unprocessed?: boolean;
+      receiver?: string;
+      noCache?: boolean;
+    }
+  ): Promise<AlertmanagerAlert[]> {
+    const fetcher = () => this.fetchAlertmanagerAlertsRaw(client, ds, options);
+    if (options?.noCache) {
+      // Refresh-button driven — clear the whole AM-alerts cache for this
+      // dsId so any stale entry is invalidated.
+      this.alertmanagerAlertsCache.clear();
+      return fetcher();
+    }
+    const cacheKey = this.alertmanagerAlertsCacheKey(ds, options);
+    return this.alertmanagerAlertsCache.get(cacheKey, fetcher);
+  }
+
+  /**
+   * Stable cache key for the AM-alerts call. Includes filter shape so
+   * different filter combinations don't collide; sort the matchers list
+   * so two callers with the same filters in different orders share an
+   * entry.
+   */
+  private alertmanagerAlertsCacheKey(
+    ds: Datasource,
+    options?: {
+      filter?: string[];
+      active?: boolean;
+      silenced?: boolean;
+      inhibited?: boolean;
+      unprocessed?: boolean;
+      receiver?: string;
+    }
+  ): string {
+    const sortedFilter = (options?.filter ?? []).slice().sort().join(',');
+    const flags = [
+      options?.active ?? true,
+      options?.silenced ?? true,
+      options?.inhibited ?? true,
+      options?.unprocessed ?? false,
+    ].join(',');
+    return `${ds.id}:${sortedFilter}:${flags}:${options?.receiver ?? ''}`;
+  }
+
+  private async fetchAlertmanagerAlertsRaw(
+    client: AlertingOSClient,
+    ds: Datasource,
+    options?: {
+      filter?: string[];
+      active?: boolean;
+      silenced?: boolean;
+      inhibited?: boolean;
+      unprocessed?: boolean;
+      receiver?: string;
+    }
   ): Promise<AlertmanagerAlert[]> {
     try {
-      const data = await this.get<AlertmanagerAlert[]>(client, ds, '/alertmanager/api/v2/alerts');
+      // AM v2 accepts repeated `?filter[]=` matchers and boolean
+      // `active`/`silenced`/`inhibited`/`unprocessed` flags. Caller-set
+      // booleans win; defaults match AM v2's "show everything currently
+      // routed" view (active=true, silenced=true, inhibited=true,
+      // unprocessed=false).
+      const params: string[] = [];
+      for (const m of options?.filter ?? []) {
+        params.push(`filter=${encodeURIComponent(m)}`);
+      }
+      const active = options?.active ?? true;
+      const silenced = options?.silenced ?? true;
+      const inhibited = options?.inhibited ?? true;
+      const unprocessed = options?.unprocessed ?? false;
+      params.push(`active=${active}`);
+      params.push(`silenced=${silenced}`);
+      params.push(`inhibited=${inhibited}`);
+      params.push(`unprocessed=${unprocessed}`);
+      if (options?.receiver) {
+        params.push(`receiver=${encodeURIComponent(options.receiver)}`);
+      }
+      const path =
+        params.length > 0
+          ? `/alertmanager/api/v2/alerts?${params.join('&')}`
+          : '/alertmanager/api/v2/alerts';
+      const data = await this.get<AlertmanagerAlert[]>(client, ds, path);
       return Array.isArray(data) ? data : [];
     } catch (err) {
       this.logger.warn(`Failed to get alertmanager alerts via direct query: ${err}`);

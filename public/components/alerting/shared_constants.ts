@@ -40,6 +40,10 @@ export const STATE_COLORS: Record<string, string> = {
   pending: 'warning',
   acknowledged: 'primary',
   silenced: 'default',
+  // P6.1 — Prom-only state when AM has classified the alert as
+  // suppressed by an inhibit rule. Distinct from `silenced`
+  // ("subdued") to make the cause clear at a glance.
+  inhibited: 'subdued',
   resolved: 'success',
   error: 'danger',
 };

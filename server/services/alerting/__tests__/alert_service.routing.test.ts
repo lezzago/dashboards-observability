@@ -70,6 +70,11 @@ const mockPromBackend = {
       truncated: false,
     })
   ),
+  // P6.1 — AM-primary fixtures. Tests opt in by attaching
+  // `alertmanagerProbe` to a fresh service-construction in beforeEach.
+  // The default behaviour for the broader routing-test suite must keep
+  // these undefined so we don't change existing assertions.
+  getAlertmanagerAlerts: jest.fn(async (): Promise<unknown[]> => []),
   listWorkspaces: jest.fn(async (): Promise<unknown[]> => []),
 };
 
@@ -775,6 +780,160 @@ describe('MultiBackendAlertService — routing & list', () => {
 
       expect(mockPromBackend.getAlerts).not.toHaveBeenCalled();
       expect(mockPromBackend.getHistoricalAlerts).toHaveBeenCalled();
+    });
+  });
+
+  // ============================================================================
+  // P6.1 — Alertmanager-primary alerts dispatch.
+  // When the backend exposes alertmanagerProbe AND getAlertmanagerAlerts,
+  // the Prom branch sources current-firing alerts from AM (filter
+  // pushdown + silence/inhibition/receiver context) instead of
+  // /api/v1/alerts. When the probe says unavailable, it falls through
+  // to the legacy path and surfaces the prometheus-alertmanager-unavailable
+  // fallback so the UI can render the per-DS callout.
+  // ============================================================================
+  describe('AM-primary dispatch (P6.1)', () => {
+    const buildAmProbe = (status: 'available' | 'unavailable') => ({
+      probe: jest.fn(async () => ({ status, reason: status === 'unavailable' ? 'mocked' : '' })),
+      reset: jest.fn(),
+    });
+
+    it('routes through getAlertmanagerAlerts when probe reports available', async () => {
+      const amProbe = buildAmProbe('available');
+      (mockPromBackend as { alertmanagerProbe?: unknown }).alertmanagerProbe = amProbe;
+      mockOsBackend.getAlerts.mockResolvedValueOnce({
+        alerts: [],
+        totalAlerts: 0,
+        truncated: false,
+      });
+      mockPromBackend.getAlertmanagerAlerts.mockReset();
+      mockPromBackend.getAlertmanagerAlerts.mockResolvedValueOnce([
+        {
+          labels: { alertname: 'HighCPU', severity: 'critical' },
+          annotations: { summary: 's' },
+          startsAt: '2026-05-18T00:00:00Z',
+          endsAt: '2026-05-18T00:05:00Z',
+          generatorURL: '',
+          fingerprint: 'fp-1',
+          status: { state: 'active', silencedBy: [], inhibitedBy: [] },
+          receivers: [{ name: 'pagerduty' }],
+        },
+      ]);
+
+      const res = await svc.getPaginatedAlerts({} as never, {
+        page: 1,
+        pageSize: 10,
+      });
+
+      expect(mockPromBackend.getAlertmanagerAlerts).toHaveBeenCalled();
+      const promRow = res.results.find((r) => r.datasourceType === 'prometheus');
+      expect(promRow).toBeDefined();
+      expect(promRow?.fingerprint).toBe('fp-1');
+      expect(promRow?.endsAt).toBe('2026-05-18T00:05:00Z');
+      expect(promRow?.receivers).toEqual(['pagerduty']);
+      // Reset for next tests.
+      delete (mockPromBackend as { alertmanagerProbe?: unknown }).alertmanagerProbe;
+    });
+
+    it('falls back to /api/v1/alerts and surfaces prometheus-alertmanager-unavailable when probe says no', async () => {
+      const amProbe = buildAmProbe('unavailable');
+      (mockPromBackend as { alertmanagerProbe?: unknown }).alertmanagerProbe = amProbe;
+      mockOsBackend.getAlerts.mockResolvedValueOnce({
+        alerts: [],
+        totalAlerts: 0,
+        truncated: false,
+      });
+      mockPromBackend.getAlerts.mockReset();
+      mockPromBackend.getAlerts.mockResolvedValueOnce([]);
+      mockPromBackend.getAlertmanagerAlerts.mockReset();
+
+      const res = await svc.getPaginatedAlerts({} as never, {
+        page: 1,
+        pageSize: 10,
+      });
+
+      expect(mockPromBackend.getAlertmanagerAlerts).not.toHaveBeenCalled();
+      expect(mockPromBackend.getAlerts).toHaveBeenCalled();
+      const promWarning = res.warnings?.find((w) => w.datasourceId === 'ds-prom');
+      expect(promWarning?.fallback).toBe('prometheus-alertmanager-unavailable');
+      delete (mockPromBackend as { alertmanagerProbe?: unknown }).alertmanagerProbe;
+    });
+
+    it('maps suppressed AM alerts to silenced / inhibited unified states', async () => {
+      const amProbe = buildAmProbe('available');
+      (mockPromBackend as { alertmanagerProbe?: unknown }).alertmanagerProbe = amProbe;
+      mockOsBackend.getAlerts.mockResolvedValueOnce({
+        alerts: [],
+        totalAlerts: 0,
+        truncated: false,
+      });
+      mockPromBackend.getAlertmanagerAlerts.mockReset();
+      mockPromBackend.getAlertmanagerAlerts.mockResolvedValueOnce([
+        {
+          labels: { alertname: 'A' },
+          annotations: {},
+          startsAt: '2026-05-18T00:00:00Z',
+          endsAt: '2026-05-18T00:05:00Z',
+          generatorURL: '',
+          fingerprint: 'fp-A',
+          status: { state: 'suppressed', silencedBy: ['silence-1'], inhibitedBy: [] },
+          receivers: [],
+        },
+        {
+          labels: { alertname: 'B' },
+          annotations: {},
+          startsAt: '2026-05-18T00:00:00Z',
+          endsAt: '2026-05-18T00:05:00Z',
+          generatorURL: '',
+          fingerprint: 'fp-B',
+          status: { state: 'suppressed', silencedBy: [], inhibitedBy: ['fp-parent'] },
+          receivers: [],
+        },
+      ]);
+
+      const res = await svc.getPaginatedAlerts({} as never, {
+        page: 1,
+        pageSize: 10,
+      });
+
+      const a = res.results.find((r) => r.fingerprint === 'fp-A');
+      const b = res.results.find((r) => r.fingerprint === 'fp-B');
+      expect(a?.state).toBe('silenced');
+      expect(a?.suppression?.silencedBy).toEqual(['silence-1']);
+      expect(b?.state).toBe('inhibited');
+      expect(b?.suppression?.inhibitedBy).toEqual([{ fingerprint: 'fp-parent' }]);
+      delete (mockPromBackend as { alertmanagerProbe?: unknown }).alertmanagerProbe;
+    });
+
+    it('forwards severity / labels / search filter as AM matchers', async () => {
+      const amProbe = buildAmProbe('available');
+      (mockPromBackend as { alertmanagerProbe?: unknown }).alertmanagerProbe = amProbe;
+      mockOsBackend.getAlerts.mockResolvedValueOnce({
+        alerts: [],
+        totalAlerts: 0,
+        truncated: false,
+      });
+      mockPromBackend.getAlertmanagerAlerts.mockReset();
+      mockPromBackend.getAlertmanagerAlerts.mockResolvedValueOnce([]);
+
+      await svc.getPaginatedAlerts({} as never, {
+        page: 1,
+        pageSize: 10,
+        severity: ['critical'],
+        labels: { service: ['cart', 'checkout'] },
+        search: 'High',
+      });
+
+      const lastCall = mockPromBackend.getAlertmanagerAlerts.mock.calls.at(-1)! as unknown[];
+      const opts = lastCall[2] as { filter?: string[] };
+      expect(opts.filter).toEqual(
+        expect.arrayContaining([
+          'severity="critical"',
+          'service=~"cart|checkout"',
+          'alertname=~".*High.*"',
+        ])
+      );
+      delete (mockPromBackend as { alertmanagerProbe?: unknown }).alertmanagerProbe;
     });
   });
 

@@ -26,6 +26,7 @@
  *   - `inferUnitFromExpression`, `parseThreshold`
  */
 import {
+  AlertmanagerAlert,
   Datasource,
   DatasourceService,
   MonitorStatus,
@@ -40,6 +41,7 @@ import {
   UnifiedAlertSeverity,
   UnifiedAlertState,
   UnifiedAlertSummary,
+  UnifiedFetchOptions,
   UnifiedRuleSummary,
 } from '../../../common/types/alerting';
 
@@ -331,6 +333,108 @@ export function promHistoricalAlertToUnified(
     labels: candidate.labels,
     annotations: {},
     isHistorical: true,
+  };
+}
+
+/**
+ * P6.1 — escape an Alertmanager matcher VALUE so it can be embedded in
+ * a `name="<value>"` matcher safely. AM v2 matcher syntax follows
+ * Prom's string-literal escape rules: backslash and double-quote need
+ * escaping; everything else is preserved verbatim.
+ */
+export function escapeAmMatcherValue(value: string): string {
+  return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
+/**
+ * P6.1 — map UnifiedFetchOptions filter shape to Alertmanager v2
+ * matcher strings (`name="value"` for equality, `name=~"v1|v2"` for
+ * multi-value sets). AM accepts repeated `?filter[]=` matchers; the
+ * caller passes the array straight through. Matcher *keys* are
+ * validated against Prom's identifier grammar so a hostile input
+ * can't break out of the selector.
+ *
+ * Severity / labels are pushed; state is NOT — AM has independent
+ * `active`/`silenced`/`inhibited` flags for state filtering, set by
+ * the dispatcher.
+ */
+export function mapAlertFiltersToAm(options?: UnifiedFetchOptions): string[] {
+  if (!options) return [];
+  const matchers: string[] = [];
+  const validKey = (k: string) => /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(k);
+  if (options.severity && options.severity.length > 0) {
+    if (options.severity.length === 1) {
+      matchers.push(`severity="${escapeAmMatcherValue(options.severity[0])}"`);
+    } else {
+      const re = options.severity.map(escapeAmMatcherValue).join('|');
+      matchers.push(`severity=~"${re}"`);
+    }
+  }
+  if (options.labels) {
+    for (const [k, vs] of Object.entries(options.labels)) {
+      if (!validKey(k) || vs.length === 0) continue;
+      if (vs.length === 1) {
+        matchers.push(`${k}="${escapeAmMatcherValue(vs[0])}"`);
+      } else {
+        const re = vs.map(escapeAmMatcherValue).join('|');
+        matchers.push(`${k}=~"${re}"`);
+      }
+    }
+  }
+  if (options.search && options.search.trim()) {
+    matchers.push(`alertname=~".*${escapeAmMatcherValue(options.search.trim())}.*"`);
+  }
+  return matchers;
+}
+
+/**
+ * P6.1 — map an Alertmanager v2 alert to the unified shape. Severity
+ * comes from the labels (AM doesn't have a notion of severity itself).
+ * State maps:
+ *   - active + no silence/inhibit → 'active'
+ *   - suppressed with silencedBy[].length > 0 → 'silenced'
+ *   - suppressed with inhibitedBy[].length > 0 → 'inhibited'
+ *   - unprocessed → drop (caller filters before mapping)
+ */
+export function alertmanagerAlertToUnified(
+  a: AlertmanagerAlert,
+  dsId: string
+): UnifiedAlertSummary {
+  const silencedBy = a.status?.silencedBy ?? [];
+  const inhibitedBy = a.status?.inhibitedBy ?? [];
+  let state: UnifiedAlertState;
+  if (a.status?.state === 'suppressed' && silencedBy.length > 0) {
+    state = 'silenced';
+  } else if (a.status?.state === 'suppressed' && inhibitedBy.length > 0) {
+    state = 'inhibited';
+  } else {
+    state = 'active';
+  }
+
+  return {
+    id: `${dsId}-${a.labels.alertname || 'unknown'}-${a.labels.instance || ''}`,
+    datasourceId: dsId,
+    datasourceType: 'prometheus',
+    name: a.labels.alertname || 'Unknown',
+    state,
+    severity: promSeverityFromLabels(a.labels),
+    message: a.annotations?.summary || a.annotations?.description,
+    startTime: a.startsAt,
+    lastUpdated: a.startsAt,
+    labels: a.labels,
+    annotations: a.annotations ?? {},
+    endsAt: a.endsAt,
+    fingerprint: a.fingerprint,
+    receivers: (a.receivers ?? []).map((r) => r.name),
+    suppression:
+      silencedBy.length > 0 || inhibitedBy.length > 0
+        ? {
+            ...(silencedBy.length > 0 ? { silencedBy } : {}),
+            ...(inhibitedBy.length > 0
+              ? { inhibitedBy: inhibitedBy.map((fp) => ({ fingerprint: fp })) }
+              : {}),
+          }
+        : undefined,
   };
 }
 

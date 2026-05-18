@@ -37,7 +37,15 @@ export type DatasourceFetchFallback =
    * matcher is wrapped in `topk(200, …)` so series count is bounded. The
    * UI ignores this for the chart but tests assert the boundary.
    */
-  | 'prometheus-search-truncated';
+  | 'prometheus-search-truncated'
+  /**
+   * P6.1 — surfaced when the Alertmanager probe reports that AM is
+   * unreachable for an otherwise-healthy Prom datasource. The alerts
+   * table still works (legacy /api/v1/alerts + topk historical path);
+   * the user sees a callout that silence / inhibition / receiver
+   * columns won't populate.
+   */
+  | 'prometheus-alertmanager-unavailable';
 
 // ============================================================================
 // OSD scoped client — structural shape of the subset we use
@@ -161,8 +169,32 @@ export type UnifiedAlertState =
   | 'pending'
   | 'acknowledged'
   | 'silenced'
+  /**
+   * P6.1 — Prom-only state. Alertmanager-routed alert that's currently
+   * suppressed by an inhibit rule (e.g. another higher-priority alert is
+   * firing). OS doesn't have inhibition; this state never appears on OS
+   * rows. Existing OS state mappings are unaffected because none of them
+   * resolve to 'inhibited'.
+   */
+  | 'inhibited'
   | 'resolved'
   | 'error';
+
+/**
+ * P6.1 — per-alert suppression context populated when the alert is sourced
+ * from Alertmanager (`/alertmanager/api/v2/alerts`). Both arrays are
+ * empty/undefined for OS rows and for Prom rows when AM is unavailable.
+ *
+ * `silencedBy` carries the silence record's id; the UI joins against
+ * `getAlertmanagerSilences` to render the silence definition.
+ * `inhibitedBy` carries the inhibiting alert's fingerprint and (when
+ * known) its alertname — enough for a "see parent" link without forcing
+ * an additional join.
+ */
+export interface AlertSuppression {
+  silencedBy?: string[];
+  inhibitedBy?: Array<{ fingerprint: string; alertname?: string }>;
+}
 
 /** Lightweight alert representation for list views and tables. */
 export interface UnifiedAlertSummary {
@@ -191,6 +223,26 @@ export interface UnifiedAlertSummary {
    * flyout, which fetches `ALERTS{<exact label-set>}[<range>]` on demand.
    */
   isHistorical?: boolean;
+  /**
+   * P6.1 — Alertmanager resolve-timeout horizon ("expires at <ts> unless
+   * the rule re-fires"). Optional; only populated on AM-sourced rows.
+   */
+  endsAt?: string;
+  /**
+   * P6.1 — stable Alertmanager fingerprint. Used for joining against AM
+   * silence records and for HA-ruler dedup. Optional; only populated on
+   * AM-sourced rows.
+   */
+  fingerprint?: string;
+  /**
+   * P6.1 — resolved AM receiver names for this alert. Empty for OS rows
+   * and for Prom rows when AM is unavailable.
+   */
+  receivers?: string[];
+  /**
+   * P6.1 — silence / inhibition context. See {@link AlertSuppression}.
+   */
+  suppression?: AlertSuppression;
 }
 
 /** Full alert with backend-specific raw data. Use for detail views only. */

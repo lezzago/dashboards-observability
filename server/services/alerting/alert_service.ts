@@ -45,6 +45,7 @@ import {
 } from '../../../common/types/alerting';
 import { parseDateMathMs } from '../../../common/services/alerting';
 import { TimeoutError, withTimeout } from './timeout_error';
+import type { AlertmanagerProbe } from './alertmanager_probe';
 import {
   getAlertDetail as getAlertDetailImpl,
   getRuleDetail as getRuleDetailImpl,
@@ -61,6 +62,8 @@ import {
   GetUnifiedTimelineOptions,
 } from './alert_timeline';
 import {
+  alertmanagerAlertToUnified,
+  mapAlertFiltersToAm,
   osAlertToUnified,
   osMonitorToUnifiedRuleSummary,
   promAlertToUnified,
@@ -1115,12 +1118,35 @@ export class MultiBackendAlertService {
     }
 
     if (ds.type === 'prometheus' && this.promBackend) {
+      // P6.1 — when Alertmanager is reachable, source from
+      // `/alertmanager/api/v2/alerts` instead of `/api/v1/alerts`. AM
+      // accepts native filter pushdown AND carries silence /
+      // inhibition / receiver context that /api/v1/alerts can't. Probe
+      // is process-lifetime cached; first call per dsId pays one extra
+      // round-trip.
+      const amProbe = (this.promBackend as { alertmanagerProbe?: AlertmanagerProbe } | undefined)
+        ?.alertmanagerProbe;
+      let amUnavailable = false;
+      if (amProbe && this.promBackend.getAlertmanagerAlerts) {
+        const probeResult = await amProbe.probe(client, ds);
+        if (probeResult.status === 'available') {
+          return this.fetchAlertsViaAlertmanager(client, ds, range, filterOptions);
+        }
+        // Probe says unavailable — fall through to the legacy path and
+        // surface the new fallback callout so the UI can communicate the
+        // missing context.
+        amUnavailable = true;
+      }
+
       // No range supplied → preserve legacy current-firing-only listing.
       if (!range) {
         const alerts = await this.promBackend.getAlerts(client, ds, {
           noCache: filterOptions?.noCache === true,
         });
-        return { alerts: alerts.map((a) => promAlertToUnified(a, ds.id)) };
+        return {
+          alerts: alerts.map((a) => promAlertToUnified(a, ds.id)),
+          ...(amUnavailable ? { fallback: 'prometheus-alertmanager-unavailable' as const } : {}),
+        };
       }
 
       // Range supplied: emit a single-page listing that merges
@@ -1139,6 +1165,10 @@ export class MultiBackendAlertService {
         const alerts = await this.promBackend.getAlerts(client, ds, {
           noCache: filterOptions?.noCache === true,
         });
+        // amUnavailable can race with this path; current-only is the
+        // dominant signal for the user (no historical at all). Keep the
+        // existing code unchanged here — the AM-unavailable callout would
+        // be redundant on top of the current-only one.
         return {
           alerts: alerts.map((a) => promAlertToUnified(a, ds.id)),
           fallback: 'prometheus-alerts-current-only',
@@ -1196,13 +1226,113 @@ export class MultiBackendAlertService {
         merged.set(fp, promHistoricalAlertToUnified(c, ds.id));
       }
 
+      // The historical-truncated signal supersedes the AM-unavailable
+      // signal: the user needs to know the table may be missing rows
+      // first. Without truncation, surface AM-unavailable so the user
+      // knows silence / inhibition / receiver columns won't populate.
+      let fallback:
+        | 'prometheus-search-truncated'
+        | 'prometheus-alertmanager-unavailable'
+        | undefined;
+      if (historical.truncated) {
+        fallback = 'prometheus-search-truncated';
+      } else if (amUnavailable) {
+        fallback = 'prometheus-alertmanager-unavailable';
+      }
       return {
         alerts: Array.from(merged.values()),
-        ...(historical.truncated ? { fallback: 'prometheus-search-truncated' as const } : {}),
+        ...(fallback ? { fallback } : {}),
       };
     }
 
     return { alerts: [] };
+  }
+
+  /**
+   * P6.1 — AM-primary fetch path for a single Prom datasource. Source
+   * the current-firing set from `/alertmanager/api/v2/alerts` (native
+   * filter pushdown + silence / inhibition / receiver context). When a
+   * range is supplied, merge with the bounded historical-topk path
+   * because AM is current-state only.
+   *
+   * The rule listing for `value` backfill (the one upside `/api/v1/rules`
+   * has over AM) is opt-in: we don't fetch it on the listing path because
+   * the table doesn't render `value`. The detail flyout's `getRuleDetail`
+   * already pulls the full rule shape on demand.
+   */
+  private async fetchAlertsViaAlertmanager(
+    client: AlertingOSClient,
+    ds: Datasource,
+    range: ResolvedRange | undefined,
+    filterOptions?: UnifiedFetchOptions
+  ): Promise<FetchAlertsRawResult> {
+    if (!this.promBackend?.getAlertmanagerAlerts) {
+      // Caller already gated on this; defensive return for the type
+      // narrower.
+      return { alerts: [] };
+    }
+
+    const amMatchers = mapAlertFiltersToAm(filterOptions);
+    const amOptions = {
+      filter: amMatchers,
+      // Default AM v2 view: include active + silenced + inhibited so
+      // the unified table can render the per-state badges. The state
+      // filter (if any) is applied JS-side via `applyAlertFilters` so
+      // the cache stays generic across state filter shapes.
+      noCache: filterOptions?.noCache === true,
+    };
+    const amAlerts = await this.promBackend.getAlertmanagerAlerts(client, ds, amOptions);
+
+    // No range supplied — return the AM set straight.
+    if (!range) {
+      return {
+        alerts: amAlerts.map((a) => alertmanagerAlertToUnified(a, ds.id)),
+      };
+    }
+
+    // Range supplied — merge AM (current) with historical topk
+    // candidates (AM is current-state only). AM wins on fingerprint
+    // collision; the workspace _workspace post-filter on AM rows is
+    // best-effort because AM doesn't carry that synthetic label by
+    // default — workspace-scoped Prom rules push the workspace via
+    // the rule's labels, which AM forwards.
+    const merged = new Map<string, UnifiedAlertSummary>();
+
+    if (range.endIsNow) {
+      for (const a of amAlerts) {
+        const summary = alertmanagerAlertToUnified(a, ds.id);
+        merged.set(promAlertFingerprint(summary.labels), summary);
+      }
+    }
+
+    // P6.8 short-range gate also applies on the AM path.
+    const SHORT_NOW_RANGE_MS = 2 * 60 * 1000;
+    const isShortNowRange = range.endIsNow && range.endMs - range.startMs <= SHORT_NOW_RANGE_MS;
+
+    let historical: { candidates: PromHistoricalAlertCandidate[]; truncated: boolean } = {
+      candidates: [],
+      truncated: false,
+    };
+    if (!isShortNowRange && this.promBackend.getHistoricalAlerts) {
+      historical = await this.promBackend.getHistoricalAlerts(client, ds, {
+        startMs: range.startMs,
+        endMs: range.endMs,
+        severity: filterOptions?.severity,
+        labels: filterOptions?.labels,
+        search: filterOptions?.search,
+        noCache: filterOptions?.noCache === true,
+      });
+    }
+    for (const c of historical.candidates) {
+      const fp = promAlertFingerprint(c.labels);
+      if (merged.has(fp)) continue;
+      merged.set(fp, promHistoricalAlertToUnified(c, ds.id));
+    }
+
+    return {
+      alerts: Array.from(merged.values()),
+      ...(historical.truncated ? { fallback: 'prometheus-search-truncated' as const } : {}),
+    };
   }
 
   /** Public counterpart to `fetchAlertsRaw` for the rule-facet path. */

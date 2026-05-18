@@ -696,4 +696,60 @@ describe('DirectQueryPrometheusBackend', () => {
       });
     });
   });
+
+  // ----- P6.1: getAlertmanagerAlerts filter pushdown + cache -----
+  describe('getAlertmanagerAlerts (P6.1)', () => {
+    const stubResp = () => ({
+      body: [
+        {
+          labels: { alertname: 'A' },
+          annotations: {},
+          startsAt: '2026-05-18T00:00:00Z',
+          endsAt: '2026-05-18T00:05:00Z',
+          fingerprint: 'fp-A',
+          status: { state: 'active', silencedBy: [], inhibitedBy: [] },
+          receivers: [],
+        },
+      ],
+    });
+
+    it('forwards filter[]= matchers + active/silenced/inhibited flags as query params', async () => {
+      mockClient.transport.request.mockResolvedValueOnce(stubResp());
+      await backend.getAlertmanagerAlerts(mockClient as never, ds, {
+        filter: ['severity="critical"', 'service=~"cart|checkout"'],
+        active: true,
+        silenced: false,
+        inhibited: true,
+      });
+      const path = (mockClient.transport.request.mock.calls[0][0] as { path: string }).path;
+      expect(path).toContain('filter=severity%3D%22critical%22');
+      expect(path).toContain('filter=service%3D~%22cart%7Ccheckout%22');
+      expect(path).toContain('active=true');
+      expect(path).toContain('silenced=false');
+      expect(path).toContain('inhibited=true');
+    });
+
+    it('reuses the cached response on a second identical call', async () => {
+      mockClient.transport.request.mockResolvedValueOnce(stubResp());
+      await backend.getAlertmanagerAlerts(mockClient as never, ds, { filter: ['a="1"'] });
+      await backend.getAlertmanagerAlerts(mockClient as never, ds, { filter: ['a="1"'] });
+      expect(mockClient.transport.request).toHaveBeenCalledTimes(1);
+    });
+
+    it('different filter shape ⇒ different cache entry', async () => {
+      mockClient.transport.request.mockResolvedValueOnce(stubResp());
+      mockClient.transport.request.mockResolvedValueOnce(stubResp());
+      await backend.getAlertmanagerAlerts(mockClient as never, ds, { filter: ['a="1"'] });
+      await backend.getAlertmanagerAlerts(mockClient as never, ds, { filter: ['a="2"'] });
+      expect(mockClient.transport.request).toHaveBeenCalledTimes(2);
+    });
+
+    it('noCache:true bypasses the cache', async () => {
+      mockClient.transport.request.mockResolvedValueOnce(stubResp());
+      mockClient.transport.request.mockResolvedValueOnce(stubResp());
+      await backend.getAlertmanagerAlerts(mockClient as never, ds);
+      await backend.getAlertmanagerAlerts(mockClient as never, ds, { noCache: true });
+      expect(mockClient.transport.request).toHaveBeenCalledTimes(2);
+    });
+  });
 });

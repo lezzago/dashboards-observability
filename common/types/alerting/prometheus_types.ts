@@ -355,8 +355,27 @@ export interface PrometheusBackend {
   // so each method takes an explicit `ds` to resolve the `directQueryName` used in
   // the resource path. Callers are responsible for selecting a Prometheus datasource.
 
-  /** Get alerts from Alertmanager (richer than Prometheus /api/v1/alerts — includes routing info) */
-  getAlertmanagerAlerts?(client: AlertingOSClient, ds: Datasource): Promise<AlertmanagerAlert[]>;
+  /**
+   * Get alerts from Alertmanager (richer than Prometheus /api/v1/alerts —
+   * includes silence / inhibition / receiver context). P6.1 added
+   * filter-pushdown options: `filter` (raw matchers like
+   * `severity="critical"`) and the `active`/`silenced`/`inhibited` flags
+   * that AM v2 honors natively. `noCache` bypasses the per-process
+   * AM-alerts cache.
+   */
+  getAlertmanagerAlerts?(
+    client: AlertingOSClient,
+    ds: Datasource,
+    options?: {
+      filter?: string[];
+      active?: boolean;
+      silenced?: boolean;
+      inhibited?: boolean;
+      unprocessed?: boolean;
+      receiver?: string;
+      noCache?: boolean;
+    }
+  ): Promise<AlertmanagerAlert[]>;
 
   /** List active silences */
   getSilences?(client: AlertingOSClient, ds: Datasource): Promise<AlertmanagerSilence[]>;
