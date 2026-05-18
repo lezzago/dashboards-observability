@@ -747,7 +747,210 @@ No frontend logic changes; no route changes.
 
 ---
 
-### P6.4 — TBD (placeholder)
+### P6.4 — Reuse the rules-listing cache for rule-detail flyouts
+
+The rule flyout's detail call asks for `{ includeAlerts: true }`,
+which today bypasses `ruleGroupsCache` entirely. Result: every flyout
+open on the `pushdown-ignored` path costs a fresh upstream
+`/api/v1/rules` round-trip even when the rules table loaded the
+listing 10 seconds ago. Fix by separating "list rules" from "list
+each rule's alerts" so the listing portion can hit the cache.
+
+#### Why
+
+`getRuleGroups` (`directquery_prometheus_backend.ts:208-221`) gates
+caching on three conditions:
+
+```ts
+const cacheable = !options?.noCache && !includeAlerts && this.isCacheableRuleFilter(filter);
+if (!cacheable) return fetcher();
+return this.ruleGroupsCache.get(ds.id, fetcher);
+```
+
+`!includeAlerts` means: if the caller wants the embedded `alerts[]`
+on each rule, skip the cache. Why? Because the cache value type is
+`PromRuleGroup[]` and the cache key is `dsId` only. A cached entry
+with stripped `alerts[]` (the listing path's shape) can't satisfy a
+caller that needs `alerts[]` populated. Storing two value variants on
+the same `dsId` key would force casts everywhere or split the cache.
+
+The unintended consequence: **rule-detail flyouts that fall back to
+the unfiltered listing path** (the `pushdown-ignored` case, which
+includes the local Cortex used for development and many older
+production deployments) **pay a full upstream round-trip every flyout
+open**, even though the rules-page listing just fetched essentially
+the same data.
+
+Sequence on a Cortex-without-pushdown deployment:
+
+1. User loads the rules page. Listing call →
+   `getRuleGroups(ds, undefined, { lightweight, no includeAlerts })`
+   → cache miss → upstream `/api/v1/rules` → cache populated.
+2. User clicks a rule. Detail call →
+   `getRuleGroups(ds, undefined, { includeAlerts: true })` →
+   `cacheable = false` → upstream `/api/v1/rules` AGAIN. Even though
+   the table just got 99% of the same data.
+3. User clicks another rule. Detail call → upstream `/api/v1/rules`
+   AGAIN. And so on.
+
+Three flyout opens within the cache TTL ⇒ four upstream calls. The
+right answer is one.
+
+The Prom alerting-rule alert history (`AlertHistoryEntry[]` in the
+flyout) is built from `rule.alerts[]` at `alert_detail.ts:203-208`.
+The rest of the flyout's data comes from the rule's own fields
+(`name`, `query`, `labels`, `annotations`, `state`, `health`,
+`lastEvaluation`, `evaluationTime`) — all of which the listing
+already has. So `alerts[]` is the *only* field that justifies the
+cache bypass.
+
+#### What's lost (and how to backfill)
+
+Nothing on the user-visible side. The flyout still gets the same
+data; the only change is *where* it comes from.
+
+#### Concrete shape
+
+Two seams to choose from. Both have the same on-the-wire effect; the
+implementation cost differs.
+
+**Option A — Two-layer fetch, single cache.** Rebuild the detail-path
+to call `getRuleGroups(ds, filter, { lightweight: true })` (cached)
+to get the rule's metadata, then issue a separate, scoped call for
+the alerts of *that one rule*. The "alerts of one rule" call is
+either:
+
+- A separate Prom API call: there isn't a clean `/api/v1/alerts?rule=`
+  endpoint. The closest is `/api/v1/alerts` filtered by alertname JS-side,
+  but `/api/v1/alerts` is current-firing only — it'd lose the rule's
+  full alert history (which the flyout shows in the "Alert History"
+  table, including resolved alerts).
+- Re-fetch the rule with `?rule_group=&rule_name=&includeAlerts`
+  via the pushdown path. But this only works when the probe says
+  pushdown works — exactly the case where caching matters less
+  because the pushdown call is already O(1).
+
+The fundamental problem with Option A: **Prom doesn't expose
+"alerts for one rule" as a separate API**. The `alerts[]` array is
+embedded in `/api/v1/rules` responses; there's no GET-by-rule
+shortcut. So Option A degenerates into "either pushdown or full
+listing" — same shape we have today.
+
+**Option B — Two caches, separated by `includeAlerts` shape.** Add
+a second cache:
+
+```ts
+readonly ruleGroupsCache: TtlCache<string, PromRuleGroup[]>;            // existing — alerts[] stripped
+readonly ruleGroupsWithAlertsCache: TtlCache<string, PromRuleGroup[]>;  // NEW — alerts[] populated
+```
+
+`getRuleGroups` chooses which cache to hit based on `includeAlerts`:
+
+```ts
+const cache = options?.includeAlerts ? this.ruleGroupsWithAlertsCache : this.ruleGroupsCache;
+const cacheable = !options?.noCache && this.isCacheableRuleFilter(filter);
+if (!cacheable) return fetcher();
+return cache.get(ds.id, fetcher);
+```
+
+Both caches share the same 30s TTL. Detail flyouts opened in close
+succession reuse the second cache; the rules-page listing reuses the
+first.
+
+**Tradeoffs:**
+
+- The second cache duplicates wire bytes vs the first (full payload
+  including `alerts[]`). For the same `dsId`, two cache entries
+  briefly coexist within the 30s window — once each per flyout-shape
+  vs listing-shape. Memory cost: bounded by `dsId` count × 2 caches
+  × payload size. Acceptable; the full payload is what `/api/v1/rules`
+  returned anyway.
+- **First flyout open after rules-page load is still a cache miss.**
+  The two caches don't share entries (different value shapes). What
+  improves is the *second* and subsequent flyout opens — those reuse
+  the new cache. So the win is "successive flyout browsing" not
+  "first flyout after listing."
+- **Refresh-button invalidation needs to invalidate both caches.**
+  Today `noCache=1` invalidates `ruleGroupsCache` for the listing
+  path; the detail path doesn't go through the same flag because it
+  always bypassed cache. Add invalidation symmetry: refresh button
+  invalidates both `ruleGroupsCache` and `ruleGroupsWithAlertsCache`
+  for the affected `dsId`.
+
+Go with **Option B.** Pure additive. The duplication is real but
+small (≤ 2 cache entries per `dsId`).
+
+**Option C — Keep one cache, store both shapes per entry.** Cache
+value becomes `{ stripped: PromRuleGroup[]; full: PromRuleGroup[] }`,
+populated lazily — first call populates one shape, second call
+(opposite shape) populates the other. The first shape's data isn't
+re-fetched when the second is requested *if* we accept that the full
+shape can be derived from the stripped shape + a separate fetch. But
+again, "separate fetch" doesn't exist for `alerts[]` — so this
+option doesn't actually save an upstream call vs Option B.
+
+Option B wins on simplicity.
+
+#### File-by-file change list
+
+- `server/services/alerting/directquery_prometheus_backend.ts`:
+  - Add `ruleGroupsWithAlertsCache` instance alongside the existing
+    `ruleGroupsCache` (~3 lines).
+  - `getRuleGroups` selects cache based on `includeAlerts` (~5 lines).
+  - On `noCache`, invalidate both caches for the `dsId` (~2 lines).
+- `server/services/alerting/__tests__/directquery_prometheus_backend.test.ts`:
+  - Cache-hit tests for both shapes; cross-cache isolation; noCache
+    invalidates both. ~30 lines.
+
+No service / route / frontend changes.
+
+#### Acceptance criteria
+
+1. **Rules table → flyout → flyout (Cortex without pushdown)**
+   Open the rules page. Open one rule flyout. Close it. Open another
+   rule flyout. Network panel: the second flyout open issues a
+   plugin-route call but **no upstream `/api/v1/rules`** call (cache
+   hit on `ruleGroupsWithAlertsCache`). Today: every open is an
+   upstream call.
+2. **Rules table → flyout (cold)** — first flyout open after a
+   listing load still pays one upstream call (the two caches are
+   independent — same as today, no regression).
+3. **Refresh button** — refresh from the rules page invalidates both
+   caches; subsequent flyout open re-fetches.
+4. **Pushdown path unaffected** — when the probe says
+   `pushdown-works`, flyouts go through the scoped
+   `?rule_group=&rule_name=` path. That path is uncached because
+   it carries a non-cacheable filter shape (per `isCacheableRuleFilter`).
+   No change.
+5. **Phase 1-5 acceptance criteria still hold.**
+
+#### Risk register
+
+- **Memory growth from the second cache.** Each `dsId` can hold up
+  to 2 cache entries × full payload. For a deployment with 10
+  Prom datasources × 10k rules × 200 bytes/rule (full shape including
+  `alerts[]`), that's ~40 MB across both caches. Acceptable for a
+  Node process; if it ever isn't, add an LRU bound to `TtlCache`.
+- **Stale `alerts[]` after a rule fires.** A flyout opened 25s after
+  a listing load may show alert state that's 25s out of date — same
+  staleness window as today's listing cache. The Refresh button
+  invalidates. Document.
+- **Probe interaction.** The filter probe baseline call passes
+  `?type=alert` only (no `includeAlerts`), so it hits the existing
+  cache. The probe scoped call passes `?rule_group=&rule_name=&type=alert`
+  which is uncached either way. No change.
+
+#### Out of scope
+
+- A unified single cache with shape-aware reuse. Conceptually nicer
+  but the upstream API doesn't expose a shape-conversion path
+  (`alerts[]` can't be derived from a stripped response).
+- `noCache` per-flyout. The detail handler currently doesn't expose a
+  refresh path; adding one is a UX change, not a perf change. Defer.
+
+---
+
+### P6.5 — TBD (placeholder)
 
 (To be filled in.)
 
