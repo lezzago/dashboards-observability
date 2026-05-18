@@ -653,4 +653,72 @@ describe('MultiBackendAlertService — routing & list', () => {
       expect(res).toMatchObject({ page: 1, pageSize: 10, total: 0 });
     });
   });
+
+  // ============================================================================
+  // P6.6 — per-datasource withTimeout on paginated paths.
+  // Phase 4 dropped the wrapper; restoring it ensures one slow upstream
+  // does not block the whole listing.
+  // ============================================================================
+  describe('per-datasource timeout (P6.6)', () => {
+    it('getPaginatedAlerts: slow datasource surfaces as a timeout warning, healthy DS still returns', async () => {
+      // OS resolves quickly with one alert. Prom hangs (resolve never called).
+      mockOsBackend.getAlerts.mockResolvedValueOnce({
+        alerts: [
+          {
+            id: '1',
+            monitor_id: 'm',
+            monitor_name: 'm',
+            trigger_id: 't',
+            trigger_name: 't',
+            state: 'ACTIVE',
+            severity: '1',
+            start_time: 100,
+            last_notification_time: 100,
+            end_time: null,
+            error_message: null,
+            version: 1,
+            monitor_version: 1,
+            acknowledged_time: null,
+            action_execution_results: [],
+          },
+        ],
+        totalAlerts: 1,
+        truncated: false,
+      });
+      mockPromBackend.getAlerts.mockReset();
+      mockPromBackend.getAlerts.mockImplementation(() => new Promise(() => undefined));
+
+      const res = await svc.getPaginatedAlerts({} as never, {
+        page: 1,
+        pageSize: 10,
+        timeoutMs: 25,
+      });
+
+      const promWarning = res.warnings?.find((w) => w.datasourceId === 'ds-prom');
+      expect(promWarning).toBeDefined();
+      expect(promWarning?.error).toMatch(/timed out/i);
+      expect(res.results).toHaveLength(1);
+      expect(res.results[0].datasourceType).toBe('opensearch');
+    });
+
+    it('getPaginatedRules: slow datasource surfaces as a timeout warning', async () => {
+      mockOsBackend.getMonitors.mockResolvedValueOnce({
+        monitors: [],
+        total: 0,
+        hasMore: false,
+      });
+      mockPromBackend.getRuleGroups.mockReset();
+      mockPromBackend.getRuleGroups.mockImplementation(() => new Promise(() => undefined));
+
+      const res = await svc.getPaginatedRules({} as never, {
+        page: 1,
+        pageSize: 10,
+        timeoutMs: 25,
+      });
+
+      const promWarning = res.warnings?.find((w) => w.datasourceId === 'ds-prom');
+      expect(promWarning).toBeDefined();
+      expect(promWarning?.error).toMatch(/timed out/i);
+    });
+  });
 });

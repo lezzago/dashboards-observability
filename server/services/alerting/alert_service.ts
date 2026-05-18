@@ -43,7 +43,7 @@ import {
   UnifiedRuleSummary,
 } from '../../../common/types/alerting';
 import { parseDateMathMs } from '../../../common/services/alerting';
-import { TimeoutError } from './timeout_error';
+import { TimeoutError, withTimeout } from './timeout_error';
 import {
   getAlertDetail as getAlertDetailImpl,
   getRuleDetail as getRuleDetailImpl,
@@ -645,6 +645,7 @@ export class MultiBackendAlertService {
   ): Promise<PaginatedResponse<UnifiedRuleSummary>> {
     const page = Math.max(1, options?.page ?? 1);
     const pageSize = Math.min(Math.max(1, options?.pageSize ?? 20), 200);
+    const timeoutMs = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     const datasources = filterDatasourcesByBackend(
       await this.resolveDatasources(options?.dsIds),
       options?.backend
@@ -654,10 +655,17 @@ export class MultiBackendAlertService {
     const warnings: DatasourceWarning[] = [];
 
     const isResolver = typeof clientOrResolver === 'function';
+    // Per-datasource timeout — restored from Phase 0's progressive
+    // contract. Without it one slow upstream blocks the whole listing
+    // and the user gets a 504 instead of a per-DS warning.
     const dsResults = await Promise.allSettled(
       datasources.map(async (ds) => {
         const client = isResolver ? await clientOrResolver(ds.id) : clientOrResolver;
-        return this.fetchRulesRaw(client, ds, options);
+        return withTimeout(
+          this.fetchRulesRaw(client, ds, options),
+          timeoutMs,
+          `Datasource ${ds.name} timed out after ${timeoutMs}ms`
+        );
       })
     );
 
@@ -669,6 +677,16 @@ export class MultiBackendAlertService {
         this.logger.error(
           `Failed to fetch rules from ${datasources[i].name} (${datasources[i].id}): ${settled.reason}`
         );
+        if (settled.reason instanceof TimeoutError) {
+          // Drop the in-flight cache entry so the next request doesn't
+          // re-await an already-abandoned promise. TtlCache stores the
+          // in-flight promise on miss; without invalidation the next
+          // call would hand back the same rejected promise even after
+          // the upstream recovered.
+          (this.promBackend as
+            | { ruleGroupsCache?: { invalidate?: (k: string) => void } }
+            | undefined)?.ruleGroupsCache?.invalidate?.(datasources[i].id);
+        }
         warnings.push({
           datasourceId: datasources[i].id,
           datasourceName: datasources[i].name,
@@ -716,6 +734,7 @@ export class MultiBackendAlertService {
   ): Promise<PaginatedResponse<UnifiedAlertSummary>> {
     const page = Math.max(1, options?.page ?? 1);
     const pageSize = Math.min(Math.max(1, options?.pageSize ?? 20), 200);
+    const timeoutMs = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     const datasources = filterDatasourcesByBackend(
       await this.resolveDatasources(options?.dsIds),
       options?.backend
@@ -727,10 +746,17 @@ export class MultiBackendAlertService {
     const resolvedRange = resolveRangeMsFromOptions(options);
 
     const isResolver = typeof clientOrResolver === 'function';
+    // Per-datasource timeout — restored from Phase 0's progressive
+    // contract. Without it one slow upstream blocks the whole listing
+    // and the user gets a 504 instead of a per-DS warning.
     const dsResults = await Promise.allSettled(
       datasources.map(async (ds) => {
         const client = isResolver ? await clientOrResolver(ds.id) : clientOrResolver;
-        return this.fetchAlertsRaw(client, ds, resolvedRange, options);
+        return withTimeout(
+          this.fetchAlertsRaw(client, ds, resolvedRange, options),
+          timeoutMs,
+          `Datasource ${ds.name} timed out after ${timeoutMs}ms`
+        );
       })
     );
 
@@ -754,6 +780,14 @@ export class MultiBackendAlertService {
         this.logger.error(
           `Failed to fetch alerts from ${datasources[i].name} (${datasources[i].id}): ${settled.reason}`
         );
+        if (settled.reason instanceof TimeoutError) {
+          // Drop the in-flight cache entry so the next request doesn't
+          // re-await an already-abandoned promise. See getPaginatedRules
+          // for the same rationale.
+          (this.promBackend as
+            | { alertsCache?: { invalidate?: (k: string) => void } }
+            | undefined)?.alertsCache?.invalidate?.(datasources[i].id);
+        }
         warnings.push({
           datasourceId: datasources[i].id,
           datasourceName: datasources[i].name,
@@ -973,7 +1007,7 @@ export class MultiBackendAlertService {
     });
 
     try {
-      const raw = await this.withTimeout(
+      const raw = await withTimeout(
         this.fetchAlertsRaw(client, ds, range),
         timeoutMs,
         `Datasource ${ds.name} timed out after ${timeoutMs}ms`
@@ -1015,7 +1049,7 @@ export class MultiBackendAlertService {
     });
 
     try {
-      const data = await this.withTimeout(
+      const data = await withTimeout(
         this.fetchRulesRaw(client, ds),
         timeoutMs,
         `Datasource ${ds.name} timed out after ${timeoutMs}ms`
@@ -1251,34 +1285,6 @@ export class MultiBackendAlertService {
       if (match.length > 0) resolved.push(match[0]);
     }
     return resolved;
-  }
-
-  private withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
-    return new Promise<T>((resolve, reject) => {
-      let settled = false;
-      const timer = setTimeout(() => {
-        if (!settled) {
-          settled = true;
-          reject(new TimeoutError(message, ms));
-        }
-      }, ms);
-      promise.then(
-        (val) => {
-          if (!settled) {
-            settled = true;
-            clearTimeout(timer);
-            resolve(val);
-          }
-        },
-        (err) => {
-          if (!settled) {
-            settled = true;
-            clearTimeout(timer);
-            reject(err);
-          }
-        }
-      );
-    });
   }
 
   /**

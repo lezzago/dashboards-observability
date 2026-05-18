@@ -186,6 +186,23 @@ describe('computeAlertFacets', () => {
     expect(facets.warnings).toBeDefined();
     expect(facets.warnings?.[0].datasourceId).toBe('ds-prom');
   });
+
+  // P6.6 — facet path now wraps each per-DS fetch in `withTimeout`. A
+  // hung Prom datasource must surface as a warning, not block the call.
+  it('isolates a slow datasource via per-DS timeout (P6.6)', async () => {
+    const svc = ({
+      resolveDatasources: jest.fn(async () => [osDs, promDs]),
+      fetchAlertsRaw: jest.fn((_c: AlertingOSClient, ds: Datasource) => {
+        if (ds.id === 'ds-prom') return new Promise(() => undefined); // hangs
+        return Promise.resolve({ alerts: [mkAlert({ id: 'a1' })] });
+      }),
+    } as unknown) as MultiBackendAlertService;
+    const facets = await computeAlertFacets(svc, stubResolver, { timeoutMs: 25 });
+    expect(facets.total).toBe(1);
+    const promWarning = facets.warnings?.find((w) => w.datasourceId === 'ds-prom');
+    expect(promWarning).toBeDefined();
+    expect(promWarning?.error).toMatch(/timed out/i);
+  });
 });
 
 describe('computeRuleFacets', () => {

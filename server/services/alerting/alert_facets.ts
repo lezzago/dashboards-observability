@@ -39,6 +39,14 @@ import {
   filterDatasourcesByBackend,
   resolveRangeMsFromOptions,
 } from './alert_service';
+import { withTimeout } from './timeout_error';
+
+/**
+ * Per-datasource timeout for facet fan-out. Mirrors the paginated path's
+ * `DEFAULT_TIMEOUT_MS = 10_000` so a slow upstream produces a per-DS
+ * warning instead of a 504. Caller can override via `options.timeoutMs`.
+ */
+const FACET_DEFAULT_TIMEOUT_MS = 10_000;
 
 export const MAX_FACET_SCAN = 10_000;
 export const MAX_LABEL_KEYS = 20;
@@ -171,11 +179,19 @@ async function fetchFilteredAlerts(
   );
   const range = resolveRangeMsFromOptions(options);
   const baseOptions = stripDimensionalFilters(options);
+  const timeoutMs = options.timeoutMs ?? FACET_DEFAULT_TIMEOUT_MS;
 
+  // Per-datasource timeout — restored from Phase 0's progressive
+  // contract. Without it one slow upstream blocks the whole facet
+  // call and the user gets a 504 instead of a per-DS warning.
   const settled = await Promise.allSettled(
     datasources.map(async (ds: Datasource) => {
       const client = await clientResolver(ds.id);
-      return alertSvc.fetchAlertsRaw(client, ds, range, baseOptions);
+      return withTimeout(
+        alertSvc.fetchAlertsRaw(client, ds, range, baseOptions),
+        timeoutMs,
+        `Datasource ${ds.name} timed out after ${timeoutMs}ms`
+      );
     })
   );
 
@@ -223,11 +239,17 @@ async function fetchFilteredRules(
     options.backend
   );
   const baseOptions = stripDimensionalFilters(options);
+  const timeoutMs = options.timeoutMs ?? FACET_DEFAULT_TIMEOUT_MS;
 
+  // Per-datasource timeout — see fetchFilteredAlerts above for rationale.
   const settled = await Promise.allSettled(
     datasources.map(async (ds: Datasource) => {
       const client = await clientResolver(ds.id);
-      return alertSvc.fetchRulesRaw(client, ds, baseOptions);
+      return withTimeout(
+        alertSvc.fetchRulesRaw(client, ds, baseOptions),
+        timeoutMs,
+        `Datasource ${ds.name} timed out after ${timeoutMs}ms`
+      );
     })
   );
 
