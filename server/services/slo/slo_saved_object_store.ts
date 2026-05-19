@@ -12,15 +12,18 @@
  */
 
 import type { SavedObjectsClientContract } from '../../../../../src/core/server';
-import type { Logger } from '../../../common/types/alerting';
 import type { ISloStore, SloDocument } from '../../../common/slo/slo_types';
-import { isSavedObjectNotFound } from './saved_object_helpers';
 
 const SO_TYPE = 'slo-definition';
 
 interface SavedObjectEnvelope {
   id: string;
   attributes: Record<string, unknown>;
+}
+
+function isSavedObjectNotFound(err: unknown): boolean {
+  const e = err as { output?: { statusCode?: number }; statusCode?: number } | undefined;
+  return e?.output?.statusCode === 404 || e?.statusCode === 404;
 }
 
 /**
@@ -33,27 +36,19 @@ interface SavedObjectEnvelope {
  * so that listing filters can work at the index level.
  */
 function projectAttributes(doc: SloDocument): Record<string, unknown> {
-  // Defensive: every projection coerces optional fields. The route schema
-  // validates spec shape at the boundary, but the dual-write path runs the
-  // SO save *after* the ruler upsert lands — a partial-spec edge case here
-  // would leave a dangling rule group with no SO record. Coerce nullish
-  // dimensions / objectives / owner.teams arrays into safe defaults.
-  const objectives = Array.isArray(doc.spec.objectives) ? doc.spec.objectives : [];
   const worstTarget =
-    objectives.length > 0
-      ? objectives.reduce((acc, o) => Math.max(acc, typeof o.target === 'number' ? o.target : 0), 0)
+    doc.spec.objectives.length > 0
+      ? doc.spec.objectives.reduce((acc, o) => Math.max(acc, o.target), 0)
       : 0;
-  const single = doc.spec.sli?.type === 'single' ? doc.spec.sli : null;
-  const sliBackend = single?.definition?.backend;
-  const sliLeafType = single?.definition?.type;
-  const dimensions = Array.isArray(single?.dimensions) ? single!.dimensions : [];
-  const dimensionNames = dimensions.map((d) => d.name);
-  const dimensionValues = dimensions.map((d) => d.value);
+  const single = doc.spec.sli.type === 'single' ? doc.spec.sli : null;
+  const sliBackend = single?.definition.backend;
+  const sliLeafType = single?.definition.type;
+  const dimensionNames = single?.dimensions.map((d) => d.name) ?? [];
+  const dimensionValues = single?.dimensions.map((d) => d.value) ?? [];
   const labelKeys = Object.keys(doc.spec.labels ?? {});
   const labelValues = Object.entries(doc.spec.labels ?? {}).flatMap(([, v]) =>
     Array.isArray(v) ? v : [v]
   );
-  const ownerTeams = Array.isArray(doc.spec.owner?.teams) ? doc.spec.owner.teams : [];
   return {
     spec: doc.spec,
     status: doc.status,
@@ -64,16 +59,16 @@ function projectAttributes(doc: SloDocument): Record<string, unknown> {
     enabled: doc.spec.enabled,
     mode: doc.spec.mode,
     service: doc.spec.service,
-    ownerTeams,
-    ownerPrimaryUser: doc.spec.owner?.primaryUser,
+    ownerTeams: doc.spec.owner.teams,
+    ownerPrimaryUser: doc.spec.owner.primaryUser,
     tier: doc.spec.tier,
-    primaryOwnerTeam: ownerTeams[0],
-    sliNodeType: doc.spec.sli?.type,
+    primaryOwnerTeam: doc.spec.owner.teams[0],
+    sliNodeType: doc.spec.sli.type,
     sliBackend,
     sliLeafType,
     dimensionNames,
     dimensionValues,
-    objectiveCount: objectives.length,
+    objectiveCount: doc.spec.objectives.length,
     worstTarget,
     labelKeys,
     labelValues,
@@ -99,10 +94,7 @@ function fromAttributes(obj: SavedObjectEnvelope): SloDocument {
 }
 
 export class SavedObjectSloStore implements ISloStore {
-  constructor(
-    private readonly client: SavedObjectsClientContract,
-    private readonly logger?: Logger
-  ) {}
+  constructor(private readonly client: SavedObjectsClientContract) {}
 
   async get(id: string): Promise<SloDocument | null> {
     try {
@@ -116,11 +108,6 @@ export class SavedObjectSloStore implements ISloStore {
 
   async list(datasourceIds?: string[]): Promise<SloDocument[]> {
     const results: SloDocument[] = [];
-    // Track how many SOs we've seen (pre-filter) separately from how many
-    // we successfully decoded — `results` excludes malformed docs so it
-    // permanently lags `response.total` whenever any doc fails decoding,
-    // which would otherwise force one extra empty round-trip per list.
-    let processed = 0;
     let page = 1;
     const perPage = 1000;
     while (true) {
@@ -141,18 +128,11 @@ export class SavedObjectSloStore implements ISloStore {
       for (const obj of response.saved_objects as SavedObjectEnvelope[]) {
         try {
           results.push(fromAttributes(obj));
-        } catch (err) {
-          // Skip malformed docs rather than failing the whole listing — but
-          // log so a corrupted SO doesn't vanish from the UI without trace.
-          this.logger?.warn(
-            `SavedObjectSloStore.list: skipping malformed slo-definition ${obj.id}: ${
-              err instanceof Error ? err.message : String(err)
-            }`
-          );
+        } catch {
+          // Skip malformed docs rather than failing the whole listing.
         }
       }
-      processed += response.saved_objects.length;
-      if (response.saved_objects.length === 0 || processed >= response.total) break;
+      if (response.saved_objects.length === 0 || results.length >= response.total) break;
       page++;
     }
     return results;

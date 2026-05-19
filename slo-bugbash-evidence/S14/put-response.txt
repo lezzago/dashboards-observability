@@ -1,0 +1,2 @@
+{"statusCode":400,"error":"Bad Request","message":"Validation failed","attributes":{"error":"Validation failed","errors":{"spec.datasourceId":"Datasource \"ds-4\" is not registered. Pick one from /api/alerting/datasources."}}}
+HTTP_CODE: 400
