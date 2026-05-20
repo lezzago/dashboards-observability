@@ -38,6 +38,9 @@ import type { ISloStore } from '../common/slo/slo_types';
 import { SavedObjectSloStore } from './services/slo/slo_saved_object_store';
 import { DirectQueryRulerClient } from './services/slo/ruler_client';
 import { SloRuleRefStore } from './services/slo/slo_rule_ref_store';
+import { DirectQueryStatusAggregator } from './services/slo/status_aggregator';
+import { InMemoryDatasourceService } from './services/alerting/datasource_service';
+import { DatasourceDiscoveryService } from './services/alerting/datasource_discovery';
 import { AssistantPluginSetup, ObservabilityPluginSetup, ObservabilityPluginStart } from './types';
 
 export interface ObservabilityPluginSetupDependencies {
@@ -343,15 +346,29 @@ export class ObservabilityPlugin
       const sloService = new SloService(sloLogger, initialStore);
       sloService.setDedupEnabled(ruleDedupEnabled);
       sloService.setPluginVersion(this.initializerContext.env.packageInfo.version);
+      // Wire the DirectQuery status aggregator so SLO list/detail responses
+      // surface real Cortex-derived state (healthy/breaching/warning) instead
+      // of the no-op stub that always returns no_data.
+      sloService.setStatusAggregator(new DirectQueryStatusAggregator(sloLogger));
       this.sloService = sloService;
 
       const rulerClient = new DirectQueryRulerClient(this.logger);
+      // Followups' SLO routes need an InMemoryDatasourceService + a
+      // DatasourceDiscoveryService to resolve free-text Datasource IDs at
+      // create/update/delete time. Without these, buildDeployContext returns
+      // undefined, the SO is saved, but the ruler dual-write silently no-ops
+      // (commit 4de0c0cf). Wired here to keep the SLO ruler write path live
+      // on this branch.
+      const sloDatasourceService = new InMemoryDatasourceService(sloLogger);
+      const sloDiscoveryService = new DatasourceDiscoveryService(sloDatasourceService, sloLogger);
       registerSloRoutes({
         router,
         sloService,
         logger: this.logger,
         rulerClient,
         ruleDedupEnabled,
+        datasourceService: sloDatasourceService,
+        discoveryService: sloDiscoveryService,
       });
     }
 
