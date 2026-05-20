@@ -108,6 +108,8 @@ interface ServicesTablePanelProps {
   sloRefetch: () => void;
   /** Prometheus datasource id used by SLO-rule queries. Empty string disables the sparkline. */
   sloDatasourceId: string;
+  /** Feature flag — when false the SLO health panel is omitted entirely. */
+  sloFeatureEnabled: boolean;
 }
 
 /**
@@ -139,6 +141,7 @@ const ServicesTablePanelUI: React.FC<ServicesTablePanelProps> = ({
   sloError,
   sloRefetch,
   sloDatasourceId,
+  sloFeatureEnabled,
 }) => (
   <>
     {/* Top Widgets Row */}
@@ -174,16 +177,19 @@ const ServicesTablePanelUI: React.FC<ServicesTablePanelProps> = ({
 
     <EuiSpacer size="s" />
 
-    {/* SLO health summary — independent of the time picker on purpose. */}
-    <SloHealthPanel
-      aggregate={sloAggregate}
-      bySvc={sloBySvc}
-      allServices={sloAllServices}
-      isLoading={sloIsLoading}
-      error={sloError}
-      onRetry={sloRefetch}
-      prometheusConnectionId={sloDatasourceId}
-    />
+    {/* SLO health summary — independent of the time picker on purpose.
+        Suppressed when the SLO feature flag is off. */}
+    {sloFeatureEnabled && (
+      <SloHealthPanel
+        aggregate={sloAggregate}
+        bySvc={sloBySvc}
+        allServices={sloAllServices}
+        isLoading={sloIsLoading}
+        error={sloError}
+        onRetry={sloRefetch}
+        prometheusConnectionId={sloDatasourceId}
+      />
+    )}
 
     {/* Services Table */}
     <EuiPanel>
@@ -379,7 +385,12 @@ export const ServicesHome: React.FC<ServicesHomeProps> = ({
     [serviceNamesKey]
   );
 
-  const sloHealthDisabled = !sloApiClient || !sloDatasourceId;
+  // Feature flag: when `observability.slo.enabled` is false the SLO panel,
+  // table column, and rollup hook all short-circuit. Mirrors the
+  // `!sloApiClient || !sloDatasourceId` "not configured" path so the page
+  // renders without SLO surfaces at all.
+  const sloFeatureEnabled = !!coreRefs.sloEnabled;
+  const sloHealthDisabled = !sloFeatureEnabled || !sloApiClient || !sloDatasourceId;
   const sloHealth = useServiceSloHealth({
     // Passing an empty array when SLOs aren't configured keeps the hook
     // side-effect-free without having to branch in the consumer components.
@@ -1045,37 +1056,49 @@ export const ServicesHome: React.FC<ServicesHomeProps> = ({
           return <EuiText size="s">{getEnvironmentDisplayName(environment)}</EuiText>;
         },
       },
-      {
-        field: 'serviceName' as any,
-        name: (
-          <EuiFlexGroup gutterSize="xs" alignItems="center" responsive={false}>
-            <EuiFlexItem grow={false}>{SLO_HEALTH_COLUMN_HEADER}</EuiFlexItem>
-            <EuiFlexItem grow={false}>
-              <EuiToolTip content={SLO_HEALTH_COLUMN_HEADER_TIP}>
-                <EuiIcon type="questionInCircle" size="s" color="subdued" />
-              </EuiToolTip>
-            </EuiFlexItem>
-          </EuiFlexGroup>
-        ),
-        width: SLO_HEALTH_COLUMN_WIDTH,
-        align: 'left',
-        // Do NOT read the cell value from `item` here — we go through the
-        // stable accessor so the cell re-renders only when the hook's Map
-        // actually changes, not on every EuiResizableContainer mousemove.
-        render: (_value: unknown, item: ServiceTableItem) => {
-          const accessed = getSloHealth(item.serviceName);
-          return (
-            <SloHealthCell
-              serviceName={item.serviceName}
-              bucket={accessed.bucket}
-              isLoading={accessed.isLoading}
-              error={accessed.error}
-            />
-          );
-        },
-      },
+      ...(sloFeatureEnabled
+        ? [
+            {
+              field: 'serviceName' as any,
+              name: (
+                <EuiFlexGroup gutterSize="xs" alignItems="center" responsive={false}>
+                  <EuiFlexItem grow={false}>{SLO_HEALTH_COLUMN_HEADER}</EuiFlexItem>
+                  <EuiFlexItem grow={false}>
+                    <EuiToolTip content={SLO_HEALTH_COLUMN_HEADER_TIP}>
+                      <EuiIcon type="questionInCircle" size="s" color="subdued" />
+                    </EuiToolTip>
+                  </EuiFlexItem>
+                </EuiFlexGroup>
+              ),
+              width: SLO_HEALTH_COLUMN_WIDTH,
+              align: 'left' as const,
+              // Do NOT read the cell value from `item` here — we go through the
+              // stable accessor so the cell re-renders only when the hook's Map
+              // actually changes, not on every EuiResizableContainer mousemove.
+              render: (_value: unknown, item: ServiceTableItem) => {
+                const accessed = getSloHealth(item.serviceName);
+                return (
+                  <SloHealthCell
+                    serviceName={item.serviceName}
+                    bucket={accessed.bucket}
+                    isLoading={accessed.isLoading}
+                    error={accessed.error}
+                  />
+                );
+              },
+            },
+          ]
+        : []),
     ],
-    [onServiceClick, metricsMap, metricsLoading, timeRange, latencyPercentile, getSloHealth]
+    [
+      onServiceClick,
+      metricsMap,
+      metricsLoading,
+      timeRange,
+      latencyPercentile,
+      getSloHealth,
+      sloFeatureEnabled,
+    ]
   );
 
   if (error) {
@@ -1440,6 +1463,7 @@ export const ServicesHome: React.FC<ServicesHomeProps> = ({
                           sloError={sloHealthError}
                           sloRefetch={sloHealth.refetch}
                           sloDatasourceId={sloDatasourceId}
+                          sloFeatureEnabled={sloFeatureEnabled}
                         />
                       </EuiResizablePanel>
                     </>

@@ -173,7 +173,11 @@ export const ServiceDetails: React.FC<ServiceDetailsProps> = ({
       } as unknown) as SloApiClient),
     []
   );
-  const sloHealthDisabled = !sloApiClient || !prometheusConnectionId;
+  // Feature flag: when `observability.slo.enabled` is false the SLOs tab is
+  // hidden entirely and the rollup hook short-circuits. Mirrors the existing
+  // "no datasource → disabled" path.
+  const sloFeatureEnabled = !!coreRefs.sloEnabled;
+  const sloHealthDisabled = !sloFeatureEnabled || !sloApiClient || !prometheusConnectionId;
   const tabSloHealth = useServiceSloHealth({
     serviceNames: sloHealthDisabled ? [] : [serviceName],
     datasourceId: sloHealthDisabled ? '' : prometheusConnectionId,
@@ -236,26 +240,30 @@ export const ServiceDetails: React.FC<ServiceDetailsProps> = ({
           />
         ),
       },
-      {
-        id: SERVICE_DETAILS_CONSTANTS.TABS.SLOS,
-        // The tab label carries the breached-count badge so users spot an
-        // active breach without opening the tab. Badge is suppressed at zero.
-        name: (
-          <span data-test-subj="serviceDetailsTab-slos">
-            <SloTabLabel breached={breachedCount} />
-          </span>
-        ),
-        content: (
-          <ServiceSloTab
-            serviceName={serviceName}
-            bucket={sloBucket}
-            isLoading={tabSloHealth.isLoading}
-            error={sloAccessError}
-            refetch={tabSloHealth.refetch}
-            timeRange={timeRange}
-          />
-        ),
-      },
+      ...(sloFeatureEnabled
+        ? [
+            {
+              id: SERVICE_DETAILS_CONSTANTS.TABS.SLOS,
+              // The tab label carries the breached-count badge so users spot an
+              // active breach without opening the tab. Badge is suppressed at zero.
+              name: (
+                <span data-test-subj="serviceDetailsTab-slos">
+                  <SloTabLabel breached={breachedCount} />
+                </span>
+              ),
+              content: (
+                <ServiceSloTab
+                  serviceName={serviceName}
+                  bucket={sloBucket}
+                  isLoading={tabSloHealth.isLoading}
+                  error={sloAccessError}
+                  refetch={tabSloHealth.refetch}
+                  timeRange={timeRange}
+                />
+              ),
+            },
+          ]
+        : []),
     ],
     [
       serviceName,
@@ -269,6 +277,7 @@ export const ServiceDetails: React.FC<ServiceDetailsProps> = ({
       sloAccessError,
       tabSloHealth.isLoading,
       tabSloHealth.refetch,
+      sloFeatureEnabled,
     ]
   );
 
