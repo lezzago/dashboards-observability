@@ -154,7 +154,7 @@ describe('SLO detail page — panels render', () => {
       .and('contain.text', 'primary');
   });
 
-  it('active SLO: burn-rate chart, budget chart, alerts panel all render', function () {
+  it('active SLO: visualizations + alerts panel render', function () {
     if (!activeId) {
       this.skip();
       return;
@@ -162,9 +162,24 @@ describe('SLO detail page — panels render', () => {
     cy.visit(`${WORKSPACE_PREFIX}/app/${APP_ID}#/slos/${encodeURIComponent(activeId)}`);
     cy.get('[data-test-subj="sloDetailPage"]', { timeout: 30000 }).should('be.visible');
 
-    cy.get('[data-test-subj="slosBurnRateChart"]', { timeout: 20000 }).should('be.visible');
-    cy.get('[data-test-subj="slosBudgetRemainingChart"]').should('be.visible');
-    cy.get('[data-test-subj="slosBurnratePanel"]').should('be.visible');
+    // The visualizations block is gated on an APM-configured Prometheus
+    // datasource (set via the APM Settings modal, persisted as a saved
+    // object). When configured: the burn-rate, budget-remaining, and
+    // burn-rate-tier panels render. When not configured (CI default):
+    // SloVisualizations short-circuits to a single fallback callout.
+    // Either path is a valid mount, so we accept either marker.
+    cy.get(
+      '[data-test-subj="slosBurnRateChart"], [data-test-subj="slosVisualizationsNoDatasource"]',
+      { timeout: 20000 }
+    ).should('be.visible');
+    cy.get('body').then(($body) => {
+      if ($body.find('[data-test-subj="slosBurnRateChart"]').length > 0) {
+        cy.get('[data-test-subj="slosBudgetRemainingChart"]').should('be.visible');
+        cy.get('[data-test-subj="slosBurnratePanel"]').should('be.visible');
+      }
+    });
+    // Alerts panel is independent of the APM datasource config and always
+    // renders for non-composite SLOs.
     cy.get('[data-test-subj="slosDetailAlertsPanel"]').should('be.visible');
   });
 
