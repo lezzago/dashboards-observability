@@ -92,9 +92,14 @@ function buildSpec({ datasourceId, name, service, team }) {
 
 describe('SLO listing — filter & search', () => {
   const datasourceId = Cypress.env('sloDatasourceId') || 'prom_integ_test';
-  // Three SLOs across two services and two teams.
-  const nameA = randomId('cypress-list-a');
-  const nameB = randomId('cypress-list-b');
+  // Three SLOs across two services and two teams. Names embed unique
+  // hyphen-separated tokens; OSD saved-object search tokenizes the `name`
+  // field on hyphens and runs case-insensitive prefix matching, so each
+  // token narrows to exactly one row.
+  const tokA = `unicorna${Math.random().toString(36).slice(2, 6)}`;
+  const tokB = `unicornb${Math.random().toString(36).slice(2, 6)}`;
+  const nameA = `cypress-list-${tokA}-${Date.now().toString(36)}`;
+  const nameB = `cypress-list-${tokB}-${Date.now().toString(36)}`;
   const nameC = randomId('cypress-list-c');
   const created = [];
 
@@ -172,20 +177,28 @@ describe('SLO listing — filter & search', () => {
     cy.get(`[data-test-subj="slosLink-${created[2]}"]`).should('not.exist');
   });
 
-  it(`?service=<unknown> with no matches surfaces the empty-filtered prompt and clear button`, function () {
+  it(`?search= matches a name-token substring`, function () {
     if (created.length < 3) {
       this.skip();
       return;
     }
-    // Note: the listing also exposes a free-text `?search=` param, but with
-    // the current SO mapping (slo-definition.service is keyword-typed) the
-    // search path's `searchFields: ['name','description','service']` causes
-    // OpenSearch to reject the prefix query — see the plugin-source bug
-    // notes in the handoff. We exercise the empty-filtered prompt via
-    // `?service=` instead, which goes through the term-filter code path
-    // and is unaffected.
-    const noMatch = `cypress-no-such-service-${Math.random().toString(36).slice(2, 8)}`;
-    cy.visit(`${WORKSPACE_PREFIX}/app/${APP_ID}#/slos?service=${encodeURIComponent(noMatch)}`);
+    cy.visit(`${WORKSPACE_PREFIX}/app/${APP_ID}#/slos?search=${tokA}`);
+    cy.get('[data-test-subj="slosPage"]', { timeout: 30000 }).should('be.visible');
+    cy.get(`[data-test-subj="slosLink-${created[0]}"]`, { timeout: 20000 }).should('be.visible');
+    cy.get(`[data-test-subj="slosLink-${created[1]}"]`).should('not.exist');
+    cy.get(`[data-test-subj="slosLink-${created[2]}"]`).should('not.exist');
+  });
+
+  it(`?search= with no matches surfaces the empty-filtered prompt and clear button`, function () {
+    if (created.length < 3) {
+      this.skip();
+      return;
+    }
+    // Hyphen-free token so simple_query_string treats it as a single
+    // prefix term (hyphens parse as NOT operators in tokenization, which
+    // would otherwise pre-filter on a positive token).
+    const noMatch = `nosuchtoken${Math.random().toString(36).slice(2, 8)}`;
+    cy.visit(`${WORKSPACE_PREFIX}/app/${APP_ID}#/slos?search=${encodeURIComponent(noMatch)}`);
     cy.get('[data-test-subj="slosPage"]', { timeout: 30000 }).should('be.visible');
     cy.get('[data-test-subj="slosEmptyFilteredZero"]', { timeout: 15000 }).should('be.visible');
     cy.get('[data-test-subj="slosEmptyFilteredClear"]').click();
