@@ -26,6 +26,8 @@ import { PPLParsers } from './parsers/ppl_parser';
 import { registerObservabilityUISettings } from './plugin_helper/register_settings';
 import { setupRoutes } from './routes/index';
 import { registerSloRoutes } from './routes/slo';
+import { registerDefaultClassifiers } from '../common/error';
+import { configureErrorExposure } from './routes/alerting/classified_error';
 import {
   getSearchSavedObject,
   getVisualizationSavedObject,
@@ -340,6 +342,7 @@ export class ObservabilityPlugin
     const observabilityConfig = await this.initializerContext.config
       .create<{
         alertManager?: { enabled?: boolean };
+        errors?: { exposeSensitiveErrorDetail?: boolean };
         slo?: {
           enabled?: boolean;
           ruleDedup?: { enabled: boolean };
@@ -348,6 +351,13 @@ export class ObservabilityPlugin
       }>()
       .pipe(first())
       .toPromise();
+
+    // Stand up the shared error-classification layer: register the default
+    // provider-neutral classifiers and apply the client-exposure policy. A
+    // downstream fork adds higher-priority classifiers / enrichers on top
+    // (registration only, no core edits). See common/error/README.md.
+    registerDefaultClassifiers();
+    configureErrorExposure(observabilityConfig.errors?.exposeSensitiveErrorDetail ?? false);
     // yml-derived defaults for the two UI-visibility flags. When the
     // dynamic-config layer is absent (open-source / GitHub OSD) these
     // values flow straight through to the registered capability defaults

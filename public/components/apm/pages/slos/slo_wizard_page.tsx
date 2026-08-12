@@ -41,6 +41,7 @@ import { useHistory, useParams } from 'react-router-dom';
 import { ChromeStart, NotificationsStart } from '../../../../../../../src/core/public';
 import { HeaderControlledComponentsWrapper } from '../../../../plugin_helpers/plugin_headerControl';
 import { extractRulerErrorEnvelope } from './slo_api_client';
+import { redactForDisplay } from '../../../../../common/error';
 import type { SloApiClient, SloRulerErrorEnvelope } from './slo_api_client';
 import { GeneratedRulesPreview } from './generated_rules_preview';
 import { DatasourceSelect } from './datasource_select';
@@ -575,7 +576,13 @@ export const SloWizardPage: React.FC<SloWizardPageProps> = ({
                           data-test-subj="slosWizardRulerError"
                         >
                           <EuiText size="s">
-                            <p data-test-subj="slosWizardRulerErrorBody">{rulerError.rawBody}</p>
+                            {/* Redact before display — the upstream body can
+                                embed hostnames / URLs / ids. The un-redacted
+                                body remains available server-side by
+                                correlation id. */}
+                            <p data-test-subj="slosWizardRulerErrorBody">
+                              {redactForDisplay(rulerError.rawBody)}
+                            </p>
                             <p>
                               <small>
                                 {i18n.translate(

@@ -30,6 +30,7 @@ import {
 } from '@elastic/eui';
 import { i18n } from '@osd/i18n';
 import { FormattedMessage } from '@osd/i18n/react';
+import { classifyRoutingStatus } from '../../../common/error';
 import { Datasource } from '../../../common/types/alerting';
 import { AlertmanagerAdminService } from './query_services/alertmanager_admin_service';
 
@@ -345,6 +346,10 @@ export const NotificationRoutingPanel: React.FC<NotificationRoutingPanelProps> =
   const inhibitRules = config.config?.inhibitRules || [];
   const cluster = config.cluster;
   const version = config.versionInfo?.version || '—';
+  // Map the raw cluster status through the shared error layer. Null when the
+  // backend reports a healthy 'ready'; otherwise a PARTIAL_STATE classification
+  // whose title replaces the previously-literal "unknown".
+  const routingStatus = classifyRoutingStatus(cluster?.status);
 
   // -----------------------------------------------------------------------
   // Route tree table
@@ -561,12 +566,11 @@ export const NotificationRoutingPanel: React.FC<NotificationRoutingPanelProps> =
       <EuiPanel paddingSize="s" hasBorder>
         <EuiFlexGroup alignItems="center" gutterSize="m" responsive={false}>
           <EuiFlexItem grow={false}>
-            <EuiHealth color={cluster?.status === 'ready' ? 'success' : 'danger'}>
-              {cluster?.status ||
-                i18n.translate(
-                  'observability.alerting.notificationRoutingPanel.clusterStatusUnknown',
-                  { defaultMessage: 'unknown' }
-                )}
+            <EuiHealth color={cluster?.status === 'ready' ? 'success' : 'warning'}>
+              {/* 'ready' is healthy; any other/empty/unknown status is surfaced
+                  through the shared error layer as a partial-state label
+                  ("Routing status unavailable") instead of the literal word. */}
+              {routingStatus ? routingStatus.title : cluster?.status}
             </EuiHealth>
           </EuiFlexItem>
           <EuiFlexItem grow={false}>

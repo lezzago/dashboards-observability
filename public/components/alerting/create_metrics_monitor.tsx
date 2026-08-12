@@ -44,6 +44,11 @@ import { i18n } from '@osd/i18n';
 import { FormattedMessage } from '@osd/i18n/react';
 import { EchartsRender } from './echarts_render';
 import { PromQLEditor } from './promql_editor';
+import {
+  classifiedToastColor,
+  classifiedToastText,
+  extractClassifiedError,
+} from '../common/error';
 import { MetricBrowser } from './metric_browser';
 
 // ============================================================================
@@ -1479,12 +1484,25 @@ export const CreateMetricsMonitor: React.FC<CreateMetricsMonitorProps> = ({
       onSave(form);
     } catch (err) {
       console.error('CreateMetricsMonitor: rule creation failed', err);
-      addToast?.(
-        i18n.translate('observability.alerting.createMetricsMonitor.toast.failed', {
-          defaultMessage: 'Failed to create alert rule.',
-        }),
-        'danger'
-      );
+      // Surface the server's classified error (specific cause + remediation +
+      // correlation id) instead of a static "Failed to create alert rule."
+      // toast. Falls back to the generic message when no structured error is
+      // present (older server, network error, etc.).
+      const classified = extractClassifiedError(err);
+      if (classified) {
+        addToast?.(
+          classified.title,
+          classifiedToastColor(classified) === 'warning' ? 'warning' : 'danger',
+          classifiedToastText(classified)
+        );
+      } else {
+        addToast?.(
+          i18n.translate('observability.alerting.createMetricsMonitor.toast.failed', {
+            defaultMessage: 'Failed to create alert rule.',
+          }),
+          'danger'
+        );
+      }
     } finally {
       setIsSaving(false);
     }

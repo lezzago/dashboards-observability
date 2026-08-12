@@ -5,6 +5,7 @@
 
 import { htmlIdGenerator } from '@elastic/eui';
 import { i18n } from '@osd/i18n';
+import { registerDefaultClassifiers, setTranslator } from '../common/error';
 import React from 'react';
 import { BehaviorSubject, combineLatest } from 'rxjs';
 import { map } from 'rxjs/operators';
@@ -216,6 +217,20 @@ export class ObservabilityPlugin
     setupDeps: SetupDependencies
   ): Promise<ObservabilitySetup> {
     uiSettingsService.init(core.uiSettings, core.notifications);
+
+    // Stand up the shared error-classification layer for the browser: register
+    // the default classifiers and route wording through @osd/i18n. Server
+    // responses carry a structured `errorDetail`; the render adapters localize
+    // it here. Downstream forks add higher-priority classifiers/enrichers on
+    // top (registration only). See common/error/README.md.
+    registerDefaultClassifiers();
+    setTranslator((descriptor) =>
+      i18n.translate(descriptor.id, {
+        defaultMessage: descriptor.defaultMessage,
+        values: descriptor.values,
+      })
+    );
+
     const pplService = new PPLService(core.http);
     const qm = new QueryManager();
     setPPLService(pplService);
