@@ -1157,12 +1157,12 @@ export const AlertsDashboard: React.FC<AlertsDashboardProps> = ({
                         <EuiEmptyPrompt
                           iconType="database"
                           title={
-                            <h4>
+                            <h2>
                               <FormattedMessage
                                 id="observability.alerting.alertsDashboard.noDatasourceTitle"
                                 defaultMessage="No datasource selected"
                               />
-                            </h4>
+                            </h2>
                           }
                           body={
                             <p>
@@ -1191,12 +1191,12 @@ export const AlertsDashboard: React.FC<AlertsDashboardProps> = ({
                         <EuiEmptyPrompt
                           iconType="bell"
                           title={
-                            <h4>
+                            <h2>
                               <FormattedMessage
                                 id="observability.alerting.alertsDashboard.noRulesTitle"
                                 defaultMessage="No rules or detectors have been created"
                               />
-                            </h4>
+                            </h2>
                           }
                           body={
                             <p>
@@ -1225,12 +1225,12 @@ export const AlertsDashboard: React.FC<AlertsDashboardProps> = ({
                           iconType="checkInCircleFilled"
                           iconColor="success"
                           title={
-                            <h4>
+                            <h2>
                               <FormattedMessage
                                 id="observability.alerting.alertsDashboard.noAlertsTitle"
                                 defaultMessage="No alerts in the selected time range"
                               />
-                            </h4>
+                            </h2>
                           }
                           body={
                             <p>
@@ -1248,87 +1248,95 @@ export const AlertsDashboard: React.FC<AlertsDashboardProps> = ({
                   </EuiFlexItem>
                 </EuiFlexGroup>
 
-                <EuiSpacer size="s" />
+                {/* When the page has nothing to show (no datasource / no rules /  */}
+                {/* no alerts in range) the chart-area empty prompt above is the    */}
+                {/* single, focused empty state — suppress the redundant empty      */}
+                {/* "All Alerts" table so we don't stack two empty states.          */}
+                {emptyMode === null && (
+                  <>
+                    <EuiSpacer size="s" />
 
-                {/* ---- Search + Table ---- */}
-                <EuiPanel paddingSize="m" hasBorder className="altTablePanel">
-                  <EuiTitle size="xs">
-                    <h2>
-                      <FormattedMessage
-                        id="observability.alerting.alertsDashboard.allAlertsTitle"
-                        defaultMessage="All Alerts"
+                    {/* ---- Search + Table ---- */}
+                    <EuiPanel paddingSize="m" hasBorder className="altTablePanel">
+                      <EuiTitle size="xs">
+                        <h2>
+                          <FormattedMessage
+                            id="observability.alerting.alertsDashboard.allAlertsTitle"
+                            defaultMessage="All Alerts"
+                          />
+                        </h2>
+                      </EuiTitle>
+                      <EuiSpacer size="s" />
+                      <EuiFieldSearch
+                        placeholder={i18n.translate(
+                          'observability.alerting.alertsDashboard.searchPlaceholder',
+                          {
+                            defaultMessage: 'Search alerts by name, message, or label...',
+                          }
+                        )}
+                        value={searchQuery}
+                        onChange={(e) => setSearchQuery(e.target.value)}
+                        isClearable
+                        fullWidth
+                        aria-label={i18n.translate(
+                          'observability.alerting.alertsDashboard.searchAlertsAriaLabel',
+                          {
+                            defaultMessage: 'Search alerts',
+                          }
+                        )}
                       />
-                    </h2>
-                  </EuiTitle>
-                  <EuiSpacer size="s" />
-                  <EuiFieldSearch
-                    placeholder={i18n.translate(
-                      'observability.alerting.alertsDashboard.searchPlaceholder',
-                      {
-                        defaultMessage: 'Search alerts by name, message, or label...',
-                      }
-                    )}
-                    value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
-                    isClearable
-                    fullWidth
-                    aria-label={i18n.translate(
-                      'observability.alerting.alertsDashboard.searchAlertsAriaLabel',
-                      {
-                        defaultMessage: 'Search alerts',
-                      }
-                    )}
-                  />
-                  <EuiSpacer size="s" />
-                  <EuiText size="s">
-                    <FormattedMessage
-                      id="observability.alerting.alertsDashboard.alertsCount"
-                      defaultMessage="{count} {count, plural, one {row} other {rows}}"
-                      values={{ count: groupedTableRows.length }}
-                    />
-                    {groupedTableRows.length !== filteredAlerts.length && (
-                      <span>
-                        {' '}
-                        ·{' '}
+                      <EuiSpacer size="s" />
+                      <EuiText size="s">
                         <FormattedMessage
-                          id="observability.alerting.alertsDashboard.groupedAlertsCount"
-                          defaultMessage="{count} alerts grouped"
-                          values={{ count: filteredAlerts.length }}
+                          id="observability.alerting.alertsDashboard.alertsCount"
+                          defaultMessage="{count} {count, plural, one {row} other {rows}}"
+                          values={{ count: groupedTableRows.length }}
                         />
-                      </span>
-                    )}
-                    {activeFilterCount > 0 && (
-                      <span>
-                        {' '}
-                        ·{' '}
-                        <FormattedMessage
-                          id="observability.alerting.alertsDashboard.filtersCount"
-                          defaultMessage="{count} {count, plural, one {filter} other {filters}}"
-                          values={{ count: activeFilterCount }}
-                        />
-                      </span>
-                    )}
-                  </EuiText>
-                  <EuiSpacer size="s" />
-                  <AlertsTable
-                    items={groupedTableRows}
-                    columns={columns}
-                    loading={loading}
-                    itemIdToExpandedRowMap={groupedOccurrenceRows}
-                    message={
-                      searchQuery || activeFilterCount > 0
-                        ? i18n.translate(
-                            'observability.alerting.alertsDashboard.noAlertsMatchFilters',
-                            {
-                              defaultMessage: 'No alerts match your filters',
-                            }
-                          )
-                        : i18n.translate('observability.alerting.alertsDashboard.noAlerts', {
-                            defaultMessage: 'No alerts',
-                          })
-                    }
-                  />
-                </EuiPanel>
+                        {groupedTableRows.length !== filteredAlerts.length && (
+                          <span>
+                            {' '}
+                            ·{' '}
+                            <FormattedMessage
+                              id="observability.alerting.alertsDashboard.groupedAlertsCount"
+                              defaultMessage="{count} alerts grouped"
+                              values={{ count: filteredAlerts.length }}
+                            />
+                          </span>
+                        )}
+                        {activeFilterCount > 0 && (
+                          <span>
+                            {' '}
+                            ·{' '}
+                            <FormattedMessage
+                              id="observability.alerting.alertsDashboard.filtersCount"
+                              defaultMessage="{count} {count, plural, one {filter} other {filters}}"
+                              values={{ count: activeFilterCount }}
+                            />
+                          </span>
+                        )}
+                      </EuiText>
+                      <EuiSpacer size="s" />
+                      <AlertsTable
+                        items={groupedTableRows}
+                        columns={columns}
+                        loading={loading}
+                        itemIdToExpandedRowMap={groupedOccurrenceRows}
+                        message={
+                          searchQuery || activeFilterCount > 0
+                            ? i18n.translate(
+                                'observability.alerting.alertsDashboard.noAlertsMatchFilters',
+                                {
+                                  defaultMessage: 'No alerts match your filters',
+                                }
+                              )
+                            : i18n.translate('observability.alerting.alertsDashboard.noAlerts', {
+                                defaultMessage: 'No alerts',
+                              })
+                        }
+                      />
+                    </EuiPanel>
+                  </>
+                )}
               </>
             }
           </EuiResizablePanel>
