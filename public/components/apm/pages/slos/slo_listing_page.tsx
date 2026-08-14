@@ -35,8 +35,8 @@ import { useHistory, useLocation } from 'react-router-dom';
 import { ChromeStart, HttpStart, NotificationsStart } from '../../../../../../../src/core/public';
 import { HeaderControlledComponentsWrapper } from '../../../../plugin_helpers/plugin_headerControl';
 import { ActiveFilterBadges, FilterBadge } from '../../shared/components/active_filter_badges';
-import { navigateToServicesList } from '../../shared/utils/navigation_utils';
 import { SloOverviewPanel } from './slo_overview_panel';
+import { SloNoSlosEmptyState } from './slo_no_slos_empty_state';
 import { DATASOURCE_SELECTION_CAP, SloListFilterPanel } from './slo_list_filter_panel';
 import { usePrometheusDatasources } from './use_prometheus_datasources';
 import {
@@ -1370,47 +1370,7 @@ export const SloListingPage: React.FC<SloListingPageProps> = ({
                 />
               </EuiPanel>
             ) : noSlosExist ? (
-              <EuiPanel style={{ marginTop: '8px' }} data-test-subj="slosEmptyNoSlos">
-                <EuiEmptyPrompt
-                  iconType="visualizeApp"
-                  title={
-                    <h2>
-                      {i18n.translate('observability.apm.slo.listing.emptyState.title', {
-                        defaultMessage: 'No SLOs yet',
-                      })}
-                    </h2>
-                  }
-                  body={
-                    <p>
-                      {i18n.translate('observability.apm.slo.listing.emptyState.body', {
-                        defaultMessage:
-                          'Track reliability objectives for your APM services. Visit the Services view to see which services are missing SLOs and create them directly from there.',
-                      })}
-                    </p>
-                  }
-                  actions={[
-                    <EuiButton
-                      key="services"
-                      fill
-                      onClick={navigateToServicesList}
-                      data-test-subj="slosEmptyGoToServices"
-                    >
-                      {i18n.translate('observability.apm.slo.listing.emptyState.goToServices', {
-                        defaultMessage: 'Go to Services',
-                      })}
-                    </EuiButton>,
-                    <EuiButtonEmpty
-                      key="create"
-                      href="#/slos/create"
-                      data-test-subj="slosCreateEmpty"
-                    >
-                      {i18n.translate('observability.apm.slo.listing.emptyState.createManually', {
-                        defaultMessage: 'Create manually',
-                      })}
-                    </EuiButtonEmpty>,
-                  ]}
-                />
-              </EuiPanel>
+              <SloNoSlosEmptyState />
             ) : (
               <EuiResizableContainer style={{ marginTop: '8px' }}>
                 {(EuiResizablePanel, EuiResizableButton) => (
