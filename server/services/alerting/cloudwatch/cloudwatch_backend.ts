@@ -185,12 +185,13 @@ export class CloudWatchBackend {
         }
         const stat = alarm.statistic || alarm.extendedStatistic || 'Average';
         const periodLabel = alarm.period ? `, ${alarm.period}s` : '';
-        // ALARM band: prefer the real state history; fall back to the region
-        // where the series actually breaches the threshold so the shaded band
-        // is present whenever the alarm is breaching (matches the proposal).
+        // ALARM band: shade where the series actually breaches the threshold so
+        // the band aligns with the visible breach (matches the proposal). Fall
+        // back to reconstructing it from state history when there's no numeric
+        // threshold (e.g. anomaly-detection alarms).
         const alarmBands =
-          computeAlarmBands(history, startTimeMs, endTimeMs) ||
-          computeThresholdBreachBands(points, alarm.threshold, alarm.comparisonOperator);
+          computeThresholdBreachBands(points, alarm.threshold, alarm.comparisonOperator) ||
+          computeAlarmBands(history, startTimeMs, endTimeMs);
         metricPreview = {
           label: `${alarm.metricName} (${stat}${periodLabel})`,
           points,
