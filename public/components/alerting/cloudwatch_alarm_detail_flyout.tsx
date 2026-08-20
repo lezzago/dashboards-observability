@@ -20,7 +20,7 @@
  * fetch failure surfaces an actionable datasource-failure callout with retry.
  * Built from the same EUI primitives + `EchartsRender` the sibling flyouts use.
  */
-import React, { useMemo, useState } from 'react';
+import React, { useCallback, useMemo, useState } from 'react';
 import {
   EuiBadge,
   EuiButtonEmpty,
@@ -97,12 +97,17 @@ function stateHealthColor(state?: CloudWatchAlarmState): string {
   return state ? STATE_HEALTH[state] : 'subdued';
 }
 
-/** Build the CloudWatch console deep link for an alarm. */
-function cloudWatchConsoleUrl(alarm: CloudWatchAlarm): string {
-  const region = alarm.region || 'us-east-1';
-  return `https://${region}.console.aws.amazon.com/cloudwatch/home?region=${encodeURIComponent(
-    region
-  )}#alarmsV2:alarm/${encodeURIComponent(alarm.alarmName)}`;
+/**
+ * Client-side severity for a CloudWatch alarm, mirroring the server mapper
+ * (`cloudWatchSeverity`). Used for the header badge when navigating to a
+ * related alarm whose severity wasn't carried on the originating row.
+ */
+function deriveSeverity(alarm: CloudWatchAlarm): UnifiedAlertSeverity {
+  const hint = `${alarm.alarmName} ${alarm.description || ''}`.toLowerCase();
+  if (/\bcritical\b|\bsev1\b|\bsev-1\b|\bp0\b|\bpage\b/.test(hint)) return 'critical';
+  if (alarm.stateValue === 'ALARM') return alarm.alarmType === 'composite' ? 'critical' : 'medium';
+  if (/\bwarn/.test(hint)) return 'medium';
+  return 'info';
 }
 
 function formatTs(ts?: string): string {
@@ -202,11 +207,19 @@ function buildMetricPreviewSpec(preview: CloudWatchMetricPreview): echarts.EChar
 // Relationships tree
 // ============================================================================
 
+/** Navigate the flyout to another alarm (parent/child) within the same view. */
+type OpenAlarmFn = (node: {
+  alarmName: string;
+  alarmType?: CloudWatchAlarmType;
+  stateValue?: CloudWatchAlarmState;
+}) => void;
+
 const RelationshipRow: React.FC<{
   node: CloudWatchRelationshipNode;
   depth: number;
   isSelf?: boolean;
-}> = ({ node, depth, isSelf }) => {
+  onOpen: OpenAlarmFn;
+}> = ({ node, depth, isSelf, onOpen }) => {
   return (
     <>
       <div style={{ paddingLeft: depth * 20, marginBottom: 4 }}>
@@ -226,7 +239,8 @@ const RelationshipRow: React.FC<{
             ) : isSelf ? (
               <strong>{node.alarmName}</strong>
             ) : (
-              <span>{node.alarmName}</span>
+              // Clickable: navigate the flyout to this related alarm.
+              <EuiLink onClick={() => onOpen(node)}>{node.alarmName}</EuiLink>
             )}
           </EuiFlexItem>
           {isSelf && (
@@ -274,7 +288,12 @@ const RelationshipRow: React.FC<{
         </EuiFlexGroup>
       </div>
       {(node.children || []).map((child, i) => (
-        <RelationshipRow key={`${child.alarmName}-${i}`} node={child} depth={depth + 1} />
+        <RelationshipRow
+          key={`${child.alarmName}-${i}`}
+          node={child}
+          depth={depth + 1}
+          onOpen={onOpen}
+        />
       ))}
     </>
   );
@@ -284,7 +303,8 @@ const RelationshipsSection: React.FC<{
   dsId: string;
   alarmName: string;
   graph: CloudWatchRelationshipGraph;
-}> = ({ dsId, alarmName, graph }) => {
+  onOpen: OpenAlarmFn;
+}> = ({ dsId, alarmName, graph, onOpen }) => {
   const service = useMemo(() => new AlertingOpenSearchService(), []);
   const [current, setCurrent] = useState<CloudWatchRelationshipGraph>(graph);
   const [depth, setDepth] = useState(2);
@@ -317,7 +337,9 @@ const RelationshipsSection: React.FC<{
                     })}
                   </EuiBadge>
                 </EuiFlexItem>
-                <EuiFlexItem grow={false}>{p.alarmName}</EuiFlexItem>
+                <EuiFlexItem grow={false}>
+                  <EuiLink onClick={() => onOpen(p)}>{p.alarmName}</EuiLink>
+                </EuiFlexItem>
                 <EuiFlexItem grow={false}>
                   <EuiHealth color={stateHealthColor(p.stateValue)} />
                 </EuiFlexItem>
@@ -327,7 +349,7 @@ const RelationshipsSection: React.FC<{
           <EuiSpacer size="s" />
         </>
       )}
-      <RelationshipRow node={current.tree} depth={0} isSelf />
+      <RelationshipRow node={current.tree} depth={0} isSelf onOpen={onOpen} />
       {current.maxDepthReached && (
         <div style={{ marginTop: 6 }}>
           <EuiButtonEmpty size="xs" onClick={loadDeeper} isLoading={loadingDeeper} flush="left">
@@ -443,18 +465,45 @@ export const CloudWatchAlarmDetailFlyout: React.FC<CloudWatchAlarmDetailFlyoutPr
   onClose,
 }) => {
   const dsId = rule.datasourceId;
-  const alarmName = rule.id;
+
+  // In-flyout navigation stack. Clicking a related alarm (parent/child) pushes
+  // it here and re-fetches its detail, so users move between linked alarms
+  // without leaving the unified view (no external CloudWatch links). The first
+  // entry is the alarm the flyout opened on.
+  const [stack, setStack] = useState<CloudWatchAlarmFlyoutRow[]>([rule]);
+  const current = stack[stack.length - 1];
+  const alarmName = current.id;
   const { detail, isLoading, error } = useCloudWatchAlarmDetail({ dsId, alarmName });
 
-  // Header shows the row meta immediately (available before the detail
-  // resolves), then prefers the freshly-fetched detail once it arrives so the
-  // header state can't lag behind the alarm's current CloudWatch state.
-  const cw = rule.cloudWatch;
+  const openAlarm = useCallback<OpenAlarmFn>((node) => {
+    setStack((s) => [
+      ...s,
+      {
+        id: node.alarmName,
+        name: node.alarmName,
+        monitorType: node.alarmType,
+        cloudWatch: node.stateValue
+          ? { state: node.stateValue, alarmType: node.alarmType || 'metric' }
+          : undefined,
+      },
+    ]);
+  }, []);
+  const goBack = useCallback(() => {
+    setStack((s) => (s.length > 1 ? s.slice(0, -1) : s));
+  }, []);
+
+  // Header shows the current stack entry's meta immediately, then prefers the
+  // freshly-fetched detail once it arrives so state/severity can't lag.
+  const displayName = detail?.alarm.alarmName || current.name;
+  const severity: UnifiedAlertSeverity = detail
+    ? deriveSeverity(detail.alarm)
+    : current.severity || 'info';
   const alarmType =
     detail?.alarm.alarmType ||
-    cw?.alarmType ||
-    (rule.monitorType === 'composite' ? 'composite' : 'metric');
-  const state = detail?.alarm.stateValue || cw?.state;
+    current.cloudWatch?.alarmType ||
+    (current.monitorType === 'composite' ? 'composite' : 'metric');
+  const state = detail?.alarm.stateValue || current.cloudWatch?.state;
+  const cw = { accountId: detail?.alarm.accountId, region: detail?.alarm.region };
 
   const headerState = (
     <EuiText size="s">
@@ -502,10 +551,21 @@ export const CloudWatchAlarmDetailFlyout: React.FC<CloudWatchAlarmDetailFlyoutPr
   return (
     <EuiFlyout onClose={onClose} size="m" aria-labelledby="cwAlarmFlyoutTitle" ownFocus>
       <EuiFlyoutHeader hasBorder>
+        {stack.length > 1 && (
+          <>
+            <EuiButtonEmpty size="xs" iconType="arrowLeft" flush="left" onClick={goBack}>
+              {i18n.translate('observability.alerting.cloudwatch.back', {
+                defaultMessage: 'Back to {name}',
+                values: { name: stack[stack.length - 2].name },
+              })}
+            </EuiButtonEmpty>
+            <EuiSpacer size="xs" />
+          </>
+        )}
         <EuiFlexGroup justifyContent="spaceBetween" alignItems="flexStart" gutterSize="s">
           <EuiFlexItem>
             <EuiTitle size="m">
-              <h2 id="cwAlarmFlyoutTitle">{rule.name}</h2>
+              <h2 id="cwAlarmFlyoutTitle">{displayName}</h2>
             </EuiTitle>
           </EuiFlexItem>
           <EuiFlexItem grow={false}>
@@ -522,9 +582,7 @@ export const CloudWatchAlarmDetailFlyout: React.FC<CloudWatchAlarmDetailFlyoutPr
                 </EuiFlexItem>
               )}
               <EuiFlexItem grow={false}>
-                <EuiBadge color={SEVERITY_COLORS[rule.severity] || 'default'}>
-                  {rule.severity}
-                </EuiBadge>
+                <EuiBadge color={SEVERITY_COLORS[severity] || 'default'}>{severity}</EuiBadge>
               </EuiFlexItem>
               <EuiFlexItem grow={false}>
                 <EuiBadge color={alarmType === 'composite' ? '#E0D6FB' : 'hollow'}>
@@ -541,8 +599,7 @@ export const CloudWatchAlarmDetailFlyout: React.FC<CloudWatchAlarmDetailFlyoutPr
           <EuiFlexItem grow={false}>
             <EuiToolTip
               content={i18n.translate('observability.alerting.cloudwatch.readOnlyTooltip', {
-                defaultMessage:
-                  'CloudWatch alarms are read-only here. Manage them in the CloudWatch console.',
+                defaultMessage: 'CloudWatch alarms are read-only in this view.',
               })}
             >
               <EuiBadge color="hollow">
@@ -551,17 +608,6 @@ export const CloudWatchAlarmDetailFlyout: React.FC<CloudWatchAlarmDetailFlyoutPr
                 })}
               </EuiBadge>
             </EuiToolTip>
-          </EuiFlexItem>
-          <EuiFlexItem grow={false}>
-            <EuiLink
-              href={detail ? cloudWatchConsoleUrl(detail.alarm) : undefined}
-              target="_blank"
-              external
-            >
-              {i18n.translate('observability.alerting.cloudwatch.viewInCloudWatch', {
-                defaultMessage: 'View in CloudWatch',
-              })}
-            </EuiLink>
           </EuiFlexItem>
         </EuiFlexGroup>
       </EuiFlyoutHeader>
@@ -614,8 +660,8 @@ export const CloudWatchAlarmDetailFlyout: React.FC<CloudWatchAlarmDetailFlyoutPr
             )}
 
             {alarmType === 'composite'
-              ? renderCompositeBody(detail, dsId, alarmName)
-              : renderMetricBody(detail)}
+              ? renderCompositeBody(detail, dsId, alarmName, openAlarm)
+              : renderMetricBody(detail, openAlarm)}
           </>
         )}
       </EuiFlyoutBody>
@@ -686,7 +732,10 @@ function renderAlarmActions(alarm: CloudWatchAlarm): React.ReactNode {
   return <EuiDescriptionList type="column" compressed listItems={rows} />;
 }
 
-function renderMetricBody(detail: import('../../../common/types/alerting').CloudWatchAlarmDetail) {
+function renderMetricBody(
+  detail: import('../../../common/types/alerting').CloudWatchAlarmDetail,
+  onOpen: OpenAlarmFn
+) {
   const { alarm, metricPreview } = detail;
   const conditions = [
     {
@@ -734,18 +783,24 @@ function renderMetricBody(detail: import('../../../common/types/alerting').Cloud
 
   return (
     <>
-      {metricPreview && metricPreview.points.length > 0 && (
-        <>
-          <SectionTitle>
-            {i18n.translate('observability.alerting.cloudwatch.metricPreview', {
-              defaultMessage: 'Metric preview',
-            })}
-          </SectionTitle>
-          <EuiSpacer size="s" />
-          <EchartsRender spec={buildMetricPreviewSpec(metricPreview)} height={220} />
-          <EuiSpacer size="m" />
-        </>
+      {/* Metric preview always renders for metric alarms so the visualization
+          is present; when the window has no samples we show an empty state. */}
+      <SectionTitle>
+        {i18n.translate('observability.alerting.cloudwatch.metricPreview', {
+          defaultMessage: 'Metric preview',
+        })}
+      </SectionTitle>
+      <EuiSpacer size="s" />
+      {metricPreview && metricPreview.points.length > 0 ? (
+        <EchartsRender spec={buildMetricPreviewSpec(metricPreview)} height={220} />
+      ) : (
+        <EuiTextColor color="subdued">
+          {i18n.translate('observability.alerting.cloudwatch.noMetricData', {
+            defaultMessage: 'No metric data reported in the selected window.',
+          })}
+        </EuiTextColor>
       )}
+      <EuiHorizontalRule margin="m" />
 
       <SectionTitle>
         {i18n.translate('observability.alerting.cloudwatch.conditionsEvaluation', {
@@ -806,7 +861,9 @@ function renderMetricBody(detail: import('../../../common/types/alerting').Cloud
                 <EuiFlexItem grow={false}>
                   <EuiBadge color="#E0D6FB">Composite</EuiBadge>
                 </EuiFlexItem>
-                <EuiFlexItem grow={false}>{p.alarmName}</EuiFlexItem>
+                <EuiFlexItem grow={false}>
+                  <EuiLink onClick={() => onOpen(p)}>{p.alarmName}</EuiLink>
+                </EuiFlexItem>
                 <EuiFlexItem grow={false}>
                   <EuiHealth color={stateHealthColor(p.stateValue)} />
                 </EuiFlexItem>
@@ -822,7 +879,8 @@ function renderMetricBody(detail: import('../../../common/types/alerting').Cloud
 function renderCompositeBody(
   detail: import('../../../common/types/alerting').CloudWatchAlarmDetail,
   dsId: string,
-  alarmName: string
+  alarmName: string,
+  onOpen: OpenAlarmFn
 ) {
   const { alarm } = detail;
   return (
@@ -862,7 +920,12 @@ function renderCompositeBody(
       </SectionTitle>
       <EuiSpacer size="s" />
       {detail.relationships ? (
-        <RelationshipsSection dsId={dsId} alarmName={alarmName} graph={detail.relationships} />
+        <RelationshipsSection
+          dsId={dsId}
+          alarmName={alarmName}
+          graph={detail.relationships}
+          onOpen={onOpen}
+        />
       ) : (
         <EuiTextColor color="subdued">
           {i18n.translate('observability.alerting.cloudwatch.noRelationships', {
