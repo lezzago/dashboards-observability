@@ -350,18 +350,31 @@ const StateTimeline: React.FC<{ history?: CloudWatchAlarmHistoryItem[] }> = ({ h
   const windowStart = now - 24 * 60 * 60 * 1000;
   const segments = useMemo(() => {
     const updates = (history || [])
-      .filter((h) => h.historyItemType === 'StateUpdate' && h.newState)
-      .map((h) => ({ ts: new Date(h.timestamp).getTime(), state: h.newState! }))
+      .filter((h) => h.historyItemType === 'StateUpdate' && (h.newState || h.oldState))
+      .map((h) => ({
+        ts: new Date(h.timestamp).getTime(),
+        oldState: h.oldState,
+        newState: h.newState,
+      }))
       .filter((u) => Number.isFinite(u.ts))
       .sort((a, b) => a.ts - b.ts);
     if (updates.length === 0)
       return [] as Array<{ start: number; end: number; state: CloudWatchAlarmState }>;
     const segs: Array<{ start: number; end: number; state: CloudWatchAlarmState }> = [];
+    // Backfill from the window start using the first transition's prior state
+    // (`oldState`) so the band spans the whole 24h rather than a sliver at the
+    // right — CloudWatch only records transitions at real evaluation times.
+    const firstPrior = updates[0].oldState || updates[0].newState;
+    if (firstPrior && updates[0].ts > windowStart) {
+      segs.push({ start: windowStart, end: updates[0].ts, state: firstPrior });
+    }
     for (let i = 0; i < updates.length; i++) {
+      const state = updates[i].newState || updates[i].oldState;
+      if (!state) continue;
       const start = Math.max(updates[i].ts, windowStart);
       const end = i + 1 < updates.length ? updates[i + 1].ts : now;
       if (end <= windowStart) continue;
-      segs.push({ start, end: Math.min(end, now), state: updates[i].state });
+      segs.push({ start, end: Math.min(end, now), state });
     }
     return segs;
   }, [history, now, windowStart]);
@@ -433,10 +446,15 @@ export const CloudWatchAlarmDetailFlyout: React.FC<CloudWatchAlarmDetailFlyoutPr
   const alarmName = rule.id;
   const { detail, isLoading, error } = useCloudWatchAlarmDetail({ dsId, alarmName });
 
-  // Header uses row meta immediately (available before the detail resolves).
+  // Header shows the row meta immediately (available before the detail
+  // resolves), then prefers the freshly-fetched detail once it arrives so the
+  // header state can't lag behind the alarm's current CloudWatch state.
   const cw = rule.cloudWatch;
-  const alarmType = cw?.alarmType || (rule.monitorType === 'composite' ? 'composite' : 'metric');
-  const state = cw?.state;
+  const alarmType =
+    detail?.alarm.alarmType ||
+    cw?.alarmType ||
+    (rule.monitorType === 'composite' ? 'composite' : 'metric');
+  const state = detail?.alarm.stateValue || cw?.state;
 
   const headerState = (
     <EuiText size="s">

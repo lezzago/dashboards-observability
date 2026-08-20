@@ -207,6 +207,9 @@ export class SdkCloudWatchAlarmSource implements CloudWatchAlarmSource {
       client.send(
         new DescribeAlarmHistoryCommand({
           AlarmName: alarmName,
+          // Like DescribeAlarms, DescribeAlarmHistory defaults to MetricAlarm
+          // only — without this a composite alarm's history is always empty.
+          AlarmTypes: ['MetricAlarm', 'CompositeAlarm'],
           MaxRecords: 50,
           ScanBy: 'TimestampDescending',
         })
