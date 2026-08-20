@@ -50,6 +50,7 @@ import { CreateMetricsMonitor, MetricsMonitorFormState } from './create_metrics_
 import { AlertsDashboard } from './alerts_dashboard';
 import { AlertDetailFlyout } from './alert_detail_flyout';
 import { AnomalyDetailFlyout } from './anomaly_detail_flyout';
+import { CloudWatchAlarmDetailFlyout } from './cloudwatch_alarm_detail_flyout';
 import { NotificationRoutingPanel } from './notification_routing_panel';
 import type { MonitorBackendType } from './monitor_form_components';
 import { useAlerts } from './hooks/use_alerts';
@@ -1585,7 +1586,10 @@ export const AlarmsPage: React.FC<AlarmsPageProps> = ({
           onNavigateToDetectorResults={handleNavigateToDetectorResults}
         />
       )}
-      {selectedAlert && selectedAlert.alertKind !== 'anomaly' && (
+      {selectedAlert && selectedAlert.alertKind !== 'anomaly' && selectedAlert.cloudWatch && (
+        <CloudWatchAlarmDetailFlyout rule={selectedAlert} onClose={() => setSelectedAlert(null)} />
+      )}
+      {selectedAlert && selectedAlert.alertKind !== 'anomaly' && !selectedAlert.cloudWatch && (
         <AlertDetailFlyout
           alert={selectedAlert}
           datasources={datasources}

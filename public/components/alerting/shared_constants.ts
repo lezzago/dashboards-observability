@@ -126,6 +126,11 @@ export const isStandardOpenSearchDatasource = (datasource: Datasource): boolean 
 // Anomaly detection / forecasting lifecycle helpers
 // ============================================================================
 
+export const isCloudWatchRule = (rule: UnifiedRuleSummary): boolean =>
+  rule.definitionType === 'cloudwatch_alarm' ||
+  rule.datasourceType === 'cloudwatch' ||
+  !!rule.cloudWatch;
+
 export const isDetectorRule = (rule: UnifiedRuleSummary): boolean =>
   rule.definitionType === 'detector' || rule.monitorType === 'detector';
 
@@ -212,6 +217,8 @@ export function formatDatasourceType(type: string): string {
       return 'OpenSearch';
     case 'prometheus':
       return 'Prometheus';
+    case 'cloudwatch':
+      return 'CloudWatch';
     default:
       return type.charAt(0).toUpperCase() + type.slice(1);
   }

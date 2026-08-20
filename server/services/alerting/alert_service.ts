@@ -57,6 +57,8 @@ import {
   adAnomalyToUnified,
   adDetectorToUnifiedRuleSummary,
   adForecasterToUnifiedRuleSummary,
+  cloudWatchAlarmToUnifiedAlertSummary,
+  cloudWatchAlarmToUnifiedRuleSummary,
   extractADAnomalyResultIdsFromMonitor,
   extractADDetectorIdsFromMonitor,
   isAnomalyDetectorMonitor,
@@ -66,6 +68,7 @@ import {
   promRuleToUnified,
   requireDatasource as requireDatasourceImpl,
 } from './alert_utils';
+import type { CloudWatchBackend } from './cloudwatch/cloudwatch_backend';
 
 const DEFAULT_TIMEOUT_MS = 10_000;
 const DEFAULT_MAX_RESULTS = 5_000;
@@ -300,6 +303,7 @@ function resolveRangeMsFromOptions(options?: {
 export class MultiBackendAlertService {
   private osBackend?: OpenSearchBackend;
   private promBackend?: PrometheusBackend;
+  private cwBackend?: CloudWatchBackend;
 
   constructor(
     private readonly datasourceService: DatasourceService,
@@ -322,6 +326,17 @@ export class MultiBackendAlertService {
     this.promBackend = backend;
     // `debug` (not `info`): see registerOpenSearch.
     this.logger.debug('Registered Prometheus alerting backend');
+  }
+
+  /** Access the CloudWatch backend (e.g. for the alarm detail routes). */
+  getCloudWatchBackend(): CloudWatchBackend | undefined {
+    return this.cwBackend;
+  }
+
+  registerCloudWatch(backend: CloudWatchBackend): void {
+    this.cwBackend = backend;
+    // `debug` (not `info`): see registerOpenSearch.
+    this.logger.debug('Registered CloudWatch alerting backend');
   }
 
   // =========================================================================
@@ -941,6 +956,15 @@ export class MultiBackendAlertService {
       return { alerts: alerts.map((a) => promAlertToUnified(a, ds.id)) };
     }
 
+    if (ds.type === 'cloudwatch' && this.cwBackend) {
+      // CloudWatch alarms surface in the Alerts tab only when currently in
+      // ALARM. The range is intentionally ignored: CloudWatch alarm listing is
+      // point-in-time (DescribeAlarms has no historical-firing query), so we
+      // return what is breaching now rather than reconstructing episodes.
+      const alarms = await this.cwBackend.describeAlarmingAlarms(ds);
+      return { alerts: alarms.map((a) => cloudWatchAlarmToUnifiedAlertSummary(a, ds.id)) };
+    }
+
     return { alerts: [] };
   }
 
@@ -1172,6 +1196,9 @@ export class MultiBackendAlertService {
           if (r.type === 'alerting') results.push(promRuleToUnified(r, g.name, ds.id, g.interval));
         }
       }
+    } else if (ds.type === 'cloudwatch' && this.cwBackend) {
+      const alarms = await this.cwBackend.describeAlarms(ds);
+      for (const a of alarms) results.push(cloudWatchAlarmToUnifiedRuleSummary(a, ds.id));
     }
     return results;
   }

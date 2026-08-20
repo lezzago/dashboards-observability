@@ -1,0 +1,821 @@
+/*
+ * Copyright OpenSearch Contributors
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/**
+ * CloudWatch Alarm Detail Flyout — read-only view of a single CloudWatch alarm.
+ *
+ * Two layouts keyed by `alarmType`:
+ *   - metric   → Summary, Metric preview (series + threshold + ALARM band),
+ *                Conditions & evaluation, State history, Alarm actions,
+ *                Related alarms.
+ *   - composite→ State timeline, Rule expression, Relationships tree
+ *                (cycle-safe, tombstone-aware, lazy deeper levels), State
+ *                history.
+ *
+ * Everything is read-only ("Read-only" pill + "View in CloudWatch" deep link).
+ * Sections degrade independently: a history AccessDenied renders a partial-
+ * permission callout, a missing metric preview is simply omitted, and a hard
+ * fetch failure surfaces an actionable datasource-failure callout with retry.
+ * Built from the same EUI primitives + `EchartsRender` the sibling flyouts use.
+ */
+import React, { useMemo, useState } from 'react';
+import {
+  EuiBadge,
+  EuiButtonEmpty,
+  EuiCallOut,
+  EuiCodeBlock,
+  EuiDescriptionList,
+  EuiFlexGroup,
+  EuiFlexItem,
+  EuiFlyout,
+  EuiFlyoutBody,
+  EuiFlyoutHeader,
+  EuiHealth,
+  EuiHorizontalRule,
+  EuiLink,
+  EuiLoadingContent,
+  EuiSpacer,
+  EuiText,
+  EuiTextColor,
+  EuiTitle,
+  EuiToolTip,
+} from '@elastic/eui';
+import * as echarts from 'echarts';
+import { i18n } from '@osd/i18n';
+import type {
+  CloudWatchAlarm,
+  CloudWatchAlarmHistoryItem,
+  CloudWatchAlarmState,
+  CloudWatchMetricPreview,
+  CloudWatchRelationshipGraph,
+  CloudWatchRelationshipNode,
+  MonitorType,
+  UnifiedCloudWatchMeta,
+  UnifiedAlertSeverity,
+} from '../../../common/types/alerting';
+import { EchartsRender } from './echarts_render';
+import { useCloudWatchAlarmDetail } from './hooks/use_cloudwatch_alarm_detail';
+import { AlertingOpenSearchService } from './query_services/alerting_opensearch_service';
+import { SEVERITY_COLORS } from './shared_constants';
+
+/**
+ * Structural subset shared by `UnifiedRuleSummary` (Rules tab) and
+ * `UnifiedAlertSummary` (Alerts tab) so the same flyout serves both. Only the
+ * header reads these fields directly; the full detail comes from the hook.
+ */
+export interface CloudWatchAlarmFlyoutRow {
+  id: string;
+  name: string;
+  datasourceId: string;
+  severity: UnifiedAlertSeverity;
+  monitorType?: MonitorType;
+  cloudWatch?: UnifiedCloudWatchMeta;
+}
+
+export interface CloudWatchAlarmDetailFlyoutProps {
+  rule: CloudWatchAlarmFlyoutRow;
+  onClose: () => void;
+}
+
+// State → OUI health colour used consistently for dots/badges in this flyout.
+const STATE_HEALTH: Record<CloudWatchAlarmState, string> = {
+  ALARM: 'danger',
+  OK: 'success',
+  INSUFFICIENT_DATA: 'warning',
+};
+
+// State → hex for the timeline band / chart shading (OUI semantic hexes).
+const STATE_HEX: Record<CloudWatchAlarmState, string> = {
+  ALARM: '#BD271E',
+  OK: '#017D73',
+  INSUFFICIENT_DATA: '#F5A700',
+};
+
+function stateHealthColor(state?: CloudWatchAlarmState): string {
+  return state ? STATE_HEALTH[state] : 'subdued';
+}
+
+/** Build the CloudWatch console deep link for an alarm. */
+function cloudWatchConsoleUrl(alarm: CloudWatchAlarm): string {
+  const region = alarm.region || 'us-east-1';
+  return `https://${region}.console.aws.amazon.com/cloudwatch/home?region=${encodeURIComponent(
+    region
+  )}#alarmsV2:alarm/${encodeURIComponent(alarm.alarmName)}`;
+}
+
+function formatTs(ts?: string): string {
+  if (!ts) return '—';
+  const d = new Date(ts);
+  return Number.isNaN(d.getTime())
+    ? '—'
+    : d.toISOString().replace('T', ' ').replace(/\..+/, ' UTC');
+}
+
+// ============================================================================
+// Metric preview chart
+// ============================================================================
+
+function buildMetricPreviewSpec(preview: CloudWatchMetricPreview): echarts.EChartsOption {
+  const data = preview.points.map((p) => [p.timestamp, p.value] as [number, number]);
+  const markLineData =
+    preview.threshold != null
+      ? [
+          {
+            yAxis: preview.threshold,
+            label: {
+              formatter: `threshold ${preview.threshold}`,
+              position: 'insideStartTop' as const,
+            },
+            lineStyle: { color: STATE_HEX.ALARM, type: 'dashed' as const },
+          },
+        ]
+      : [];
+  const markAreaData = (preview.alarmBands || []).map((band) => [
+    { xAxis: band[0], itemStyle: { color: 'rgba(189,39,30,0.10)' } },
+    { xAxis: band[1] },
+  ]);
+  return {
+    grid: { left: 48, right: 16, top: 16, bottom: 24 },
+    tooltip: { trigger: 'axis' },
+    xAxis: { type: 'time' },
+    yAxis: { type: 'value', scale: true },
+    series: [
+      {
+        name: preview.label || 'metric',
+        type: 'line',
+        showSymbol: false,
+        data,
+        lineStyle: { color: '#006BB4' },
+        itemStyle: { color: '#006BB4' },
+        markLine: markLineData.length
+          ? { symbol: 'none', data: markLineData, silent: true }
+          : undefined,
+        markArea: markAreaData.length ? { silent: true, data: markAreaData } : undefined,
+      },
+    ],
+  };
+}
+
+// ============================================================================
+// Relationships tree
+// ============================================================================
+
+const RelationshipRow: React.FC<{
+  node: CloudWatchRelationshipNode;
+  depth: number;
+  isSelf?: boolean;
+}> = ({ node, depth, isSelf }) => {
+  return (
+    <>
+      <div style={{ paddingLeft: depth * 20, marginBottom: 4 }}>
+        <EuiFlexGroup gutterSize="s" alignItems="center" responsive={false} wrap>
+          {node.alarmType && (
+            <EuiFlexItem grow={false}>
+              <EuiBadge color={node.alarmType === 'composite' ? '#E0D6FB' : 'hollow'}>
+                {node.alarmType === 'composite' ? 'Composite' : 'Metric'}
+              </EuiBadge>
+            </EuiFlexItem>
+          )}
+          <EuiFlexItem grow={false}>
+            {node.deleted ? (
+              <EuiTextColor color="subdued">
+                <s>{node.alarmName}</s>
+              </EuiTextColor>
+            ) : isSelf ? (
+              <strong>{node.alarmName}</strong>
+            ) : (
+              <span>{node.alarmName}</span>
+            )}
+          </EuiFlexItem>
+          {isSelf && (
+            <EuiFlexItem grow={false}>
+              <EuiBadge color="hollow">
+                {i18n.translate('observability.alerting.cloudwatch.thisAlarm', {
+                  defaultMessage: 'this alarm',
+                })}
+              </EuiBadge>
+            </EuiFlexItem>
+          )}
+          {node.childCount ? (
+            <EuiFlexItem grow={false}>
+              <EuiTextColor color="subdued">
+                {i18n.translate('observability.alerting.cloudwatch.childCount', {
+                  defaultMessage: '{count} children',
+                  values: { count: node.childCount },
+                })}
+              </EuiTextColor>
+            </EuiFlexItem>
+          ) : null}
+          {node.deleted && (
+            <EuiFlexItem grow={false}>
+              <EuiBadge color="warning">
+                {i18n.translate('observability.alerting.cloudwatch.deletedTarget', {
+                  defaultMessage: 'deleted in CloudWatch',
+                })}
+              </EuiBadge>
+            </EuiFlexItem>
+          )}
+          {node.cycle && (
+            <EuiFlexItem grow={false}>
+              <EuiBadge color="hollow">
+                {i18n.translate('observability.alerting.cloudwatch.cycleStopped', {
+                  defaultMessage: 'already shown — cycle stopped',
+                })}
+              </EuiBadge>
+            </EuiFlexItem>
+          )}
+          {!node.deleted && node.stateValue && (
+            <EuiFlexItem grow={false}>
+              <EuiHealth color={stateHealthColor(node.stateValue)} />
+            </EuiFlexItem>
+          )}
+        </EuiFlexGroup>
+      </div>
+      {(node.children || []).map((child, i) => (
+        <RelationshipRow key={`${child.alarmName}-${i}`} node={child} depth={depth + 1} />
+      ))}
+    </>
+  );
+};
+
+const RelationshipsSection: React.FC<{
+  dsId: string;
+  alarmName: string;
+  graph: CloudWatchRelationshipGraph;
+}> = ({ dsId, alarmName, graph }) => {
+  const service = useMemo(() => new AlertingOpenSearchService(), []);
+  const [current, setCurrent] = useState<CloudWatchRelationshipGraph>(graph);
+  const [depth, setDepth] = useState(2);
+  const [loadingDeeper, setLoadingDeeper] = useState(false);
+
+  const loadDeeper = async () => {
+    setLoadingDeeper(true);
+    try {
+      const next = await service.getCloudWatchAlarmRelationships(dsId, alarmName, depth + 2);
+      setCurrent(next);
+      setDepth(depth + 2);
+    } catch {
+      // Leave the current graph in place; deeper expansion is best-effort.
+    } finally {
+      setLoadingDeeper(false);
+    }
+  };
+
+  return (
+    <div>
+      {current.parents.length > 0 && (
+        <>
+          {current.parents.map((p, i) => (
+            <div key={`${p.alarmName}-${i}`} style={{ marginBottom: 4 }}>
+              <EuiFlexGroup gutterSize="s" alignItems="center" responsive={false} wrap>
+                <EuiFlexItem grow={false}>
+                  <EuiBadge color="hollow">
+                    {i18n.translate('observability.alerting.cloudwatch.parent', {
+                      defaultMessage: 'parent',
+                    })}
+                  </EuiBadge>
+                </EuiFlexItem>
+                <EuiFlexItem grow={false}>{p.alarmName}</EuiFlexItem>
+                <EuiFlexItem grow={false}>
+                  <EuiHealth color={stateHealthColor(p.stateValue)} />
+                </EuiFlexItem>
+              </EuiFlexGroup>
+            </div>
+          ))}
+          <EuiSpacer size="s" />
+        </>
+      )}
+      <RelationshipRow node={current.tree} depth={0} isSelf />
+      {current.maxDepthReached && (
+        <div style={{ marginTop: 6 }}>
+          <EuiButtonEmpty size="xs" onClick={loadDeeper} isLoading={loadingDeeper} flush="left">
+            {i18n.translate('observability.alerting.cloudwatch.loadDeeper', {
+              defaultMessage: 'Load 2 deeper levels…',
+            })}
+          </EuiButtonEmpty>
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ============================================================================
+// State timeline (composite header band)
+// ============================================================================
+
+const StateTimeline: React.FC<{ history?: CloudWatchAlarmHistoryItem[] }> = ({ history }) => {
+  const now = Date.now();
+  const windowStart = now - 24 * 60 * 60 * 1000;
+  const segments = useMemo(() => {
+    const updates = (history || [])
+      .filter((h) => h.historyItemType === 'StateUpdate' && h.newState)
+      .map((h) => ({ ts: new Date(h.timestamp).getTime(), state: h.newState! }))
+      .filter((u) => Number.isFinite(u.ts))
+      .sort((a, b) => a.ts - b.ts);
+    if (updates.length === 0)
+      return [] as Array<{ start: number; end: number; state: CloudWatchAlarmState }>;
+    const segs: Array<{ start: number; end: number; state: CloudWatchAlarmState }> = [];
+    for (let i = 0; i < updates.length; i++) {
+      const start = Math.max(updates[i].ts, windowStart);
+      const end = i + 1 < updates.length ? updates[i + 1].ts : now;
+      if (end <= windowStart) continue;
+      segs.push({ start, end: Math.min(end, now), state: updates[i].state });
+    }
+    return segs;
+  }, [history, now, windowStart]);
+
+  if (segments.length === 0) {
+    return (
+      <EuiTextColor color="subdued">
+        {i18n.translate('observability.alerting.cloudwatch.noTimeline', {
+          defaultMessage: 'No state changes recorded in the selected window.',
+        })}
+      </EuiTextColor>
+    );
+  }
+  const total = now - windowStart;
+  return (
+    <div>
+      <div style={{ display: 'flex', height: 14, borderRadius: 3, overflow: 'hidden' }}>
+        {segments.map((s, i) => (
+          <div
+            key={i}
+            style={{
+              width: `${((s.end - s.start) / total) * 100}%`,
+              backgroundColor: STATE_HEX[s.state],
+            }}
+            title={`${s.state}`}
+          />
+        ))}
+      </div>
+      <EuiFlexGroup justifyContent="spaceBetween" gutterSize="none">
+        <EuiFlexItem grow={false}>
+          <EuiTextColor color="subdued" style={{ fontSize: 11 }}>
+            -24h
+          </EuiTextColor>
+        </EuiFlexItem>
+        <EuiFlexItem grow={false}>
+          <EuiTextColor color="subdued" style={{ fontSize: 11 }}>
+            now
+          </EuiTextColor>
+        </EuiFlexItem>
+      </EuiFlexGroup>
+    </div>
+  );
+};
+
+// ============================================================================
+// Section header
+// ============================================================================
+
+const SectionTitle: React.FC<{ children: React.ReactNode }> = ({ children }) => (
+  <EuiTitle size="xs">
+    <h3>{children}</h3>
+  </EuiTitle>
+);
+
+// ============================================================================
+// Flyout
+// ============================================================================
+
+export const CloudWatchAlarmDetailFlyout: React.FC<CloudWatchAlarmDetailFlyoutProps> = ({
+  rule,
+  onClose,
+}) => {
+  const dsId = rule.datasourceId;
+  const alarmName = rule.id;
+  const { detail, isLoading, error } = useCloudWatchAlarmDetail({ dsId, alarmName });
+
+  // Header uses row meta immediately (available before the detail resolves).
+  const cw = rule.cloudWatch;
+  const alarmType = cw?.alarmType || (rule.monitorType === 'composite' ? 'composite' : 'metric');
+  const state = cw?.state;
+
+  const headerState = (
+    <EuiText size="s">
+      <EuiFlexGroup gutterSize="l" responsive={false} wrap alignItems="center">
+        <EuiFlexItem grow={false}>
+          <EuiTextColor color="subdued">
+            {i18n.translate('observability.alerting.cloudwatch.stateLabel', {
+              defaultMessage: 'CloudWatch state',
+            })}
+          </EuiTextColor>{' '}
+          {state ? <EuiBadge color={STATE_HEALTH[state]}>{state}</EuiBadge> : '—'}
+        </EuiFlexItem>
+        {cw?.accountId && (
+          <EuiFlexItem grow={false}>
+            <EuiTextColor color="subdued">
+              {i18n.translate('observability.alerting.cloudwatch.accountLabel', {
+                defaultMessage: 'Account',
+              })}
+            </EuiTextColor>{' '}
+            {cw.accountId}
+          </EuiFlexItem>
+        )}
+        {cw?.region && (
+          <EuiFlexItem grow={false}>
+            <EuiTextColor color="subdued">
+              {i18n.translate('observability.alerting.cloudwatch.regionLabel', {
+                defaultMessage: 'Region',
+              })}
+            </EuiTextColor>{' '}
+            {cw.region}
+          </EuiFlexItem>
+        )}
+        <EuiFlexItem grow={false}>
+          <EuiTextColor color="subdued">
+            {i18n.translate('observability.alerting.cloudwatch.sourceLabel', {
+              defaultMessage: 'Source',
+            })}
+          </EuiTextColor>{' '}
+          CloudWatch
+        </EuiFlexItem>
+      </EuiFlexGroup>
+    </EuiText>
+  );
+
+  return (
+    <EuiFlyout onClose={onClose} size="m" aria-labelledby="cwAlarmFlyoutTitle" ownFocus>
+      <EuiFlyoutHeader hasBorder>
+        <EuiFlexGroup justifyContent="spaceBetween" alignItems="flexStart" gutterSize="s">
+          <EuiFlexItem>
+            <EuiTitle size="m">
+              <h2 id="cwAlarmFlyoutTitle">{rule.name}</h2>
+            </EuiTitle>
+          </EuiFlexItem>
+          <EuiFlexItem grow={false}>
+            <EuiFlexGroup gutterSize="xs" responsive={false} wrap>
+              {state && (
+                <EuiFlexItem grow={false}>
+                  <EuiHealth color={STATE_HEALTH[state]}>
+                    {state === 'ALARM'
+                      ? 'active'
+                      : state === 'INSUFFICIENT_DATA'
+                        ? 'insufficient data'
+                        : 'ok'}
+                  </EuiHealth>
+                </EuiFlexItem>
+              )}
+              <EuiFlexItem grow={false}>
+                <EuiBadge color={SEVERITY_COLORS[rule.severity] || 'default'}>
+                  {rule.severity}
+                </EuiBadge>
+              </EuiFlexItem>
+              <EuiFlexItem grow={false}>
+                <EuiBadge color={alarmType === 'composite' ? '#E0D6FB' : 'hollow'}>
+                  {alarmType === 'composite' ? 'Composite' : 'Metric'}
+                </EuiBadge>
+              </EuiFlexItem>
+            </EuiFlexGroup>
+          </EuiFlexItem>
+        </EuiFlexGroup>
+        <EuiSpacer size="s" />
+        {headerState}
+        <EuiSpacer size="s" />
+        <EuiFlexGroup gutterSize="s" alignItems="center" responsive={false}>
+          <EuiFlexItem grow={false}>
+            <EuiToolTip
+              content={i18n.translate('observability.alerting.cloudwatch.readOnlyTooltip', {
+                defaultMessage:
+                  'CloudWatch alarms are read-only here. Manage them in the CloudWatch console.',
+              })}
+            >
+              <EuiBadge color="hollow">
+                {i18n.translate('observability.alerting.cloudwatch.readOnly', {
+                  defaultMessage: 'Read-only',
+                })}
+              </EuiBadge>
+            </EuiToolTip>
+          </EuiFlexItem>
+          <EuiFlexItem grow={false}>
+            <EuiLink
+              href={detail ? cloudWatchConsoleUrl(detail.alarm) : undefined}
+              target="_blank"
+              external
+            >
+              {i18n.translate('observability.alerting.cloudwatch.viewInCloudWatch', {
+                defaultMessage: 'View in CloudWatch',
+              })}
+            </EuiLink>
+          </EuiFlexItem>
+        </EuiFlexGroup>
+      </EuiFlyoutHeader>
+
+      <EuiFlyoutBody>
+        {isLoading && <EuiLoadingContent lines={6} />}
+
+        {!isLoading && error && (
+          <EuiCallOut
+            color="danger"
+            iconType="alert"
+            title={i18n.translate('observability.alerting.cloudwatch.loadErrorTitle', {
+              defaultMessage: 'Could not load alarm detail from CloudWatch',
+            })}
+          >
+            <p>{error.message}</p>
+            <p>
+              {i18n.translate('observability.alerting.cloudwatch.loadErrorHint', {
+                defaultMessage:
+                  'Check that the server has valid AWS credentials and cloudwatch:DescribeAlarms permission, then reopen this alarm.',
+              })}
+            </p>
+          </EuiCallOut>
+        )}
+
+        {!isLoading && detail && (
+          <>
+            {detail.summary && (
+              <>
+                <EuiText size="s">
+                  <p>{detail.summary}</p>
+                </EuiText>
+                <EuiSpacer size="m" />
+              </>
+            )}
+
+            {detail.historyAccessDenied && (
+              <>
+                <EuiCallOut
+                  color="warning"
+                  size="s"
+                  iconType="lock"
+                  title={i18n.translate('observability.alerting.cloudwatch.partialPermission', {
+                    defaultMessage:
+                      "History can't be read with the current role (cloudwatch:DescribeAlarmHistory denied). Other sections are unaffected.",
+                  })}
+                />
+                <EuiSpacer size="m" />
+              </>
+            )}
+
+            {alarmType === 'composite'
+              ? renderCompositeBody(detail, dsId, alarmName)
+              : renderMetricBody(detail)}
+          </>
+        )}
+      </EuiFlyoutBody>
+    </EuiFlyout>
+  );
+};
+
+// ============================================================================
+// Body renderers
+// ============================================================================
+
+function renderStateHistory(history?: CloudWatchAlarmHistoryItem[]): React.ReactNode {
+  const stateUpdates = (history || []).filter(
+    (h) => h.historyItemType === 'StateUpdate' || h.oldState || h.newState
+  );
+  if (stateUpdates.length === 0) {
+    return (
+      <EuiTextColor color="subdued">
+        {i18n.translate('observability.alerting.cloudwatch.noHistory', {
+          defaultMessage: 'No state changes recorded in the selected window.',
+        })}
+      </EuiTextColor>
+    );
+  }
+  return (
+    <div>
+      {stateUpdates.slice(0, 20).map((h, i) => (
+        <div key={i} style={{ marginBottom: 6 }}>
+          <EuiFlexGroup gutterSize="s" responsive={false} wrap alignItems="baseline">
+            <EuiFlexItem grow={false} style={{ minWidth: 150 }}>
+              <EuiTextColor color="subdued">{formatTs(h.timestamp)}</EuiTextColor>
+            </EuiFlexItem>
+            {(h.oldState || h.newState) && (
+              <EuiFlexItem grow={false}>
+                <strong>
+                  {h.oldState || '—'} → {h.newState || '—'}
+                </strong>
+              </EuiFlexItem>
+            )}
+            {h.summary && (
+              <EuiFlexItem>
+                <EuiText size="s">{h.summary}</EuiText>
+              </EuiFlexItem>
+            )}
+          </EuiFlexGroup>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function renderAlarmActions(alarm: CloudWatchAlarm): React.ReactNode {
+  const rows: Array<{ title: string; description: string }> = [];
+  (alarm.alarmActions || []).forEach((a) => rows.push({ title: 'On ALARM', description: a }));
+  (alarm.okActions || []).forEach((a) => rows.push({ title: 'On OK', description: a }));
+  (alarm.insufficientDataActions || []).forEach((a) =>
+    rows.push({ title: 'On INSUFFICIENT_DATA', description: a })
+  );
+  if (rows.length === 0) {
+    return (
+      <EuiTextColor color="subdued">
+        {i18n.translate('observability.alerting.cloudwatch.noActions', {
+          defaultMessage: 'No notification actions configured.',
+        })}
+      </EuiTextColor>
+    );
+  }
+  return <EuiDescriptionList type="column" compressed listItems={rows} />;
+}
+
+function renderMetricBody(detail: import('../../../common/types/alerting').CloudWatchAlarmDetail) {
+  const { alarm, metricPreview } = detail;
+  const conditions = [
+    {
+      title: i18n.translate('observability.alerting.cloudwatch.namespaceMetric', {
+        defaultMessage: 'Namespace / metric',
+      }),
+      description: `${alarm.namespace || '—'} · ${alarm.metricName || '—'}`,
+    },
+    {
+      title: i18n.translate('observability.alerting.cloudwatch.dimensions', {
+        defaultMessage: 'Dimensions',
+      }),
+      description: (alarm.dimensions || []).map((d) => `${d.name} = ${d.value}`).join(', ') || '—',
+    },
+    {
+      title: i18n.translate('observability.alerting.cloudwatch.statisticPeriod', {
+        defaultMessage: 'Statistic · period',
+      }),
+      description: `${alarm.statistic || alarm.extendedStatistic || '—'} · ${
+        alarm.period ? `${alarm.period}s` : '—'
+      }`,
+    },
+    {
+      title: i18n.translate('observability.alerting.cloudwatch.condition', {
+        defaultMessage: 'Condition',
+      }),
+      description: `${alarm.comparisonOperator || '—'} ${alarm.threshold != null ? alarm.threshold : ''}`,
+    },
+    {
+      title: i18n.translate('observability.alerting.cloudwatch.datapointsToAlarm', {
+        defaultMessage: 'Datapoints to alarm',
+      }),
+      description:
+        alarm.datapointsToAlarm && alarm.evaluationPeriods
+          ? `${alarm.datapointsToAlarm} of ${alarm.evaluationPeriods} evaluation periods`
+          : '—',
+    },
+    {
+      title: i18n.translate('observability.alerting.cloudwatch.missingData', {
+        defaultMessage: 'Missing data',
+      }),
+      description: alarm.treatMissingData || '—',
+    },
+  ];
+
+  return (
+    <>
+      {metricPreview && metricPreview.points.length > 0 && (
+        <>
+          <SectionTitle>
+            {i18n.translate('observability.alerting.cloudwatch.metricPreview', {
+              defaultMessage: 'Metric preview',
+            })}
+          </SectionTitle>
+          <EuiSpacer size="s" />
+          <EchartsRender spec={buildMetricPreviewSpec(metricPreview)} height={220} />
+          <EuiSpacer size="m" />
+        </>
+      )}
+
+      <SectionTitle>
+        {i18n.translate('observability.alerting.cloudwatch.conditionsEvaluation', {
+          defaultMessage: 'Conditions & evaluation',
+        })}
+      </SectionTitle>
+      <EuiSpacer size="s" />
+      <EuiDescriptionList type="column" compressed listItems={conditions} />
+      <EuiHorizontalRule margin="m" />
+
+      <SectionTitle>
+        {i18n.translate('observability.alerting.cloudwatch.stateHistory', {
+          defaultMessage: 'State history',
+        })}
+      </SectionTitle>
+      <EuiSpacer size="s" />
+      {renderStateHistory(detail.history)}
+      <EuiHorizontalRule margin="m" />
+
+      <EuiFlexGroup gutterSize="s" alignItems="center" responsive={false}>
+        <EuiFlexItem grow={false}>
+          <SectionTitle>
+            {i18n.translate('observability.alerting.cloudwatch.alarmActions', {
+              defaultMessage: 'Alarm actions',
+            })}
+          </SectionTitle>
+        </EuiFlexItem>
+        <EuiFlexItem grow={false}>
+          <EuiBadge color="hollow">
+            {i18n.translate('observability.alerting.cloudwatch.readOnly', {
+              defaultMessage: 'Read-only',
+            })}
+          </EuiBadge>
+        </EuiFlexItem>
+      </EuiFlexGroup>
+      <EuiSpacer size="s" />
+      {renderAlarmActions(alarm)}
+
+      {detail.relationships && detail.relationships.parents.length > 0 && (
+        <>
+          <EuiHorizontalRule margin="m" />
+          <SectionTitle>
+            {i18n.translate('observability.alerting.cloudwatch.relatedAlarms', {
+              defaultMessage: 'Related alarms',
+            })}
+          </SectionTitle>
+          <EuiSpacer size="s" />
+          {detail.relationships.parents.map((p, i) => (
+            <div key={`${p.alarmName}-${i}`} style={{ marginBottom: 4 }}>
+              <EuiFlexGroup gutterSize="s" alignItems="center" responsive={false} wrap>
+                <EuiFlexItem grow={false}>
+                  <EuiBadge color="hollow">
+                    {i18n.translate('observability.alerting.cloudwatch.parent', {
+                      defaultMessage: 'parent',
+                    })}
+                  </EuiBadge>
+                </EuiFlexItem>
+                <EuiFlexItem grow={false}>
+                  <EuiBadge color="#E0D6FB">Composite</EuiBadge>
+                </EuiFlexItem>
+                <EuiFlexItem grow={false}>{p.alarmName}</EuiFlexItem>
+                <EuiFlexItem grow={false}>
+                  <EuiHealth color={stateHealthColor(p.stateValue)} />
+                </EuiFlexItem>
+              </EuiFlexGroup>
+            </div>
+          ))}
+        </>
+      )}
+    </>
+  );
+}
+
+function renderCompositeBody(
+  detail: import('../../../common/types/alerting').CloudWatchAlarmDetail,
+  dsId: string,
+  alarmName: string
+) {
+  const { alarm } = detail;
+  return (
+    <>
+      <SectionTitle>
+        {i18n.translate('observability.alerting.cloudwatch.stateTimeline', {
+          defaultMessage: 'State timeline',
+        })}
+      </SectionTitle>
+      <EuiSpacer size="s" />
+      <StateTimeline history={detail.history} />
+      <EuiHorizontalRule margin="m" />
+
+      <SectionTitle>
+        {i18n.translate('observability.alerting.cloudwatch.ruleExpression', {
+          defaultMessage: 'Rule expression',
+        })}
+      </SectionTitle>
+      <EuiSpacer size="s" />
+      {alarm.alarmRule ? (
+        <EuiCodeBlock language="text" paddingSize="s" fontSize="s" isCopyable>
+          {alarm.alarmRule}
+        </EuiCodeBlock>
+      ) : (
+        <EuiTextColor color="subdued">
+          {i18n.translate('observability.alerting.cloudwatch.noRule', {
+            defaultMessage: 'No rule expression available.',
+          })}
+        </EuiTextColor>
+      )}
+      <EuiHorizontalRule margin="m" />
+
+      <SectionTitle>
+        {i18n.translate('observability.alerting.cloudwatch.relationships', {
+          defaultMessage: 'Relationships',
+        })}
+      </SectionTitle>
+      <EuiSpacer size="s" />
+      {detail.relationships ? (
+        <RelationshipsSection dsId={dsId} alarmName={alarmName} graph={detail.relationships} />
+      ) : (
+        <EuiTextColor color="subdued">
+          {i18n.translate('observability.alerting.cloudwatch.noRelationships', {
+            defaultMessage: 'No related alarms.',
+          })}
+        </EuiTextColor>
+      )}
+      <EuiHorizontalRule margin="m" />
+
+      <SectionTitle>
+        {i18n.translate('observability.alerting.cloudwatch.stateHistory', {
+          defaultMessage: 'State history',
+        })}
+      </SectionTitle>
+      <EuiSpacer size="s" />
+      {renderStateHistory(detail.history)}
+    </>
+  );
+}

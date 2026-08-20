@@ -43,6 +43,13 @@ import {
 } from '../shared_constants';
 import { DEFAULT_WIDTHS } from './resizable_columns';
 
+/** Tint for the `CW: <state>` badge shown alongside the unified status. */
+const CLOUDWATCH_STATE_BADGE_COLOR: Record<string, string> = {
+  ALARM: 'danger',
+  OK: 'success',
+  INSUFFICIENT_DATA: 'warning',
+};
+
 // ============================================================================
 // Column Definitions
 // ============================================================================
@@ -158,10 +165,15 @@ export function buildTableColumns({
         width: w('name'),
         render: (name: string, item: UnifiedRuleSummary) => {
           const iconType =
-            item.datasourceType === 'prometheus' ? 'logoPrometheus' : 'logoOpenSearch';
+            item.datasourceType === 'cloudwatch'
+              ? 'logoAWS'
+              : item.datasourceType === 'prometheus'
+                ? 'logoPrometheus'
+                : 'logoOpenSearch';
           // Avoid duplicating the group when the dedicated Rule Group column is visible
           const showGroupBadge =
             item.datasourceType === 'prometheus' && !!item.group && !visibleColumns.has('group');
+          const showPartialAccess = !!item.cloudWatch?.partialAccess;
           return (
             <div>
               <EuiButtonEmpty
@@ -180,6 +192,13 @@ export function buildTableColumns({
               >
                 <strong>{name}</strong>
               </EuiButtonEmpty>
+              {showPartialAccess && (
+                <EuiBadge color="hollow" style={{ fontSize: 10, marginLeft: 4 }}>
+                  {i18n.translate('observability.alerting.monitorsTable.partialAccessBadge', {
+                    defaultMessage: 'partial access',
+                  })}
+                </EuiBadge>
+              )}
               {showGroupBadge && (
                 <div style={{ marginLeft: 24, marginTop: -2 }}>
                   <EuiBadge color="hollow" style={{ fontSize: 10 }}>
@@ -199,9 +218,24 @@ export function buildTableColumns({
         }),
         sortable: true,
         width: w('status'),
-        render: (s: MonitorStatus) => (
-          <EuiHealth color={STATUS_COLORS[s] || 'subdued'}>{s}</EuiHealth>
-        ),
+        render: (s: MonitorStatus, item: UnifiedRuleSummary) => {
+          const cw = item.cloudWatch;
+          const unifiedLabel = cw && cw.state === 'INSUFFICIENT_DATA' ? 'insufficient data' : s;
+          return (
+            <EuiFlexGroup gutterSize="xs" alignItems="center" responsive={false} wrap>
+              <EuiFlexItem grow={false}>
+                <EuiHealth color={STATUS_COLORS[s] || 'subdued'}>{unifiedLabel}</EuiHealth>
+              </EuiFlexItem>
+              {cw && (
+                <EuiFlexItem grow={false}>
+                  <EuiBadge color={CLOUDWATCH_STATE_BADGE_COLOR[cw.state] || 'hollow'}>
+                    CW: {cw.state}
+                  </EuiBadge>
+                </EuiFlexItem>
+              )}
+            </EuiFlexGroup>
+          );
+        },
       });
     } else if (colId === 'severity') {
       cols.push({
@@ -269,7 +303,25 @@ export function buildTableColumns({
         sortable: (r: UnifiedRuleSummary) =>
           (dsNameMap.get(r.datasourceId) || r.datasourceId).toLowerCase(),
         width: w('datasource'),
-        render: (id: string) => dsNameMap.get(id) || id,
+        render: (id: string, item: UnifiedRuleSummary) => {
+          const label = dsNameMap.get(id) || id;
+          const cw = item.cloudWatch;
+          // CloudWatch rows show the account · region beneath the name so a
+          // multi-account view is legible at a glance (matches the demo).
+          const accountRegion =
+            cw && (cw.accountId || cw.region)
+              ? [cw.accountId, cw.region].filter(Boolean).join(' · ')
+              : undefined;
+          if (!accountRegion) return label;
+          return (
+            <div>
+              <div>{label}</div>
+              <EuiTextColor color="subdued" style={{ fontSize: 11 }}>
+                {accountRegion}
+              </EuiTextColor>
+            </div>
+          );
+        },
       });
     } else if (colId === 'createdBy') {
       cols.push({

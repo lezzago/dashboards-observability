@@ -18,7 +18,11 @@
 import { schema } from '@osd/config-schema';
 import { IRouter, RequestHandlerContext, SavedObject } from '../../../../../src/core/server';
 import type { AlertingOSClient, Datasource, Logger } from '../../../common/types/alerting';
-import { validateDateMath, validateTimeRangeQuery } from '../../../common/services/alerting';
+import {
+  parseDateMathMs,
+  validateDateMath,
+  validateTimeRangeQuery,
+} from '../../../common/services/alerting';
 import {
   HttpOpenSearchBackend,
   MultiBackendAlertService,
@@ -28,12 +32,18 @@ import {
 } from '../../services/alerting';
 import { DirectQueryPrometheusBackend } from '../../services/alerting/directquery_prometheus_backend';
 import { MonitorMutationService } from '../../services/alerting/monitor_mutation_service';
+import type { CloudWatchBackend } from '../../services/alerting/cloudwatch/cloudwatch_backend';
+import {
+  CLOUDWATCH_DATASOURCE_ID,
+  type CloudWatchDatasourceConfig,
+} from '../../services/alerting/saved_object_datasource_service';
 import { registerAlertingMutationRoutes } from './mutations';
 import { toErrorBody, toHandlerResult } from './route_utils';
 import { isAlertManagerError } from '../../services/alerting';
 import {
   alertingIdSchema,
   alertingRuleIdSchema,
+  cloudWatchAlarmNameSchema,
   prometheusLabelNameSchema,
 } from './schema_helpers';
 
@@ -95,6 +105,14 @@ export interface AlertingRoutesDeps {
    * Prometheus rule mutation routes are registered.
    */
   rulerClient?: import('../../services/slo/ruler_client').RulerClient;
+  /**
+   * CloudWatch alarms backend (AWS SDK seam). When provided, the virtual
+   * CloudWatch datasource is registered on each per-request alert service and
+   * the CloudWatch alarm detail routes are wired.
+   */
+  cwBackend?: CloudWatchBackend;
+  /** Virtual CloudWatch datasource config (enabled + region). */
+  cloudWatch?: CloudWatchDatasourceConfig;
 }
 
 /**
@@ -106,6 +124,23 @@ export interface AlertingRoutesDeps {
  * Exported for unit tests; production callers reach this through
  * `getAlertingClient`.
  */
+/**
+ * Convert the optional `startTime`/`endTime` date-math query params into the
+ * `{ startTimeMs, endTimeMs }` shape the CloudWatch backend's metric-preview
+ * window expects. Returns `{}` when either bound is missing so the backend
+ * falls back to its default (last 3h) window.
+ */
+function resolveDetailRange(
+  startTime?: string,
+  endTime?: string
+): { startTimeMs?: number; endTimeMs?: number } {
+  if (!startTime || !endTime) return {};
+  return {
+    startTimeMs: parseDateMathMs(startTime, /* isEndTime */ false),
+    endTimeMs: parseDateMathMs(endTime, /* isEndTime */ true),
+  };
+}
+
 export async function resolveOpenSearchDatasource(
   ctx: AlertingHandlerContext,
   requestedDsId?: string
@@ -220,6 +255,13 @@ export async function getAlertingClient(
   if (dsId === 'local-cluster') {
     return ctx.core.opensearch.client.asCurrentUser;
   }
+  // The virtual CloudWatch datasource does not use an OpenSearch client at all
+  // (the CloudWatch backend talks to AWS directly). The unified fan-out still
+  // resolves a client per datasource id before dispatch, so return the local
+  // client as a harmless placeholder rather than throwing "not found".
+  if (dsId === CLOUDWATCH_DATASOURCE_ID) {
+    return ctx.core.opensearch.client.asCurrentUser;
+  }
   if (dsId && ctx.dataSource) {
     const ds = await resolveOpenSearchDatasource(ctx, dsId);
     if (ds?.mdsId) {
@@ -264,20 +306,20 @@ export function registerAlertingRoutes(router: IRouter, deps: AlertingRoutesDeps
    * `metadataService` instances are short-lived and die when the handler
    * returns.
    */
-  function buildRequestServices(
-    ctx: AlertingHandlerContext
-  ): {
+  function buildRequestServices(ctx: AlertingHandlerContext): {
     alertService: MultiBackendAlertService;
     metadataService: PrometheusMetadataService;
     datasourceService: SavedObjectDatasourceService;
   } {
     const datasourceService = new SavedObjectDatasourceService(
       ctx.core.savedObjects.client,
-      logger
+      logger,
+      deps.cloudWatch
     );
     const alertService = new MultiBackendAlertService(datasourceService, logger);
     alertService.registerOpenSearch(osBackend);
     alertService.registerPrometheus(promBackend);
+    if (deps.cwBackend) alertService.registerCloudWatch(deps.cwBackend);
     const metadataService = new PrometheusMetadataService(promBackend, datasourceService, logger);
     return { alertService, metadataService, datasourceService };
   }
@@ -735,6 +777,7 @@ export function registerAlertingRoutes(router: IRouter, deps: AlertingRoutesDeps
               schema.literal('prometheus_rule'),
               schema.literal('detector'),
               schema.literal('forecaster'),
+              schema.literal('cloudwatch_alarm'),
             ])
           ),
         }),
@@ -773,6 +816,96 @@ export function registerAlertingRoutes(router: IRouter, deps: AlertingRoutesDeps
           req.params.alertId,
           req.query.monitorId
         );
+      })
+  );
+
+  // ===========================================================================
+  // CloudWatch alarm detail routes (read-only, fetched via the AWS SDK seam)
+  //
+  // These back the CloudWatch alarm flyout's lazily-loaded sections. The row
+  // data itself flows through the unchanged `/api/alerting/unified/rules` and
+  // `/api/alerting/unified/alerts` fan-out. `dsId` is the virtual datasource
+  // id (`cloudwatch`); the resolved datasource carries the AWS region.
+  // ===========================================================================
+
+  /**
+   * Resolve the CloudWatch backend + datasource for a detail route, or throw a
+   * typed not-found when the feature is disabled or the id isn't a CloudWatch
+   * datasource. Keeps the four routes below terse.
+   */
+  const resolveCloudWatch = async (ctx: AlertingHandlerContext, dsId: string) => {
+    if (!deps.cwBackend) {
+      throw createNotFoundError('CloudWatch alarms are not enabled on this deployment');
+    }
+    const { datasourceService } = buildRequestServices(ctx);
+    const ds = await datasourceService.get(dsId);
+    if (!ds || ds.type !== 'cloudwatch') {
+      throw createNotFoundError(`CloudWatch datasource not found: ${dsId}`);
+    }
+    return { cwBackend: deps.cwBackend, ds };
+  };
+
+  // Full alarm detail (metadata + summary + history + metric preview + graph).
+  router.get(
+    {
+      path: '/api/alerting/cloudwatch/{dsId}/alarms/{alarmName}',
+      validate: {
+        params: schema.object({ dsId: alertingIdSchema, alarmName: cloudWatchAlarmNameSchema }),
+        query: schema.object(timeRangeQuery, timeRangeObjectOptions),
+      },
+    },
+    async (ctx, req, res) =>
+      runHandler(res, async () => {
+        const { cwBackend, ds } = await resolveCloudWatch(
+          ctx as AlertingHandlerContext,
+          req.params.dsId
+        );
+        const range = resolveDetailRange(req.query.startTime, req.query.endTime);
+        const detail = await cwBackend.getAlarmDetail(ds, req.params.alarmName, range);
+        if (!detail) return { status: 404, body: { error: 'Alarm not found' } };
+        return { status: 200, body: detail };
+      })
+  );
+
+  // Alarm state/config history (partial-permission aware).
+  router.get(
+    {
+      path: '/api/alerting/cloudwatch/{dsId}/alarms/{alarmName}/history',
+      validate: {
+        params: schema.object({ dsId: alertingIdSchema, alarmName: cloudWatchAlarmNameSchema }),
+      },
+    },
+    async (ctx, req, res) =>
+      runHandler(res, async () => {
+        const { cwBackend, ds } = await resolveCloudWatch(
+          ctx as AlertingHandlerContext,
+          req.params.dsId
+        );
+        return { status: 200, body: await cwBackend.getAlarmHistory(ds, req.params.alarmName) };
+      })
+  );
+
+  // Composite-alarm relationships graph (parents + descendant tree).
+  router.get(
+    {
+      path: '/api/alerting/cloudwatch/{dsId}/alarms/{alarmName}/relationships',
+      validate: {
+        params: schema.object({ dsId: alertingIdSchema, alarmName: cloudWatchAlarmNameSchema }),
+        query: schema.object({ depth: schema.maybe(schema.string()) }),
+      },
+    },
+    async (ctx, req, res) =>
+      runHandler(res, async () => {
+        const { cwBackend, ds } = await resolveCloudWatch(
+          ctx as AlertingHandlerContext,
+          req.params.dsId
+        );
+        const alarm = await cwBackend.getAlarmDetail(ds, req.params.alarmName);
+        if (!alarm) return { status: 404, body: { error: 'Alarm not found' } };
+        const rawDepth = req.query.depth ? parseInt(req.query.depth, 10) : undefined;
+        const depth = rawDepth && Number.isFinite(rawDepth) ? rawDepth : undefined;
+        const graph = await cwBackend.buildRelationships(ds, alarm.alarm, depth);
+        return { status: 200, body: graph };
       })
   );
 
