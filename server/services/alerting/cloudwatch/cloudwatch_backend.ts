@@ -162,7 +162,7 @@ export class CloudWatchBackend {
     let metricPreview: CloudWatchMetricPreview | undefined;
     if (alarm.alarmType === 'metric' && alarm.namespace && alarm.metricName) {
       try {
-        const points = await this.source.getMetricData({
+        const query = {
           region: ds.region,
           namespace: alarm.namespace,
           metricName: alarm.metricName,
@@ -172,13 +172,31 @@ export class CloudWatchBackend {
           period: alarm.period || 60,
           startTimeMs,
           endTimeMs,
-        });
+        };
+        let points = await this.source.getMetricData(query);
+        // If the primary window has no samples (e.g. the metric only reported
+        // earlier), widen to the last 24h so the preview still shows the
+        // series rather than rendering an empty chart.
+        if (points.length === 0) {
+          points = await this.source.getMetricData({
+            ...query,
+            startTimeMs: endTimeMs - 24 * 60 * 60 * 1000,
+          });
+        }
+        const stat = alarm.statistic || alarm.extendedStatistic || 'Average';
+        const periodLabel = alarm.period ? `, ${alarm.period}s` : '';
+        // ALARM band: prefer the real state history; fall back to the region
+        // where the series actually breaches the threshold so the shaded band
+        // is present whenever the alarm is breaching (matches the proposal).
+        const alarmBands =
+          computeAlarmBands(history, startTimeMs, endTimeMs) ||
+          computeThresholdBreachBands(points, alarm.threshold, alarm.comparisonOperator);
         metricPreview = {
-          label: `${alarm.metricName} (${alarm.statistic || alarm.extendedStatistic || 'Average'})`,
+          label: `${alarm.metricName} (${stat}${periodLabel})`,
           points,
           threshold: alarm.threshold,
           comparisonOperator: alarm.comparisonOperator,
-          alarmBands: computeAlarmBands(history, startTimeMs, endTimeMs),
+          alarmBands,
         };
       } catch (err) {
         if (isAccessDenied(err)) alarm.partialAccess = true;
@@ -345,6 +363,46 @@ export function computeAlarmBands(
     if (ce > cs) clamped.push([cs, ce]);
   }
   return clamped.length > 0 ? clamped : undefined;
+}
+
+/**
+ * Fallback ALARM band: contiguous windows where the series breaches the
+ * threshold per the comparison operator. Used when state history yields no
+ * bands, so the shaded region is always present when the metric is breaching.
+ */
+export function computeThresholdBreachBands(
+  points: Array<{ timestamp: number; value: number }>,
+  threshold?: number,
+  comparisonOperator?: string
+): Array<[number, number]> | undefined {
+  if (threshold == null || !points || points.length === 0) return undefined;
+  const breaches = (v: number): boolean => {
+    switch (comparisonOperator) {
+      case 'GreaterThanOrEqualToThreshold':
+        return v >= threshold;
+      case 'LessThanThreshold':
+        return v < threshold;
+      case 'LessThanOrEqualToThreshold':
+        return v <= threshold;
+      case 'GreaterThanThreshold':
+      default:
+        return v > threshold;
+    }
+  };
+  const bands: Array<[number, number]> = [];
+  let start: number | null = null;
+  let prevTs = points[0].timestamp;
+  for (const p of points) {
+    if (breaches(p.value)) {
+      if (start === null) start = p.timestamp;
+    } else if (start !== null) {
+      bands.push([start, prevTs]);
+      start = null;
+    }
+    prevTs = p.timestamp;
+  }
+  if (start !== null) bands.push([start, points[points.length - 1].timestamp]);
+  return bands.length > 0 ? bands : undefined;
 }
 
 /** One-line natural-language summary shown at the top of the flyout. */

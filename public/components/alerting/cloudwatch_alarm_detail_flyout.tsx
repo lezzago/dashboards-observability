@@ -117,7 +117,11 @@ function formatTs(ts?: string): string {
 // Metric preview chart
 // ============================================================================
 
+const METRIC_LINE_COLOR = '#006BB4';
+const STATE_BAND_FILL = 'rgba(189,39,30,0.12)';
+
 function buildMetricPreviewSpec(preview: CloudWatchMetricPreview): echarts.EChartsOption {
+  const seriesName = preview.label || 'metric';
   const data = preview.points.map((p) => [p.timestamp, p.value] as [number, number]);
   const markLineData =
     preview.threshold != null
@@ -128,31 +132,67 @@ function buildMetricPreviewSpec(preview: CloudWatchMetricPreview): echarts.EChar
               formatter: `threshold ${preview.threshold}`,
               position: 'insideStartTop' as const,
             },
-            lineStyle: { color: STATE_HEX.ALARM, type: 'dashed' as const },
+            lineStyle: { color: STATE_HEX.ALARM, type: 'dashed' as const, width: 1.5 },
           },
         ]
       : [];
-  const markAreaData = (preview.alarmBands || []).map((band) => [
-    { xAxis: band[0], itemStyle: { color: 'rgba(189,39,30,0.10)' } },
+  const bands = preview.alarmBands || [];
+  const markAreaData = bands.map((band, i) => [
+    {
+      xAxis: band[0],
+      itemStyle: { color: STATE_BAND_FILL },
+      // Label the first band "ALARM" like the proposal; keep the rest unlabeled.
+      label:
+        i === 0
+          ? {
+              show: true,
+              formatter: 'ALARM',
+              position: 'insideTop' as const,
+              color: STATE_HEX.ALARM,
+            }
+          : undefined,
+    },
     { xAxis: band[1] },
   ]);
   return {
-    grid: { left: 48, right: 16, top: 16, bottom: 24 },
+    // Extra bottom room for the legend row.
+    grid: { left: 48, right: 16, top: 16, bottom: 44 },
     tooltip: { trigger: 'axis' },
+    legend: {
+      bottom: 0,
+      data: [seriesName, 'Threshold', 'State band'],
+      icon: 'roundRect',
+    },
     xAxis: { type: 'time' },
     yAxis: { type: 'value', scale: true },
     series: [
       {
-        name: preview.label || 'metric',
+        name: seriesName,
         type: 'line',
         showSymbol: false,
         data,
-        lineStyle: { color: '#006BB4' },
-        itemStyle: { color: '#006BB4' },
+        lineStyle: { color: METRIC_LINE_COLOR },
+        itemStyle: { color: METRIC_LINE_COLOR },
         markLine: markLineData.length
           ? { symbol: 'none', data: markLineData, silent: true }
           : undefined,
         markArea: markAreaData.length ? { silent: true, data: markAreaData } : undefined,
+      },
+      // Legend-only phantom series so "Threshold" and "State band" appear in the
+      // legend with the correct swatch colors (markLine/markArea can't legend).
+      {
+        name: 'Threshold',
+        type: 'line',
+        data: [],
+        lineStyle: { color: STATE_HEX.ALARM, type: 'dashed' },
+        itemStyle: { color: STATE_HEX.ALARM },
+      },
+      {
+        name: 'State band',
+        type: 'line',
+        data: [],
+        lineStyle: { color: STATE_BAND_FILL },
+        itemStyle: { color: STATE_HEX.ALARM, opacity: 0.35 },
       },
     ],
   };
@@ -336,20 +376,25 @@ const StateTimeline: React.FC<{ history?: CloudWatchAlarmHistoryItem[] }> = ({ h
     );
   }
   const total = now - windowStart;
+  // Render the timeline as an ECharts horizontal stacked bar (one segment per
+  // state interval) so it uses the same viz engine as the rest of the plugin.
+  const spec: echarts.EChartsOption = {
+    grid: { left: 0, right: 0, top: 2, bottom: 2 },
+    tooltip: { trigger: 'item', formatter: (p: { seriesName?: string }) => p.seriesName || '' },
+    xAxis: { type: 'value', min: 0, max: total, show: false },
+    yAxis: { type: 'category', data: [''], show: false },
+    series: segments.map((s) => ({
+      name: s.state,
+      type: 'bar' as const,
+      stack: 'timeline',
+      barWidth: 16,
+      data: [s.end - s.start],
+      itemStyle: { color: STATE_HEX[s.state] },
+    })),
+  };
   return (
     <div>
-      <div style={{ display: 'flex', height: 14, borderRadius: 3, overflow: 'hidden' }}>
-        {segments.map((s, i) => (
-          <div
-            key={i}
-            style={{
-              width: `${((s.end - s.start) / total) * 100}%`,
-              backgroundColor: STATE_HEX[s.state],
-            }}
-            title={`${s.state}`}
-          />
-        ))}
-      </div>
+      <EchartsRender spec={spec} height={26} />
       <EuiFlexGroup justifyContent="spaceBetween" gutterSize="none">
         <EuiFlexItem grow={false}>
           <EuiTextColor color="subdued" style={{ fontSize: 11 }}>
