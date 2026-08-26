@@ -1625,6 +1625,7 @@ export const AlarmsPage: React.FC<AlarmsPageProps> = ({
             onTimeChange={handleTimeChange}
             onRefresh={handleRefreshTime}
             datasourceErrorMap={datasourceErrorMapByName}
+            initialSearchQuery={deepLink.q}
           />
         </>
       );
