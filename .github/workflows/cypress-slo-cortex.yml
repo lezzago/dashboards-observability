@@ -491,12 +491,13 @@ jobs:
           SNAPSHOT_VERSION=$(curl -s $METADATA_URL | grep '<value>' | head -1 | sed 's/.*<value>\(.*\)<\/value>.*/\1/')
           echo "version=$SNAPSHOT_VERSION" >> $GITHUB_OUTPUT
 
+      # Downloads use plain curl (not a community-authored download Action) to
+      # avoid adding a third-party Action to this job's supply chain.
       - name: Download Job Scheduler artifact
-        uses: suisei-cn/actions-download-file@15306412d2c75df56b46844362b86b65235b7db1 # v1.4.0
-        with:
-          url: https://ci.opensearch.org/ci/dbc/snapshots/maven/org/opensearch/plugin/opensearch-job-scheduler/${{ env.OPENSEARCH_PLUGIN_VERSION }}/opensearch-job-scheduler-${{ steps.job-scheduler-snapshot.outputs.version }}.zip
-          target: plugin-artifacts/
-          filename: opensearch-job-scheduler.zip
+        run: |
+          mkdir -p plugin-artifacts
+          curl -fSL --retry 3 -o plugin-artifacts/opensearch-job-scheduler.zip \
+            "https://ci.opensearch.org/ci/dbc/snapshots/maven/org/opensearch/plugin/opensearch-job-scheduler/${{ env.OPENSEARCH_PLUGIN_VERSION }}/opensearch-job-scheduler-${{ steps.job-scheduler-snapshot.outputs.version }}.zip"
 
       - name: Get latest Observability snapshot version
         id: observability-snapshot
@@ -506,11 +507,10 @@ jobs:
           echo "version=$SNAPSHOT_VERSION" >> $GITHUB_OUTPUT
 
       - name: Download observability artifact
-        uses: suisei-cn/actions-download-file@15306412d2c75df56b46844362b86b65235b7db1 # v1.4.0
-        with:
-          url: https://ci.opensearch.org/ci/dbc/snapshots/maven/org/opensearch/plugin/opensearch-observability/${{ env.OPENSEARCH_PLUGIN_VERSION }}/opensearch-observability-${{ steps.observability-snapshot.outputs.version }}.zip
-          target: plugin-artifacts/
-          filename: observability.zip
+        run: |
+          mkdir -p plugin-artifacts
+          curl -fSL --retry 3 -o plugin-artifacts/observability.zip \
+            "https://ci.opensearch.org/ci/dbc/snapshots/maven/org/opensearch/plugin/opensearch-observability/${{ env.OPENSEARCH_PLUGIN_VERSION }}/opensearch-observability-${{ steps.observability-snapshot.outputs.version }}.zip"
 
       - name: Get latest SQL Plugin snapshot version
         id: sql-snapshot
@@ -520,16 +520,15 @@ jobs:
           echo "version=$SNAPSHOT_VERSION" >> $GITHUB_OUTPUT
 
       - name: Download SQL artifact
-        uses: suisei-cn/actions-download-file@15306412d2c75df56b46844362b86b65235b7db1 # v1.4.0
-        with:
-          url: https://ci.opensearch.org/ci/dbc/snapshots/maven/org/opensearch/plugin/opensearch-sql-plugin/${{ env.OPENSEARCH_PLUGIN_VERSION }}/opensearch-sql-plugin-${{ steps.sql-snapshot.outputs.version }}.zip
-          target: plugin-artifacts/
-          filename: sql.zip
+        run: |
+          mkdir -p plugin-artifacts
+          curl -fSL --retry 3 -o plugin-artifacts/sql.zip \
+            "https://ci.opensearch.org/ci/dbc/snapshots/maven/org/opensearch/plugin/opensearch-sql-plugin/${{ env.OPENSEARCH_PLUGIN_VERSION }}/opensearch-sql-plugin-${{ steps.sql-snapshot.outputs.version }}.zip"
 
       - name: Download OpenSearch
-        uses: peternied/download-file@6a5025a112bb8811a2eb5ee6dd3417acf6d928e4 # v2
-        with:
-          url: https://artifacts.opensearch.org/snapshots/core/opensearch/${{ env.OPENSEARCH_VERSION }}-SNAPSHOT/opensearch-min-${{ env.OPENSEARCH_VERSION }}-SNAPSHOT-linux-x64-latest.tar.gz
+        run: |
+          curl -fSL --retry 3 -O \
+            "https://artifacts.opensearch.org/snapshots/core/opensearch/${{ env.OPENSEARCH_VERSION }}-SNAPSHOT/opensearch-min-${{ env.OPENSEARCH_VERSION }}-SNAPSHOT-linux-x64-latest.tar.gz"
 
       - name: Extract OpenSearch
         run: |
