@@ -655,8 +655,12 @@ jobs:
           # the UI spec navigates with a /w/<id>/ prefix (avoiding the no-id
           # workspace-plugin loop). Flags:
           #   - workspace.enabled + explore.* — register the metrics Explore app
-          #   - observability.alertManager.enabled + opensearch_alerting.pplAlertingEnabled
-          #     — the two capabilities that gate the "Create alert rule" action
+          #   - observability.alertManager.enabled — the capability that gates
+          #     the metrics "Create alert rule" action. NOTE: we do NOT set
+          #     opensearch_alerting.* here — the alerting-dashboards plugin is
+          #     not installed in this job, so that config key is unknown and
+          #     would abort OSD boot; the metrics action only needs
+          #     alertManagerEnabled + a PROMQL dataset (not pplV2).
           #   - data_source.enabled — required for the Prometheus DirectQuery
           #     datasource registration step
           # home:useNewHomePage + observability:apmEnabled force the nav groups on.
@@ -669,8 +673,7 @@ jobs:
             --workspace.enabled=true \
             --explore.enabled=true \
             --explore.discoverMetrics.enabled=true \
-            --observability.alertManager.enabled=true \
-            --opensearch_alerting.pplAlertingEnabled=true | tee dashboard.log &
+            --observability.alertManager.enabled=true | tee dashboard.log &
 
       - name: Check If OpenSearch Dashboards Is Ready
         run: |
