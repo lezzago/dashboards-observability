@@ -166,6 +166,46 @@ const FOR_DURATION_OPTIONS = [
 /** The namespace all rules created from this flyout are stored under. */
 const USER_RULES_NAMESPACE = 'observability-alerting';
 
+/**
+ * The label entries that will actually be persisted: both key AND value must be
+ * non-empty (a key with a blank value is dropped). Shared by the Rule Preview
+ * (YAML) and the save payload so the preview can never advertise a different
+ * set than what is written. Keys are trimmed to match server-side storage.
+ */
+export function materializeLabels(labels: LabelEntry[]): LabelEntry[] {
+  return labels
+    .filter((l) => l.key.trim() !== '' && l.value.trim() !== '')
+    .map((l) => ({ ...l, key: l.key.trim() }));
+}
+
+/**
+ * The annotation entries that will be persisted. Drops empty key/value pairs and
+ * folds the Rule details Description field into the standard `description`
+ * annotation (which wins over a manually-typed one). Shared by preview + save so
+ * the two cannot drift.
+ */
+export function materializeAnnotations(
+  annotations: AnnotationEntry[],
+  descriptionField: string
+): AnnotationEntry[] {
+  const description = descriptionField.trim();
+  const manual = annotations
+    .filter((a) => a.key.trim() !== '' && a.value.trim() !== '')
+    .filter((a) => !(description && a.key.trim() === 'description'))
+    .map((a) => ({ ...a, key: a.key.trim() }));
+  return description ? [...manual, { key: 'description', value: description }] : manual;
+}
+
+/**
+ * A PromQL expression that starts with a comparison operator (`> 0.5`) is not a
+ * valid alert condition — the metric/series to the left is missing. Cheap guard
+ * to block obviously-malformed input at submit time (full validation happens
+ * server-side / on preview).
+ */
+export function startsWithComparison(query: string): boolean {
+  return /^\s*(>=|<=|==|!=|>|<)/.test(query);
+}
+
 // ============================================================================
 // Sub-components
 // ============================================================================
@@ -687,16 +727,10 @@ const RulePreviewSection = React.memo<{
 }>(({ form }) => {
   const yaml = useMemo(() => {
     const esc = (s: string) => s.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n');
-    const labels = form.labels.filter((l) => l.key && l.value);
-    // Mirror the save path: the Rule details Description field persists as
-    // the `description` annotation (and wins over a manually-typed one), so
-    // the preview must show exactly what will be saved
-    const annotations = [
-      ...form.annotations.filter(
-        (a) => a.key && a.value && !(form.description.trim() && a.key === 'description')
-      ),
-      ...(form.description.trim() ? [{ key: 'description', value: form.description.trim() }] : []),
-    ];
+    // Use the exact same materialization as the save path so the previewed
+    // YAML is guaranteed to match the rule that gets written (WYSIWYG).
+    const labels = materializeLabels(form.labels);
+    const annotations = materializeAnnotations(form.annotations, form.description);
     let out = `- alert: "${esc(form.monitorName || '<monitor-name>')}"\n`;
     // The PromQL expression is the complete alert condition
     out += `  expr: "${esc(form.query || '<promql-expression>')}"\n`;
@@ -869,6 +903,8 @@ export const CreateMetricsMonitor: React.FC<CreateMetricsMonitorProps> = ({
   const isValid =
     form.monitorName.trim() !== '' &&
     form.query.trim() !== '' &&
+    // Reject an expression that is only/starts-with a comparison (no series).
+    !startsWithComparison(form.query) &&
     form.datasourceId !== '' &&
     !duplicateName;
 
@@ -888,25 +924,19 @@ export const CreateMetricsMonitor: React.FC<CreateMetricsMonitorProps> = ({
       // The PromQL expression is the complete alert condition — no
       // operator/threshold appended server-side.
       const payload = {
-        name: form.monitorName,
+        name: form.monitorName.trim(),
         query: form.query,
         forDuration: form.forDuration,
         evaluationInterval: form.evalInterval,
-        labels: Object.fromEntries(
-          form.labels.filter((l) => l.key.trim()).map((l) => [l.key, l.value])
+        // Same materialization the Rule Preview (YAML) shows — no drift.
+        labels: Object.fromEntries(materializeLabels(form.labels).map((l) => [l.key, l.value])),
+        annotations: Object.fromEntries(
+          materializeAnnotations(form.annotations, form.description).map(
+            (a) => [a.key, a.value] as [string, string]
+          )
         ),
-        annotations: Object.fromEntries([
-          ...form.annotations
-            .filter((a) => a.key.trim())
-            .map((a) => [a.key, a.value] as [string, string]),
-          // The Rule details Description field persists as the standard
-          // `description` annotation (the server's rule builder reads it)
-          ...(form.description.trim()
-            ? [['description', form.description.trim()] as [string, string]]
-            : []),
-        ]),
         enabled: true,
-        groupName: form.groupName || form.monitorName,
+        groupName: (form.groupName || form.monitorName).trim(),
       };
       await http.post(`/api/alerting/prometheus/${encodeURIComponent(form.datasourceId)}/rules`, {
         body: JSON.stringify(payload),

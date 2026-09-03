@@ -407,6 +407,7 @@ export const AlarmsPage: React.FC<AlarmsPageProps> = ({
     setRules,
     setRulesTotal,
     refetch: refetchRules,
+    backgroundRefetch: backgroundRefetchRules,
   } = useRulesData({ selectedDsIds });
 
   // Keep the rules list fresh without a manual reload. A rule created
@@ -445,6 +446,18 @@ export const AlarmsPage: React.FC<AlarmsPageProps> = ({
       document.removeEventListener('visibilitychange', onVisible);
     };
   }, [refetchRules]);
+
+  // While the Rules tab is open and visible, poll silently every 15s so a rule
+  // that was just created — here or from the Metrics page — shows on its own
+  // once Cortex's querier has loaded it, without the user clicking Refresh.
+  // Background refetch = no spinner / no error-banner clobber.
+  useEffect(() => {
+    if (activeTab !== 'rules') return undefined;
+    const intervalId = window.setInterval(() => {
+      if (document.visibilityState === 'visible') backgroundRefetchRules();
+    }, 15000);
+    return () => window.clearInterval(intervalId);
+  }, [activeTab, backgroundRefetchRules]);
 
   const [deletedRuleIds, setDeletedRuleIds] = useState<Set<string>>(new Set());
   const [showCreateMonitor, setShowCreateMonitor] = useState(false);

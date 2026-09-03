@@ -39,7 +39,47 @@ global.ResizeObserver = jest.fn().mockImplementation(() => ({
   unobserve: jest.fn(),
 }));
 
-import { CreateMetricsMonitor } from '../create_metrics_monitor';
+import {
+  CreateMetricsMonitor,
+  materializeLabels,
+  materializeAnnotations,
+  startsWithComparison,
+} from '../create_metrics_monitor';
+
+describe('CreateMetricsMonitor materialize/validate helpers', () => {
+  it('materializeLabels drops empty-key/value entries and trims keys', () => {
+    expect(
+      materializeLabels([
+        { key: 'severity', value: 'warning', isDynamic: false },
+        { key: 'team', value: '', isDynamic: false }, // empty value → dropped
+        { key: '', value: 'x', isDynamic: false }, // empty key → dropped
+        { key: '  region  ', value: 'us', isDynamic: false }, // key trimmed
+      ])
+    ).toEqual([
+      { key: 'severity', value: 'warning', isDynamic: false },
+      { key: 'region', value: 'us', isDynamic: false },
+    ]);
+  });
+
+  it('materializeAnnotations drops empties and folds the description field (description wins)', () => {
+    const annotations = [
+      { key: 'summary', value: 'high' },
+      { key: 'runbook', value: '' }, // dropped
+      { key: 'description', value: 'manual' }, // overridden by the field
+    ];
+    expect(materializeAnnotations(annotations, 'from field')).toEqual([
+      { key: 'summary', value: 'high' },
+      { key: 'description', value: 'from field' },
+    ]);
+  });
+
+  it('startsWithComparison flags a leading comparison (invalid alert expression)', () => {
+    expect(startsWithComparison('> 0.5')).toBe(true);
+    expect(startsWithComparison('  >= 1')).toBe(true);
+    expect(startsWithComparison('rate(x[5m]) > 0.5')).toBe(false);
+    expect(startsWithComparison('up')).toBe(false);
+  });
+});
 
 describe('CreateMetricsMonitor', () => {
   it('renders flyout with form title', () => {
@@ -130,6 +170,46 @@ describe('CreateMetricsMonitor', () => {
       'button[class*="euiButton--fill"]'
     ) as HTMLButtonElement;
     expect(createBtn.disabled).toBe(false);
+  });
+
+  it('keeps Create disabled for a comparison-only expression', () => {
+    render(
+      <CreateMetricsMonitor
+        onCancel={jest.fn()}
+        onSave={jest.fn()}
+        datasourceId="prom-1"
+        initialQuery="> 0.5"
+      />
+    );
+    const nameInput = document.querySelector('input[aria-label="Rule name"]') as HTMLInputElement;
+    fireEvent.change(nameInput, { target: { value: 'bad-rule' } });
+    const createBtn = document.querySelector(
+      'button[class*="euiButton--fill"]'
+    ) as HTMLButtonElement;
+    // Name + query present, but the expression is only a comparison → blocked.
+    expect(createBtn.disabled).toBe(true);
+  });
+
+  it('trims the rule name and group name in the save payload', async () => {
+    const mockPost = jest.fn().mockResolvedValue({});
+    render(
+      <CreateMetricsMonitor
+        onCancel={jest.fn()}
+        onSave={jest.fn()}
+        datasourceId="test-ds-123"
+        initialQuery="up"
+        http={{ post: mockPost }}
+        addToast={jest.fn()}
+      />
+    );
+    const nameInput = document.querySelector('input[aria-label="Rule name"]') as HTMLInputElement;
+    fireEvent.change(nameInput, { target: { value: '  spaced-rule  ' } });
+    fireEvent.click(document.querySelector('button[class*="euiButton--fill"]')!);
+
+    await waitFor(() => expect(mockPost).toHaveBeenCalled());
+    const body = JSON.parse(mockPost.mock.calls[0][1].body);
+    expect(body.name).toBe('spaced-rule');
+    expect(body.groupName).toBe('spaced-rule');
   });
 
   it('shows the "Build query in metrics" link only when requested (Alert Manager)', () => {

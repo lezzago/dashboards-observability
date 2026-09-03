@@ -415,6 +415,23 @@ describe('PrometheusFormSection — edit mode seeding', () => {
     expect(onUpdate).toHaveBeenCalledWith('query', '');
   });
 
+  it('does not re-emit / rewrite a non-canonically-spaced seeded query on mount', () => {
+    const onUpdate = jest.fn();
+    render(
+      <PrometheusFormSection
+        form={{ ...baseForm, query: 'up{ job = "api" }' }}
+        onUpdate={onUpdate}
+        validationErrors={{}}
+        hasSubmitted={false}
+      />
+    );
+
+    // The builder seeds its fields from the query but must NOT rewrite it on
+    // mount — re-emitting would normalize the whitespace the user never touched
+    // (`up{ job = "api" }` → `up{job="api"}`) and spuriously mark the form dirty.
+    expect(onUpdate).not.toHaveBeenCalledWith('query', expect.anything());
+  });
+
   it('does not clobber a complex seeded query on mount', () => {
     const onUpdate = jest.fn();
     render(
