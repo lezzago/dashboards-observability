@@ -13,6 +13,7 @@
 import type { AlertingOSClient, Datasource, Logger } from '../../../../common/types/alerting';
 import type { GeneratedRule, GeneratedRuleGroup } from '../../../../common/slo/slo_types';
 import type { RulerClient } from '../../../services/slo/ruler_client';
+import { createConflictError } from '../../../services/alerting/errors';
 
 /** The namespace under which user-created alerting rules are stored in Cortex. */
 export const USER_RULES_NAMESPACE = 'observability-alerting';
@@ -33,6 +34,12 @@ export interface PrometheusRulePayload {
   enabled: boolean;
   /** Optional group name override. Defaults to the rule name. */
   groupName?: string;
+  /**
+   * When false (default), a create that collides with an existing same-named
+   * rule in the target group is rejected (409) rather than silently replacing
+   * it. Edit flows that intend to replace pass `true`.
+   */
+  overwrite?: boolean;
 }
 
 /**
@@ -110,6 +117,17 @@ export async function handleCreatePrometheusRule(
     group.groupName
   );
   if (existing && existing.rules.length > 0) {
+    // Guard against silently clobbering an existing same-named rule. A create
+    // (overwrite=false) that collides is a conflict; only an explicit edit
+    // (overwrite=true) may replace. This is the primary protection for the
+    // Metrics-page create flow, which has no client-side duplicate check.
+    if (!payload.overwrite && existing.rules.some((r) => r.name === payload.name)) {
+      throw createConflictError(
+        `A rule named "${payload.name}" already exists in group "${group.groupName}". ` +
+          `Choose a different rule name or group.`,
+        payload.name
+      );
+    }
     const siblings = existing.rules.filter((r) => r.name !== payload.name);
     group.rules = [...siblings, ...group.rules];
     // The evaluation interval is a group-level property shared by all rules.

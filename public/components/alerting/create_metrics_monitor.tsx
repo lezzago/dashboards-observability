@@ -99,7 +99,7 @@ export interface CreateMetricsMonitorProps {
    * Duplicate-name guard, checked against the selected datasource. Provided
    * by the Alert Manager Rules page which knows the existing rules.
    */
-  isNameTaken?: (name: string, dsId: string) => boolean;
+  isNameTaken?: (name: string, dsId: string, group?: string) => boolean;
   /**
    * Show the "Build query in metrics →" round-trip link in the Query
    * section header. Set by the Alert Manager Rules page; must stay off on
@@ -894,7 +894,13 @@ export const CreateMetricsMonitor: React.FC<CreateMetricsMonitorProps> = ({
     isNameTaken &&
     form.monitorName.trim() !== '' &&
     form.datasourceId !== '' &&
-    isNameTaken(form.monitorName.trim(), form.datasourceId)
+    // Scope the collision to the effective rule group (defaults to the rule
+    // name), matching Prometheus's (group, name) identity.
+    isNameTaken(
+      form.monitorName.trim(),
+      form.datasourceId,
+      (form.groupName || form.monitorName).trim()
+    )
   );
   const nameError = duplicateName
     ? i18n.translate('observability.alerting.createMetricsMonitor.nameDuplicate', {

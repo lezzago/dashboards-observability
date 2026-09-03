@@ -172,6 +172,12 @@ function buildPrometheusRulePayload(opts: {
   annotations: Record<string, string>;
   enabled: boolean;
   groupName?: string;
+  /**
+   * Allow replacing an existing same-named rule in the group. Edit flows set
+   * this; create flows leave it false so the server rejects a name collision
+   * (409) instead of silently overwriting.
+   */
+  overwrite?: boolean;
 }) {
   return {
     name: opts.name,
@@ -182,6 +188,7 @@ function buildPrometheusRulePayload(opts: {
     annotations: opts.annotations,
     enabled: opts.enabled,
     ...(opts.groupName ? { groupName: opts.groupName } : {}),
+    ...(opts.overwrite ? { overwrite: true } : {}),
   };
 }
 
@@ -475,40 +482,37 @@ export const AlarmsPage: React.FC<AlarmsPageProps> = ({
   // datasource filter has surfaced — saving against an unselected DS could
   // still create a same-name monitor on that DS, but that's a much narrower
   // footgun than the original "two identical names on the same cluster".
-  const rulesByDsName = useMemo(() => {
-    const map = new Map<string, Set<string>>();
-    rules.forEach((r) => {
-      if (deletedRuleIds.has(r.id)) return;
-      const dsKey = r.datasourceId;
-      const names = map.get(dsKey) ?? new Set<string>();
-      names.add(r.name.trim().toLowerCase());
-      map.set(dsKey, names);
-    });
-    return map;
-  }, [rules, deletedRuleIds]);
-
-  const isNameTakenForCreate = useCallback(
-    (name: string, dsId: string) => {
-      const set = rulesByDsName.get(dsId);
-      return !!set?.has(name.trim().toLowerCase());
-    },
-    [rulesByDsName]
-  );
-
-  const buildIsNameTakenForEdit = useCallback(
-    (excludeRuleId: string) => (name: string, dsId: string) => {
+  // Duplicate-rule detection. Prometheus rule identity is (datasource, group,
+  // name), so when a `group` is supplied the collision is scoped to that group
+  // — this lets a user legitimately keep `HighLatency` in two different groups
+  // without a false "already exists". When no group is supplied (OpenSearch/PPL
+  // monitors, which have no group) the check falls back to datasource-wide.
+  const isRuleNameTaken = useCallback(
+    (name: string, dsId: string, group: string | undefined, excludeRuleId?: string) => {
       const trimmed = name.trim().toLowerCase();
-      // Walk the rule list directly so we can exclude the monitor being
-      // edited; the cached map doesn't carry id information.
+      if (!trimmed) return false;
+      const g = group?.trim().toLowerCase();
       return rules.some(
         (r) =>
           r.id !== excludeRuleId &&
           !deletedRuleIds.has(r.id) &&
           r.datasourceId === dsId &&
-          r.name.trim().toLowerCase() === trimmed
+          r.name.trim().toLowerCase() === trimmed &&
+          (g === undefined || g === '' || (r.group ?? '').trim().toLowerCase() === g)
       );
     },
     [rules, deletedRuleIds]
+  );
+
+  const isNameTakenForCreate = useCallback(
+    (name: string, dsId: string, group?: string) => isRuleNameTaken(name, dsId, group),
+    [isRuleNameTaken]
+  );
+
+  const buildIsNameTakenForEdit = useCallback(
+    (excludeRuleId: string) => (name: string, dsId: string, group?: string) =>
+      isRuleNameTaken(name, dsId, group, excludeRuleId),
+    [isRuleNameTaken]
   );
   // The popover's "Logs" entry maps to an OpenSearch monitor and "Metrics"
   // maps to a Prometheus rule. When the user picks Logs the flyout is forced
@@ -1234,6 +1238,9 @@ export const AlarmsPage: React.FC<AlarmsPageProps> = ({
           ),
           enabled: promForm.enabled,
           groupName: ruleGroupLabel || promForm.name,
+          // Edit intends to replace the existing rule (same name+group) —
+          // opt into overwrite so the server's create-collision guard allows it.
+          overwrite: true,
         });
         // Create new rule first, then delete old on success (prevents data loss
         // if create fails — worst case is a harmless duplicate).

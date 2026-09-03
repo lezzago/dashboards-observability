@@ -55,7 +55,11 @@ const prometheusRuleBodySchema = schema.object({
     defaultValue: {},
   }),
   enabled: schema.boolean({ defaultValue: true }),
-  groupName: schema.maybe(schema.string()),
+  groupName: schema.maybe(schema.string({ minLength: 1, maxLength: 256 })),
+  // When false (the default), creating a rule whose name already exists in the
+  // target group is rejected with 409 instead of silently replacing it. Edit
+  // flows that intend to replace an existing rule pass `overwrite: true`.
+  overwrite: schema.boolean({ defaultValue: false }),
 });
 
 export function registerPrometheusRuleRoutes(
