@@ -171,6 +171,25 @@ describe('AlarmsPage', () => {
     expect(screen.getByTestId('monitorsTable')).toBeInTheDocument();
   });
 
+  it('refetches rules when switching into the Rules tab and forwards a Refresh handler', async () => {
+    // Fresh spy so we count only calls made after mount (the mount fetch is
+    // owned by useRulesData, which is mocked out here).
+    (emptyRulesHookResult.refetch as jest.Mock).mockClear();
+    await act(async () => {
+      render(<AlarmsPage {...defaultProps} />);
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('alertManagerTabs-rules'));
+    });
+    // Switching INTO the Rules tab triggers a refetch so a rule created
+    // elsewhere (e.g. the Metrics page flyout) appears without a manual reload.
+    expect(emptyRulesHookResult.refetch).toHaveBeenCalled();
+    // MonitorsTable receives a manual Refresh handler + spinner flag.
+    const last = mockMonitorsTable.mock.calls[mockMonitorsTable.mock.calls.length - 1][0];
+    expect(typeof last.onRefresh).toBe('function');
+    expect('refreshing' in last).toBe(true);
+  });
+
   it('forwards picker state + handlers to the AlertsDashboard (picker now lives in the timeline panel)', async () => {
     await act(async () => {
       render(<AlarmsPage {...defaultProps} />);
