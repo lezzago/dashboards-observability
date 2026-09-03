@@ -426,10 +426,17 @@ export const AlarmsPage: React.FC<AlarmsPageProps> = ({
 
   // Also refetch when the window/tab regains focus, so returning to an
   // already-open Alerts app re-syncs (e.g. after creating a rule in another
-  // browser tab). Cheap: only re-runs the rules query.
+  // browser tab). Cheap: only re-runs the rules query. `focus` and
+  // `visibilitychange` both fire when refocusing a window, so throttle to
+  // one refetch per second to avoid a redundant double request.
+  const lastFocusRefetchRef = useRef(0);
   useEffect(() => {
     const onVisible = () => {
-      if (document.visibilityState === 'visible') refetchRules();
+      if (document.visibilityState !== 'visible') return;
+      const nowMs = Date.now();
+      if (nowMs - lastFocusRefetchRef.current < 1000) return;
+      lastFocusRefetchRef.current = nowMs;
+      refetchRules();
     };
     window.addEventListener('focus', onVisible);
     document.addEventListener('visibilitychange', onVisible);

@@ -14,7 +14,7 @@
  * error callout on failure, and an empty-state when the query returns no
  * data. `runToken` changes on each "Run preview" click to force a re-fetch.
  */
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   EuiAccordion,
   EuiCallOut,
@@ -62,7 +62,19 @@ interface PreviewState {
   loading: boolean;
   error: string | null;
   points: PreviewPoint[];
+  /** The query that was actually previewed (snapshot at fetch time). */
+  requestedQuery: string;
+  /** The effective expression the server plotted (comparison stripped). */
+  plottedQuery: string;
 }
+
+const EMPTY_STATE: PreviewState = {
+  loading: false,
+  error: null,
+  points: [],
+  requestedQuery: '',
+  plottedQuery: '',
+};
 
 export const QueryPreviewResults: React.FC<{
   /** The PromQL expression to preview. */
@@ -74,40 +86,56 @@ export const QueryPreviewResults: React.FC<{
   /** Unique accordion id — pass a distinct one per mount point. */
   id?: string;
 }> = ({ query, datasourceId, runToken, id = 'prom-preview-results' }) => {
-  const [state, setState] = useState<PreviewState>({
-    loading: false,
-    error: null,
-    points: [],
-  });
+  const [state, setState] = useState<PreviewState>(EMPTY_STATE);
+
+  // Snapshot the live query in a ref so editing it does NOT re-fire the range
+  // query on every keystroke. The fetch is deliberately keyed on `runToken`
+  // (bumped by the "Run preview" button) and the datasource, so a preview
+  // reflects the query as of the last explicit Run preview click.
+  const queryRef = useRef(query);
+  queryRef.current = query;
 
   useEffect(() => {
-    const trimmed = (query || '').trim();
+    const trimmed = (queryRef.current || '').trim();
     if (!datasourceId || !trimmed) {
-      setState({ loading: false, error: null, points: [] });
+      setState(EMPTY_STATE);
       return;
     }
     let stale = false;
-    setState({ loading: true, error: null, points: [] });
+    setState({ ...EMPTY_STATE, loading: true, requestedQuery: trimmed });
     new AlertingPromResourcesService(datasourceId)
       .runQueryPreview(trimmed)
-      .then(({ points }) => {
-        if (!stale) setState({ loading: false, error: null, points: points || [] });
+      .then(({ points, query: plotted }) => {
+        if (!stale) {
+          setState({
+            loading: false,
+            error: null,
+            points: points || [],
+            requestedQuery: trimmed,
+            plottedQuery: plotted || trimmed,
+          });
+        }
       })
       .catch((err) => {
         if (!stale) {
           setState({
-            loading: false,
+            ...EMPTY_STATE,
             error: err instanceof Error ? err.message : String(err),
-            points: [],
+            requestedQuery: trimmed,
           });
         }
       });
     return () => {
       stale = true;
     };
-  }, [datasourceId, query, runToken]);
+    // `query` is intentionally read from a ref (not a dep) — see note above.
+  }, [datasourceId, runToken]);
 
   const resultCount = state.points.length;
+  // A trailing comparison (e.g. `> 0.5`) is stripped server-side so the chart
+  // plots the metric series rather than a 0/1 boolean. Surface that so the
+  // caption isn't mistaken for a threshold-applied series.
+  const comparisonStripped = !!state.plottedQuery && state.plottedQuery !== state.requestedQuery;
 
   return (
     <EuiAccordion
@@ -129,8 +157,17 @@ export const QueryPreviewResults: React.FC<{
       paddingSize="s"
     >
       <EuiText size="xs" color="subdued">
-        {query}
+        {state.plottedQuery || query}
       </EuiText>
+      {comparisonStripped && (
+        <EuiText size="xs" color="subdued">
+          <em>
+            {i18n.translate('observability.alerting.queryPreviewResults.comparisonStrippedNote', {
+              defaultMessage: 'Comparison removed to plot the underlying metric series.',
+            })}
+          </em>
+        </EuiText>
+      )}
       <EuiSpacer size="s" />
       {state.loading ? (
         <EuiFlexGroup justifyContent="center" alignItems="center" style={{ height: 200 }}>

@@ -82,10 +82,10 @@ export class AlertingPromResourcesService {
   async runQueryPreview(
     query: string,
     range?: { start?: number; end?: number; step?: number }
-  ): Promise<{ points: Array<{ timestamp: number; value: number }> }> {
+  ): Promise<{ points: Array<{ timestamp: number; value: number }>; query?: string }> {
     return (await this.requireHttp().post(
       `/api/alerting/prometheus/${encodeURIComponent(this.datasourceId)}/preview`,
       { body: JSON.stringify({ query, ...(range || {}) }) }
-    )) as { points: Array<{ timestamp: number; value: number }> };
+    )) as { points: Array<{ timestamp: number; value: number }>; query?: string };
   }
 }
