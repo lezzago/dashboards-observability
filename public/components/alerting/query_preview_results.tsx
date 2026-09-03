@@ -187,14 +187,26 @@ export const QueryPreviewResults: React.FC<{
           <EuiText size="xs">{state.error}</EuiText>
         </EuiCallOut>
       ) : resultCount === 0 ? (
+        // An empty result is ambiguous: the range genuinely had no data, OR the
+        // datasource degraded a query it couldn't evaluate to an empty response
+        // (the PromQL strategy doesn't always throw on a rejected query). Word
+        // this so the user doesn't wrongly conclude the metric has no data and
+        // build a rule on a broken expression.
         <EuiCallOut
           size="s"
           color="warning"
           iconType="iInCircle"
           title={i18n.translate('observability.alerting.queryPreviewResults.noDataTitle', {
-            defaultMessage: 'No data returned for this query in the last hour',
+            defaultMessage: 'No results in the last hour',
           })}
-        />
+        >
+          <EuiText size="xs">
+            {i18n.translate('observability.alerting.queryPreviewResults.noDataBody', {
+              defaultMessage:
+                'The query returned no data for this time range, or the data source could not evaluate it. Double-check the expression before saving.',
+            })}
+          </EuiText>
+        </EuiCallOut>
       ) : (
         <EchartsRender spec={buildChartOption(state.points)} height={200} />
       )}
