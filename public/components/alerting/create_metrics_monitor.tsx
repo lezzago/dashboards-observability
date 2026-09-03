@@ -278,6 +278,7 @@ const MonitorDetailsSection = React.memo<{
         onChange={(e) => onUpdate({ monitorName: e.target.value })}
         fullWidth
         compressed
+        data-test-subj="metricsMonitorNameField"
         aria-label={i18n.translate(
           'observability.alerting.createMetricsMonitor.monitorNameAriaLabel',
           { defaultMessage: 'Rule name' }
@@ -424,6 +425,7 @@ const QuerySection = React.memo<{
               <EuiButton
                 size="s"
                 onClick={onRunPreview}
+                data-test-subj="metricsMonitorRunPreviewButton"
                 aria-label={i18n.translate(
                   'observability.alerting.createMetricsMonitor.runPreviewAriaLabel',
                   { defaultMessage: 'Run preview' }
@@ -1034,14 +1036,20 @@ export const CreateMetricsMonitor: React.FC<CreateMetricsMonitorProps> = ({
       <EuiFlyoutFooter>
         <EuiFlexGroup justifyContent="flexEnd" responsive={false} gutterSize="s">
           <EuiFlexItem grow={false}>
-            <EuiButtonEmpty onClick={handleClose}>
+            <EuiButtonEmpty onClick={handleClose} data-test-subj="metricsMonitorCancelButton">
               {i18n.translate('observability.alerting.createMetricsMonitor.cancelButton', {
                 defaultMessage: 'Cancel',
               })}
             </EuiButtonEmpty>
           </EuiFlexItem>
           <EuiFlexItem grow={false}>
-            <EuiButton fill onClick={handleSave} isLoading={isSaving} isDisabled={!isValid}>
+            <EuiButton
+              fill
+              onClick={handleSave}
+              isLoading={isSaving}
+              isDisabled={!isValid}
+              data-test-subj="metricsMonitorCreateButton"
+            >
               {i18n.translate('observability.alerting.createMetricsMonitor.createButton', {
                 defaultMessage: 'Create',
               })}
