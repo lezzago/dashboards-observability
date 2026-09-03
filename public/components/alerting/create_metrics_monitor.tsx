@@ -82,6 +82,14 @@ export interface CreateMetricsMonitorProps {
   /** Datasource display name from the current Explore page context */
   datasourceName?: string;
   /**
+   * PromQL the user had in the Explore Metrics editor, used to pre-fill the
+   * flyout's query. The builder seeds its fields from this when the expression
+   * is builder-representable; complex expressions stay in the visible
+   * expression field (and drive the preview) without the builder clobbering
+   * them.
+   */
+  initialQuery?: string;
+  /**
    * Selectable Prometheus datasources. Provided by the Alert Manager Rules
    * page (no page context there); when absent, the flyout is pinned to the
    * context datasource (Metrics Explore page behavior).
@@ -288,6 +296,8 @@ const QuerySection = React.memo<{
   onUpdate: (patch: Partial<MetricsMonitorFormState>) => void;
   showPreview: boolean;
   onRunPreview: () => void;
+  /** Bumped on each "Run preview" click so the results block re-fetches. */
+  previewToken: number;
   contextDatasourceName?: string;
   /** Selectable datasources (Alert Manager); absent = pinned context ds. */
   datasources?: Array<{ id: string; name: string; type: string }>;
@@ -299,6 +309,7 @@ const QuerySection = React.memo<{
     onUpdate,
     showPreview,
     onRunPreview,
+    previewToken,
     contextDatasourceName,
     datasources,
     showBuildInMetricsLink,
@@ -443,6 +454,45 @@ const QuerySection = React.memo<{
 
           <EuiSpacer size="m" />
 
+          {/* Visible PromQL expression — always shows the effective query
+            (`form.query`), including one pre-filled from the Explore Metrics
+            page. Keeping it visible and editable means a complex expression the
+            builder can't represent is never hidden-yet-submittable (the reason
+            the initial query used to be dropped). The builder below writes into
+            this same field. */}
+          <EuiFormRow
+            label={i18n.translate('observability.alerting.createMetricsMonitor.expressionLabel', {
+              defaultMessage: 'PromQL expression',
+            })}
+            helpText={i18n.translate(
+              'observability.alerting.createMetricsMonitor.expressionHelpText',
+              {
+                defaultMessage:
+                  'The complete alert condition. Edit directly, or use the builder below to construct it.',
+              }
+            )}
+            fullWidth
+          >
+            <EuiTextArea
+              value={form.query}
+              onChange={(e) => onUpdate({ query: e.target.value })}
+              placeholder={i18n.translate(
+                'observability.alerting.createMetricsMonitor.expressionPlaceholder',
+                { defaultMessage: 'e.g. rate(http_requests_total[5m]) > 0.5' }
+              )}
+              rows={2}
+              fullWidth
+              compressed
+              aria-label={i18n.translate(
+                'observability.alerting.createMetricsMonitor.expressionAriaLabel',
+                { defaultMessage: 'PromQL expression' }
+              )}
+              data-test-subj="metricsMonitorPromQlExpression"
+            />
+          </EuiFormRow>
+
+          <EuiSpacer size="m" />
+
           {/* Point-and-click builder — same component as the Alert Manager
             "Create metrics rule" flyout. Seeds from the pre-filled Explore
             query when it is builder-representable; complex expressions leave
@@ -489,7 +539,12 @@ const QuerySection = React.memo<{
         {showPreview && (
           <>
             <EuiSpacer size="m" />
-            <QueryPreviewResults id="cmm-preview-results" query={form.query} />
+            <QueryPreviewResults
+              id="cmm-preview-results"
+              query={form.query}
+              datasourceId={form.datasourceId}
+              runToken={previewToken}
+            />
           </>
         )}
       </EuiAccordion>
@@ -731,6 +786,7 @@ export const CreateMetricsMonitor: React.FC<CreateMetricsMonitorProps> = ({
   onSave,
   datasourceId: contextDatasourceId,
   datasourceName: contextDatasourceName,
+  initialQuery,
   datasources,
   isNameTaken,
   showBuildInMetricsLink,
@@ -746,11 +802,11 @@ export const CreateMetricsMonitor: React.FC<CreateMetricsMonitorProps> = ({
     description: '',
     namespace: USER_RULES_NAMESPACE,
     groupName: '',
-    // Empty on purpose: the query must come from an explicit builder
-    // selection. A pre-seeded expression would be submittable while the
-    // builder renders empty (it cannot represent complex expressions),
-    // silently creating a rule for a metric the user never chose.
-    query: '',
+    // Pre-filled from the Explore Metrics editor when opened from that page.
+    // Safe to seed now that the expression is shown in a visible, editable
+    // field (see QuerySection) — a complex expression the builder can't
+    // represent is no longer hidden-yet-submittable.
+    query: initialQuery ?? '',
     datasourceId: defaultDatasourceId,
     forDuration: '5m',
     evalInterval: '1m',
@@ -760,6 +816,9 @@ export const CreateMetricsMonitor: React.FC<CreateMetricsMonitorProps> = ({
     annotations: [],
   });
   const [showPreview, setShowPreview] = useState(false);
+  // Bumped on each "Run preview" click so QueryPreviewResults re-runs the
+  // range query even when the panel is already open.
+  const [previewToken, setPreviewToken] = useState(0);
   const [showDiscardConfirm, setShowDiscardConfirm] = useState(false);
   // JSON snapshot so ANY field edit (description, group, duration,
   // datasource, label/annotation content) arms the discard-confirm modal —
@@ -792,6 +851,7 @@ export const CreateMetricsMonitor: React.FC<CreateMetricsMonitorProps> = ({
 
   const handleRunPreview = useCallback(() => {
     setShowPreview(true);
+    setPreviewToken((t) => t + 1);
   }, []);
 
   const duplicateName = !!(
@@ -913,6 +973,7 @@ export const CreateMetricsMonitor: React.FC<CreateMetricsMonitorProps> = ({
           onUpdate={updateForm}
           showPreview={showPreview}
           onRunPreview={handleRunPreview}
+          previewToken={previewToken}
           contextDatasourceName={contextDatasourceName}
           datasources={datasources}
           showBuildInMetricsLink={showBuildInMetricsLink}

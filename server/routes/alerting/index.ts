@@ -264,9 +264,7 @@ export function registerAlertingRoutes(router: IRouter, deps: AlertingRoutesDeps
    * `metadataService` instances are short-lived and die when the handler
    * returns.
    */
-  function buildRequestServices(
-    ctx: AlertingHandlerContext
-  ): {
+  function buildRequestServices(ctx: AlertingHandlerContext): {
     alertService: MultiBackendAlertService;
     metadataService: PrometheusMetadataService;
     datasourceService: SavedObjectDatasourceService;
@@ -930,6 +928,58 @@ export function registerAlertingRoutes(router: IRouter, deps: AlertingRoutesDeps
             req.params.dsId,
             logger
           );
+        })
+    );
+
+    // POST /api/alerting/prometheus/{dsId}/preview — run an ad-hoc PromQL range
+    // query so the "Create alert rule" flyout can show a real preview chart of
+    // the current expression (replacing the former hardcoded sample series).
+    // Reuses the same `promBackend.queryRange` path the rule-detail condition
+    // preview uses (see alert_preview.ts:fetchPromPreviewData).
+    router.post(
+      {
+        path: '/api/alerting/prometheus/{dsId}/preview',
+        validate: {
+          params: schema.object({ dsId: alertingIdSchema }),
+          body: schema.object({
+            query: schema.string({ minLength: 1 }),
+            // Epoch seconds; default to the last hour at a 60s step.
+            start: schema.maybe(schema.number()),
+            end: schema.maybe(schema.number()),
+            step: schema.maybe(schema.number()),
+          }),
+        },
+      },
+      async (ctx, req, res) =>
+        runHandler(res, async () => {
+          const promDs = await resolvePrometheusDatasource(
+            ctx as AlertingHandlerContext,
+            req.params.dsId
+          );
+          if (!promDs) {
+            return {
+              status: 404,
+              body: { message: `Prometheus datasource not found: ${req.params.dsId}` },
+            };
+          }
+          const now = Math.floor(Date.now() / 1000);
+          const end = req.body.end ?? now;
+          const start = req.body.start ?? end - 3600;
+          const step = req.body.step ?? 60;
+          // Strip a trailing comparison operator + threshold: `queryRange` wants
+          // the metric expression, not the boolean alert condition. Mirrors
+          // fetchPromPreviewData so the preview matches the condition series.
+          const metricQuery = req.body.query
+            .replace(/\s*(>|<|>=|<=|==|!=)\s*[\d.]+\s*$/, '')
+            .trim();
+          // Forward the inbound request so the backend can derive the caller's
+          // auth to the datasource. `queryRange` swallows its own errors to [],
+          // so a bad query / unreachable upstream yields an empty preview
+          // rather than a 500.
+          const points = await promBackend.queryRange(ctx, promDs, metricQuery, start, end, step, {
+            sourceRequest: req,
+          });
+          return { status: 200, body: { points } };
         })
     );
   }

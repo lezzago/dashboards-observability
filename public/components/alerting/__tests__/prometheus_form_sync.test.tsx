@@ -35,6 +35,12 @@ jest.mock('../query_services/alerting_prom_resources_service', () => ({
     listLabelNames: jest.fn().mockResolvedValue({ labels: ['job', 'instance'] }),
     listLabelValues: jest.fn().mockResolvedValue({ values: ['node-exporter'] }),
     listRuleGroupNames: jest.fn().mockResolvedValue({ groups: ['team-a-rules', 'team-b-rules'] }),
+    runQueryPreview: jest.fn().mockResolvedValue({
+      points: [
+        { timestamp: 1_700_000_000_000, value: 0.02 },
+        { timestamp: 1_700_000_060_000, value: 0.05 },
+      ],
+    }),
   })),
 }));
 
@@ -115,13 +121,14 @@ describe('PrometheusFormSection — simplified layout', () => {
     );
   });
 
-  it('shows preview results after clicking Run preview', () => {
+  it('runs a real range query and renders the results chart after clicking Run preview', async () => {
     render(
       <PrometheusFormSection
         form={baseForm}
         onUpdate={jest.fn()}
         validationErrors={{}}
         hasSubmitted={false}
+        datasourceId="ds-1"
       />
     );
 
@@ -130,8 +137,12 @@ describe('PrometheusFormSection — simplified layout', () => {
 
     fireEvent.click(screen.getByTestId('prometheusRunPreviewButton'));
 
-    expect(screen.getByTestId('echarts-render')).toBeInTheDocument();
-    expect(screen.getByText('Sample data — run the rule to see real results')).toBeInTheDocument();
+    // The chart renders once the live range query resolves (no more hardcoded
+    // "sample data" callout).
+    expect(await screen.findByTestId('echarts-render')).toBeInTheDocument();
+    expect(
+      screen.queryByText('Sample data — run the rule to see real results')
+    ).not.toBeInTheDocument();
   });
 
   it('renders the "Build query in metrics" link in the query panel header', () => {

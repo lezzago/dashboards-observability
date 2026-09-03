@@ -104,6 +104,34 @@ describe('CreateMetricsMonitor', () => {
     expect(createBtn.disabled).toBe(true);
   });
 
+  it('seeds the query from initialQuery copied off the Explore Metrics page', () => {
+    render(
+      <CreateMetricsMonitor
+        onCancel={jest.fn()}
+        onSave={jest.fn()}
+        datasourceId="prom-1"
+        initialQuery="rate(http_requests_total[5m])"
+      />
+    );
+
+    // The pre-filled expression is visible/editable (not hidden), so a complex
+    // expression the builder can't represent is never hidden-yet-submittable.
+    const expr = document.querySelector(
+      '[data-test-subj="metricsMonitorPromQlExpression"]'
+    ) as HTMLTextAreaElement;
+    expect(expr).not.toBeNull();
+    expect(expr.value).toBe('rate(http_requests_total[5m])');
+
+    // With the query seeded, Create enables as soon as a name is entered — no
+    // separate builder selection required.
+    const nameInput = document.querySelector('input[aria-label="Rule name"]') as HTMLInputElement;
+    fireEvent.change(nameInput, { target: { value: 'r' } });
+    const createBtn = document.querySelector(
+      'button[class*="euiButton--fill"]'
+    ) as HTMLButtonElement;
+    expect(createBtn.disabled).toBe(false);
+  });
+
   it('shows the "Build query in metrics" link only when requested (Alert Manager)', () => {
     const { unmount } = render(
       <CreateMetricsMonitor

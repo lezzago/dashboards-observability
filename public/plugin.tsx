@@ -749,6 +749,30 @@ export class ObservabilityPlugin implements Plugin<
               const dsId = dataset?.dataSource?.id || dataset?.id;
               const dsName =
                 dataset?.dataSource?.title ?? dataset?.dataSource?.name ?? dataset?.title;
+              // The live PromQL the user has in the Explore editor. Prefer the
+              // action dependency's `queryInEditor` (the shared code editor's
+              // live buffer), then the last-executed query. On the Metrics
+              // page the query is authored in a per-row builder/code editor
+              // that is NOT wired into the shared editor, so `queryInEditor`
+              // is empty there before submit — fall back to the live value the
+              // metrics panel mirrors into the data plugin's QueryStringManager
+              // on every keystroke, so a not-yet-run query still copies over.
+              const liveQueryStringValue = (() => {
+                try {
+                  const services = props.services as {
+                    data?: { query?: { queryString?: { getQuery?: () => { query?: unknown } } } };
+                  };
+                  const q = services?.data?.query?.queryString?.getQuery?.()?.query;
+                  return typeof q === 'string' ? q : '';
+                } catch {
+                  return '';
+                }
+              })();
+              const initialQuery =
+                props.dependencies.queryInEditor ||
+                (props.dependencies.query as { query?: string })?.query ||
+                liveQueryStringValue ||
+                '';
               return (
                 <React.Suspense fallback={null}>
                   <LazyCreateMetricsMonitor
@@ -758,6 +782,7 @@ export class ObservabilityPlugin implements Plugin<
                     }}
                     datasourceId={dsId}
                     datasourceName={dsName}
+                    initialQuery={initialQuery}
                     http={props.services.http}
                     addToast={(title, color, text) => {
                       // Forward the classified error body (`text`) and honor
