@@ -409,6 +409,36 @@ export const AlarmsPage: React.FC<AlarmsPageProps> = ({
     refetch: refetchRules,
   } = useRulesData({ selectedDsIds });
 
+  // Keep the rules list fresh without a manual reload. A rule created
+  // elsewhere (e.g. the Metrics page "Create alert rule" flyout) only lands
+  // in the unified list once Cortex's querier has loaded and first-evaluated
+  // it, which can lag the create by up to the rule's evaluation interval — so
+  // the initial mount fetch can miss it and the list would otherwise stay
+  // stale until a filter toggle. Refetch when the user switches INTO the Rules
+  // tab so a freshly-created rule shows up on navigation.
+  const prevTabRef = useRef(activeTab);
+  useEffect(() => {
+    if (activeTab === 'rules' && prevTabRef.current !== 'rules') {
+      refetchRules();
+    }
+    prevTabRef.current = activeTab;
+  }, [activeTab, refetchRules]);
+
+  // Also refetch when the window/tab regains focus, so returning to an
+  // already-open Alerts app re-syncs (e.g. after creating a rule in another
+  // browser tab). Cheap: only re-runs the rules query.
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') refetchRules();
+    };
+    window.addEventListener('focus', onVisible);
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      window.removeEventListener('focus', onVisible);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
+  }, [refetchRules]);
+
   const [deletedRuleIds, setDeletedRuleIds] = useState<Set<string>>(new Set());
   const [showCreateMonitor, setShowCreateMonitor] = useState(false);
 
@@ -1339,6 +1369,8 @@ export const AlarmsPage: React.FC<AlarmsPageProps> = ({
           rules={visibleRules}
           datasources={datasources}
           loading={dataLoading}
+          onRefresh={refetchRules}
+          refreshing={dataLoading}
           onDelete={handleDeleteRules}
           onClone={handleCloneRule}
           onEdit={(monitor) => setEditTarget({ dsId: monitor.datasourceId, ruleId: monitor.id })}
