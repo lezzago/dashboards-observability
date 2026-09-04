@@ -33,11 +33,13 @@ jest.mock('../create_monitor/prom_query_builder', () => ({
   ),
   // Lightweight stand-in: builder-representable = a bare metric or metric{...};
   // anything else (rates, comparisons) returns null. Used by the Query section
-  // to decide the "builder will overwrite your expression" warning.
-  parseBuilderQuery: (q: string) => {
+  // to decide the "builder will overwrite your expression" warning + the
+  // preview threshold overlay.
+  parseExpr: (q: string) => {
     const m = (q || '').trim().match(/^([a-zA-Z_:][a-zA-Z0-9_:]*)(\{[^}]*\})?$/);
-    return m ? { metric: m[1] } : null;
+    return m ? { metric: m[1], conditionOp: 'none' } : null;
   },
+  buildExpr: (s: { metric?: string }) => s.metric || '',
 }));
 
 global.ResizeObserver = jest.fn().mockImplementation(() => ({

@@ -18,7 +18,7 @@
 import React from 'react';
 import { render, screen, fireEvent } from '@testing-library/react';
 import { PrometheusFormSection } from '../create_monitor/prometheus_form_section';
-import { parseBuilderQuery } from '../create_monitor/prom_query_builder';
+import { parseExpr } from '../create_monitor/prom_query_builder';
 import type { PrometheusFormState } from '../create_monitor/create_monitor_types';
 
 // Mock dependencies that PrometheusFormSection uses
@@ -77,7 +77,12 @@ describe('PrometheusFormSection — simplified layout', () => {
     // combo box placeholder text
     expect(screen.getAllByText('Label name').length).toBeGreaterThan(0);
     expect(screen.getAllByText('Label value').length).toBeGreaterThan(0);
-    expect(screen.getByText('Select a metric to start.')).toBeInTheDocument();
+    // The Grafana-style Reduce + Condition rows render too.
+    expect(screen.getByText('Reduce')).toBeInTheDocument();
+    expect(screen.getByText('Condition')).toBeInTheDocument();
+    // baseForm's `up == 0` is now builder-representable, so it seeds the metric
+    // and the IS-EQUAL-TO condition rather than leaving the builder inert.
+    expect(screen.getByText('up')).toBeInTheDocument();
   });
 
   it('does not render Code mode, Trigger condition, or Evaluation Settings', () => {
@@ -387,13 +392,13 @@ describe('PrometheusFormSection — YAML preview', () => {
   });
 });
 
-describe('parseBuilderQuery — edit-mode builder seeding', () => {
+describe('parseExpr — edit-mode builder seeding', () => {
   it('parses a bare metric', () => {
-    expect(parseBuilderQuery('up')).toEqual({ metric: 'up' });
+    expect(parseExpr('up')).toMatchObject({ metric: 'up', conditionOp: 'none', aggFn: 'none' });
   });
 
   it('parses a metric with a single label matcher', () => {
-    expect(parseBuilderQuery('up{instance="host-1"}')).toEqual({
+    expect(parseExpr('up{instance="host-1"}')).toMatchObject({
       metric: 'up',
       labelName: 'instance',
       labelOperator: '=',
@@ -402,7 +407,7 @@ describe('parseBuilderQuery — edit-mode builder seeding', () => {
   });
 
   it('unescapes quotes and backslashes in the label value', () => {
-    expect(parseBuilderQuery('up{path="C:\\\\dir\\"x\\""}')).toEqual({
+    expect(parseExpr('up{path="C:\\\\dir\\"x\\""}')).toMatchObject({
       metric: 'up',
       labelName: 'path',
       labelOperator: '=',
@@ -410,11 +415,18 @@ describe('parseBuilderQuery — edit-mode builder seeding', () => {
     });
   });
 
+  it('now parses a simple comparison the builder can represent', () => {
+    expect(parseExpr('up == 0')).toMatchObject({
+      metric: 'up',
+      conditionOp: 'eq',
+      thresholdA: 0,
+    });
+  });
+
   it('returns null for expressions the builder cannot represent', () => {
-    expect(parseBuilderQuery('sum(rate(http_requests_total[5m])) > 0.05')).toBeNull();
-    expect(parseBuilderQuery('up == 0')).toBeNull();
-    expect(parseBuilderQuery('up{a="1",b="2"}')).toBeNull();
-    expect(parseBuilderQuery('')).toBeNull();
+    expect(parseExpr('sum(rate(http_requests_total[5m])) > 0.05')).toBeNull();
+    expect(parseExpr('up{a="1",b="2"}')).toBeNull();
+    expect(parseExpr('')).toBeNull();
   });
 });
 

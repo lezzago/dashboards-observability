@@ -49,7 +49,8 @@ import {
 import { i18n } from '@osd/i18n';
 import { coreRefs } from '../../framework/core_refs';
 import { classifiedToastColor, classifiedToastText, extractClassifiedError } from '../common/error';
-import { PromQueryBuilder, parseBuilderQuery } from './create_monitor/prom_query_builder';
+import { PromQueryBuilder, parseExpr } from './create_monitor/prom_query_builder';
+import { isAlwaysFiring } from './create_monitor/prom_condition';
 import { RuleGroupSelector } from './create_monitor/rule_group_selector';
 import { QueryPreviewResults } from './query_preview_results';
 // Shared label editor + entry types keep both flyouts' Labels sections in sync
@@ -379,8 +380,18 @@ const QuerySection = React.memo<{
     // A non-empty expression the builder cannot represent (e.g. a copied
     // `rate(...) > 0.5`). Switching to the builder and picking a metric would
     // replace it — warn instead of silently clobbering (audit finding #7).
-    const builderWouldOverwrite =
-      form.query.trim() !== '' && parseBuilderQuery(form.query) === null;
+    const parsedCondition = parseExpr(form.query);
+    const builderWouldOverwrite = form.query.trim() !== '' && parsedCondition === null;
+    // Feed the parsed threshold to the preview so it draws the threshold line +
+    // "would fire now" badge. Undefined for condition-less or unparseable exprs.
+    const previewCondition =
+      parsedCondition && parsedCondition.conditionOp !== 'none'
+        ? {
+            op: parsedCondition.conditionOp,
+            thresholdA: parsedCondition.thresholdA,
+            thresholdB: parsedCondition.thresholdB,
+          }
+        : undefined;
 
     // With an explicit datasource list (Alert Manager) the picker offers all
     // Prometheus datasources; otherwise it is pinned to the Explore page's
@@ -629,6 +640,29 @@ const QuerySection = React.memo<{
             </>
           )}
 
+          {/* Always-firing guard (both modes): a valid expression with no
+            comparison returns samples whenever the series exists, so the alert
+            fires continuously. Non-blocking — a condition-less rule is legal
+            PromQL — but surfaced so it isn't created by accident. */}
+          {isAlwaysFiring(form.query) && (
+            <>
+              <EuiSpacer size="s" />
+              <EuiCallOut
+                size="s"
+                color="warning"
+                iconType="alert"
+                title={i18n.translate(
+                  'observability.alerting.createMetricsMonitor.alwaysFiringWarning',
+                  {
+                    defaultMessage:
+                      'This expression has no condition, so the alert fires whenever the series exists. Add a comparison (e.g. “> 0.5”) — or a Condition in the builder — for a conditional alert.',
+                  }
+                )}
+                data-test-subj="metricsMonitorAlwaysFiringWarning"
+              />
+            </>
+          )}
+
           <EuiSpacer size="m" />
 
           {/* For duration — the rule's `for:` clause. Kept per-rule (unlike
@@ -671,6 +705,7 @@ const QuerySection = React.memo<{
               datasourceId={form.datasourceId}
               timeRange={previewTimeRange}
               runToken={previewToken}
+              condition={previewCondition}
             />
           </>
         )}
