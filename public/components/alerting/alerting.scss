@@ -240,12 +240,16 @@
 .altFacetCount {
   display: inline-block;
   line-height: 18px;
-  // Logical (RTL-safe) separation from the label, using the EUI spacing token
-  // rather than a magic pixel value. The label + count share a flex container
-  // (the facet-group button) whose inter-node whitespace collapses to zero, so
-  // a plain space would render no gap — the margin is required, not cosmetic.
+}
+
+// Count next to a facet-GROUP KEY (the collapsible header button) only. The
+// label + count share the button's flex content, whose inter-node whitespace
+// collapses to zero, so a plain space renders no gap — an explicit, RTL-safe,
+// token-based margin is required. Scoped to this modifier so it does NOT touch
+// the per-OPTION count, whose row already supplies its own `gap`.
+.altFacetGroupCount {
   margin-inline-start: $euiSizeXS;
-  // Never let the count be squeezed out when the label truncates.
+  // Never let the count be squeezed out when the key label truncates.
   flex-shrink: 0;
 }
 

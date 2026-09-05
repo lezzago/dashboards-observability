@@ -287,7 +287,7 @@ export const FacetFilterGroup: React.FC<FacetFilterGroupProps> = ({
               // button's flex content, so the margin is required.
               <EuiTextColor
                 color="subdued"
-                className="altFacetCount"
+                className="altFacetCount altFacetGroupCount"
                 data-test-subj={`facetGroup-${id}-optionCount`}
               >
                 ({options.length})

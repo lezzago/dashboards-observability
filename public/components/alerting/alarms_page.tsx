@@ -972,9 +972,23 @@ export const AlarmsPage: React.FC<AlarmsPageProps> = ({
   // very bug the unique-naming aims to prevent. This ref bridges that window;
   // entries are keyed by (datasourceId, lowercased name). A reserved name is
   // released only if the create fails (see the catch) — on success it stays
-  // reserved until the refetch surfaces it in `rules` (which then covers it).
+  // reserved until the refetch surfaces it in `rules` (which then covers it),
+  // at which point the reconcile effect below drops it.
   const inFlightCloneNamesRef = useRef<Set<string>>(new Set());
   const cloneNameKey = (dsId: string, name: string) => `${dsId}\n${name.trim().toLowerCase()}`;
+  // Once a reserved clone name lands in the fetched `rules`, `isRuleNameTaken`
+  // covers it, so drop it from the reservation set. This bounds the set to
+  // genuinely in-flight names (no unbounded per-session growth) and frees a
+  // name for reuse if that clone is later deleted (it left `rules`, so it's no
+  // longer reserved either).
+  useEffect(() => {
+    const set = inFlightCloneNamesRef.current;
+    if (set.size === 0) return;
+    const present = new Set(rules.map((r) => cloneNameKey(r.datasourceId, r.name)));
+    set.forEach((key) => {
+      if (present.has(key)) set.delete(key);
+    });
+  }, [rules]);
   // Build a unique clone name that also avoids names reserved by in-flight
   // clones this session, then reserve the chosen name.
   const takeUniqueCloneName = (

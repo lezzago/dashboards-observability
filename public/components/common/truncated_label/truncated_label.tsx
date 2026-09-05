@@ -62,36 +62,46 @@ export const TruncatedLabel: React.FC<TruncatedLabelProps> = ({ text, fontSize, 
 
   // Reveal on keyboard focus too, not just mouse hover (WCAG 1.4.13): when this
   // label sits inside a focusable control (e.g. a collapsible facet-group
-  // button), a keyboard-only or screen-magnifier user must be able to read the
-  // clipped full text. Focus lands on the ANCESTOR control, not this span, and
-  // native focus/blur don't bubble — so `onFocus`/`onBlur` on the wrap alone
-  // wouldn't fire. Attach directly to the nearest focusable ancestor. When the
-  // label isn't inside a focusable control (e.g. a plain table cell) there's no
-  // ancestor and this is a no-op. Esc dismisses (dismissable requirement).
+  // button, or a checkbox facet-option row), a keyboard-only or screen-magnifier
+  // user must be able to read the clipped full text. Focus/blur/keydown land on
+  // the focusable CONTROL, not this span, and native focus/blur don't bubble —
+  // so wiring the handlers onto the wrap span wouldn't fire. Resolve the real
+  // control and attach there:
+  //   - nearest focusable ANCESTOR, but only a genuine tab stop. We must EXCLUDE
+  //     `tabindex="-1"` wrappers: OUI's `EuiAccordion` gives its content a
+  //     `tabIndex=-1` childWrapper and auto-`.focus()`es it on expand, which
+  //     would otherwise fire `reveal` on every truncated row at once.
+  //   - else the control ASSOCIATED with an enclosing `<label>` (the checkbox
+  //     `<input>` is a SIBLING, not an ancestor, of an option-row label).
+  // Esc dismisses (WCAG 1.4.13 "dismissable"); the listener lives on the same
+  // control so it actually receives the keydown. A plain table cell has no
+  // focusable control → no-op (hover still works).
   useEffect(() => {
-    const focusable = ref.current?.closest('button, a, [role="button"], [tabindex]');
-    if (!focusable) return undefined;
-    focusable.addEventListener('focus', reveal);
-    focusable.addEventListener('blur', hide);
+    const el = ref.current;
+    if (!el) return undefined;
+    let control: Element | null = el.closest(
+      'button, a, [role="button"], [tabindex]:not([tabindex="-1"])'
+    );
+    if (!control) {
+      const label = el.closest('label');
+      control = (label && (label as HTMLLabelElement).control) || null;
+    }
+    if (!control) return undefined;
+    const onKeyDown = (e: Event) => {
+      if ((e as KeyboardEvent).key === 'Escape') hide();
+    };
+    control.addEventListener('focus', reveal);
+    control.addEventListener('blur', hide);
+    control.addEventListener('keydown', onKeyDown);
     return () => {
-      focusable.removeEventListener('focus', reveal);
-      focusable.removeEventListener('blur', hide);
+      control.removeEventListener('focus', reveal);
+      control.removeEventListener('blur', hide);
+      control.removeEventListener('keydown', onKeyDown);
     };
   }, [reveal, hide, text]);
 
-  const onKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Escape') hide();
-  };
-
   return (
-    <span
-      className="obsTruncatedLabelWrap"
-      onMouseEnter={reveal}
-      onMouseLeave={hide}
-      onFocus={reveal}
-      onBlur={hide}
-      onKeyDown={onKeyDown}
-    >
+    <span className="obsTruncatedLabelWrap" onMouseEnter={reveal} onMouseLeave={hide}>
       <span ref={ref} className="obsTruncatedLabel" style={labelStyle}>
         {text}
       </span>
