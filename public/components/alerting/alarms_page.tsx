@@ -194,6 +194,39 @@ function buildPrometheusRulePayload(opts: {
   };
 }
 
+/**
+ * Build a clone name that doesn't collide with an existing rule on the same
+ * datasource. Tries the bare suffix first (`makeSuffix(1)`, e.g. ` (Copy)`),
+ * then numbered variants (`makeSuffix(2)` → ` (Copy 2)`, …) until it finds a
+ * name the `isTaken` predicate reports as free. Each candidate is capped at
+ * `maxLen` by trimming the BASE name — never the suffix — so the disambiguator
+ * is always preserved. A bounded attempt count guarantees termination even
+ * against a pathological set of existing names; the final fallback appends a
+ * timestamp to stay unique.
+ */
+function buildUniqueCloneName(
+  baseName: string,
+  makeSuffix: (n: number) => string,
+  isTaken: (candidate: string) => boolean,
+  maxLen: number
+): string {
+  const withSuffix = (suffix: string): string => {
+    const base =
+      baseName.length + suffix.length > maxLen
+        ? baseName.slice(0, Math.max(0, maxLen - suffix.length))
+        : baseName;
+    return `${base}${suffix}`;
+  };
+  const MAX_ATTEMPTS = 1000;
+  for (let n = 1; n <= MAX_ATTEMPTS; n++) {
+    const candidate = withSuffix(makeSuffix(n));
+    if (!isTaken(candidate)) return candidate;
+  }
+  // Practically unreachable — a thousand same-named clones on one datasource.
+  // Guarantee a unique name rather than loop forever.
+  return withSuffix(`${makeSuffix(1)}-${Date.now()}`);
+}
+
 export const AlarmsPage: React.FC<AlarmsPageProps> = ({
   datasources,
   datasourcesLoading,
@@ -942,13 +975,17 @@ export const AlarmsPage: React.FC<AlarmsPageProps> = ({
       // OpenSearch Alerting monitor API (which requires `schedule`).
       if (detail.datasourceType === 'prometheus') {
         // Use a suffix that's safe for the ruleId regex [A-Za-z0-9_-]+
-        // (no spaces or parentheses).
-        const suffix = '-copy';
-        const baseName =
-          monitor.name.length + suffix.length > PPL_MONITOR_NAME_MAX
-            ? monitor.name.slice(0, PPL_MONITOR_NAME_MAX - suffix.length)
-            : monitor.name;
-        const clonedName = `${baseName}${suffix}`;
+        // (no spaces or parentheses), and disambiguate against existing rules
+        // so cloning the same rule twice yields `-copy`, `-copy-2`, … instead
+        // of two identical names. Prometheus rule identity is scoped by group,
+        // but the clone POST omits the group (server defaults it to the rule
+        // name), so we check datasource-wide to keep display names distinct.
+        const clonedName = buildUniqueCloneName(
+          monitor.name,
+          (n) => (n === 1 ? '-copy' : `-copy-${n}`),
+          (candidate) => isRuleNameTaken(candidate, monitor.datasourceId, undefined),
+          PPL_MONITOR_NAME_MAX
+        );
 
         // Extract rule details from the unified shape + raw
         const rawDetail: unknown = detail.raw ?? {};
@@ -1044,15 +1081,36 @@ export const AlarmsPage: React.FC<AlarmsPageProps> = ({
         }
         return cleaned;
       });
-      const suffix = ' (Copy)';
-      const baseName =
-        monitor.name.length + suffix.length > PPL_MONITOR_NAME_MAX
-          ? monitor.name.slice(0, PPL_MONITOR_NAME_MAX - suffix.length)
-          : monitor.name;
+      // Disambiguate the clone name so cloning the same monitor twice yields
+      // `X (Copy)`, `X (Copy 2)`, … rather than two identical `X (Copy)`.
+      // OpenSearch monitors have no group, so the check is datasource-wide.
+      const clonedName = buildUniqueCloneName(
+        monitor.name,
+        (n) => (n === 1 ? ' (Copy)' : ` (Copy ${n})`),
+        (candidate) => isRuleNameTaken(candidate, monitor.datasourceId, undefined),
+        PPL_MONITOR_NAME_MAX
+      );
+      // Rebuild the create-time `monitor_type`. The server's `mapMonitor`
+      // normalizes every non-PPL/bucket/doc monitor down to
+      // `query_level_monitor` (cluster-metrics monitors share that wire type),
+      // so `rest.monitor_type` here is the normalized value, not the real one.
+      // Re-POSTing it would store a cluster-metrics monitor (whose input is a
+      // `uri`, not a `search`) as a plain query-level monitor; the classic
+      // editor then reads `inputs[0].search.indices` on edit and throws,
+      // rendering a blank page. Detect the cluster-metrics shape from the input
+      // and restore the correct `cluster_metrics_monitor` type; all other types
+      // already round-trip correctly through `rest.monitor_type`.
+      const inputs = Array.isArray(rest.inputs) ? (rest.inputs as unknown[]) : [];
+      const isClusterMetrics =
+        !!inputs[0] && typeof inputs[0] === 'object' && 'uri' in (inputs[0] as object);
+      const clonedMonitorType = isClusterMetrics
+        ? 'cluster_metrics_monitor'
+        : ((rest.monitor_type as string | undefined) ?? 'query_level_monitor');
       const payload: Record<string, unknown> = {
         ...rest,
+        monitor_type: clonedMonitorType,
         triggers: cleanTriggers,
-        name: `${baseName}${suffix}`,
+        name: clonedName,
         type: 'monitor',
       };
       await mutations.createMonitor(payload, monitor.datasourceId);

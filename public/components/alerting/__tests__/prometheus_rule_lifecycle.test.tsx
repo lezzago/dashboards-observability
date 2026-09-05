@@ -38,6 +38,25 @@ jest.mock('../hooks/use_alerts', () => ({
   useAlerts: (args: unknown) => mockUseAlerts(args),
 }));
 
+// Mock the rules-data hook so clone-name uniqueness tests can seed the list
+// the duplicate-name check reads. Defaults to an empty list, which matches the
+// prior (unmocked) behavior for the other tests in this file.
+const mockUseRulesData = jest.fn();
+const emptyRulesHookResult = {
+  rules: [],
+  rulesTotal: 0,
+  isLoading: false,
+  error: null,
+  warnings: [],
+  setRules: jest.fn(),
+  setRulesTotal: jest.fn(),
+  refetch: jest.fn(),
+  backgroundRefetch: jest.fn(),
+};
+jest.mock('../hooks/use_rules_data', () => ({
+  useRulesData: (args: unknown) => mockUseRulesData(args),
+}));
+
 const mockMonitorsTable = jest.fn();
 jest.mock('../monitors_table', () => ({
   MonitorsTable: (props: unknown) => {
@@ -98,6 +117,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   jest.useFakeTimers();
   mockUseAlerts.mockReturnValue(emptyHookResult);
+  mockUseRulesData.mockReturnValue(emptyRulesHookResult);
   window.location.hash = '';
 });
 
@@ -200,6 +220,52 @@ describe('Prometheus rule clone', () => {
 
     expect(mockCreatePrometheusRule).toHaveBeenCalledWith(
       expect.objectContaining({ name: 'TestRule-copy' }),
+      'ds-1'
+    );
+  });
+
+  it('gives a Prometheus clone a unique name when -copy already exists', async () => {
+    // A `TestRule-copy` already sits in the list, so the next clone of
+    // `TestRule` must fall through to `-copy-2` rather than colliding.
+    mockUseRulesData.mockReturnValue({
+      ...emptyRulesHookResult,
+      rules: [
+        { id: 'ds-1-TestRule-TestRule', name: 'TestRule', datasourceId: 'ds-1' },
+        { id: 'ds-1-TestRule-copy', name: 'TestRule-copy', datasourceId: 'ds-1' },
+      ],
+    });
+    mockGetRuleDetail.mockResolvedValue({
+      datasourceType: 'prometheus',
+      name: 'TestRule',
+      query: 'up == 0',
+      pendingPeriod: '60s',
+      evaluationInterval: '30s',
+      threshold: { operator: '==', value: 0 },
+      labels: {},
+      annotations: {},
+      raw: { type: 'alerting', name: 'TestRule', query: 'up == 0', duration: 60 },
+    });
+    mockCreatePrometheusRule.mockResolvedValue({ success: true });
+
+    await act(async () => {
+      render(<AlarmsPage {...defaultProps} />);
+    });
+    fireEvent.click(screen.getByTestId('alertManagerTabs-rules'));
+
+    const tableProps = mockMonitorsTable.mock.calls[mockMonitorsTable.mock.calls.length - 1][0] as {
+      onClone: (monitor: unknown) => Promise<void>;
+    };
+    await act(async () => {
+      await tableProps.onClone({
+        id: 'ds-1-TestRule-TestRule',
+        name: 'TestRule',
+        datasourceId: 'ds-1',
+        datasourceType: 'prometheus',
+      });
+    });
+
+    expect(mockCreatePrometheusRule).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'TestRule-copy-2' }),
       'ds-1'
     );
   });

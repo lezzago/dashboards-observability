@@ -531,6 +531,97 @@ describe('AlarmsPage', () => {
     );
   });
 
+  it('clones a cluster-metrics monitor with a valid cluster_metrics_monitor type', async () => {
+    // The server's `mapMonitor` normalizes a cluster-metrics monitor's wire
+    // type down to `query_level_monitor`, so `detail.raw.monitor_type` arrives
+    // coerced. Re-POSTing that value would store the clone as a query-level
+    // monitor with a `uri` input, and the classic editor then crashes on edit
+    // (reads `inputs[0].search.indices`) → blank page. The clone path must
+    // restore `cluster_metrics_monitor` from the `uri` input shape.
+    const fakeRaw = {
+      id: 'mon-cm',
+      name: 'Cluster Health',
+      type: 'monitor',
+      monitor_type: 'query_level_monitor',
+      last_update_time: 123,
+      schema_version: 1,
+      inputs: [{ uri: { api_type: 'CLUSTER_HEALTH', path: '/_cluster/health' } }],
+      triggers: [{ query_level_trigger: { id: 'trig-1', name: 'Red', actions: [] } }],
+    };
+    mockGetRuleDetail.mockResolvedValue({ raw: fakeRaw });
+    mockCreateMonitor.mockResolvedValue({ id: 'new-mon-cm' });
+
+    await act(async () => {
+      render(<AlarmsPage {...defaultProps} />);
+    });
+    fireEvent.click(screen.getByTestId('alertManagerTabs-rules'));
+
+    const tableProps = mockMonitorsTable.mock.calls[mockMonitorsTable.mock.calls.length - 1][0] as {
+      onClone: (monitor: unknown) => Promise<void>;
+    };
+    await act(async () => {
+      await tableProps.onClone({
+        id: 'mon-cm',
+        name: 'Cluster Health',
+        datasourceId: 'ds-1',
+        definitionType: 'monitor',
+      });
+    });
+
+    expect(mockCreateMonitor).toHaveBeenCalledWith(
+      expect.objectContaining({
+        name: 'Cluster Health (Copy)',
+        monitor_type: 'cluster_metrics_monitor',
+      }),
+      'ds-1'
+    );
+  });
+
+  it('gives an OpenSearch clone a unique name when the copy already exists', async () => {
+    // A prior clone of the same monitor already sits in the list, so the bare
+    // ` (Copy)` name is taken — the next clone must fall through to ` (Copy 2)`
+    // instead of producing a second identical name.
+    mockUseRulesData.mockReturnValue({
+      ...emptyRulesHookResult,
+      rules: [
+        { id: 'mon-1', name: 'Test Monitor', datasourceId: 'ds-1' },
+        { id: 'mon-1-copy', name: 'Test Monitor (Copy)', datasourceId: 'ds-1' },
+      ],
+    });
+    const fakeRaw = {
+      id: 'mon-1',
+      name: 'Test Monitor',
+      type: 'monitor',
+      monitor_type: 'query_level_monitor',
+      inputs: [{ search: { indices: ['logs-*'], query: {} } }],
+      triggers: [],
+    };
+    mockGetRuleDetail.mockResolvedValue({ raw: fakeRaw });
+    mockCreateMonitor.mockResolvedValue({ id: 'new-mon-2' });
+
+    await act(async () => {
+      render(<AlarmsPage {...defaultProps} />);
+    });
+    fireEvent.click(screen.getByTestId('alertManagerTabs-rules'));
+
+    const tableProps = mockMonitorsTable.mock.calls[mockMonitorsTable.mock.calls.length - 1][0] as {
+      onClone: (monitor: unknown) => Promise<void>;
+    };
+    await act(async () => {
+      await tableProps.onClone({
+        id: 'mon-1',
+        name: 'Test Monitor',
+        datasourceId: 'ds-1',
+        definitionType: 'monitor',
+      });
+    });
+
+    expect(mockCreateMonitor).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'Test Monitor (Copy 2)' }),
+      'ds-1'
+    );
+  });
+
   it.each([
     {
       definitionType: 'detector',
