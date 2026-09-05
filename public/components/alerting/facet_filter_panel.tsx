@@ -282,9 +282,11 @@ export const FacetFilterGroup: React.FC<FacetFilterGroupProps> = ({
               // matches the per-option `({count})` style below — a bare
               // trailing number (e.g. "severity 2") looked like a
               // superscript/typo next to the label. Spacing + flex-shrink live
-              // in the `.altFacetCount` SCSS rule (RTL-safe `margin-inline-start:
-              // $euiSizeXS`) — a plain `{' '}` collapses to zero inside the
-              // button's flex content, so the margin is required.
+              // in the KEY-only `.altFacetGroupCount` SCSS modifier (RTL-safe
+              // `margin-inline-start: $euiSizeXS`) — a plain `{' '}` collapses to
+              // zero inside the button's flex content, so the margin is required
+              // here; the per-option count keeps plain `.altFacetCount` (its row
+              // supplies its own gap) to avoid a double margin.
               <EuiTextColor
                 color="subdued"
                 className="altFacetCount altFacetGroupCount"

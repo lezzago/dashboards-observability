@@ -214,10 +214,13 @@ function buildUniqueCloneName(
     // Trim by CODE POINTS, not UTF-16 units, so a boundary that falls inside a
     // surrogate pair (emoji / astral CJK) doesn't split the character into a
     // lone half (which renders as U+FFFD). `[...str]` iterates code points.
+    // Measure the suffix in code points too so the budget stays consistent (all
+    // current suffixes are ASCII, so this is defensive against future ones).
     const codePoints = [...baseName];
+    const suffixLen = [...suffix].length;
     const base =
-      codePoints.length + suffix.length > maxLen
-        ? codePoints.slice(0, Math.max(0, maxLen - suffix.length)).join('')
+      codePoints.length + suffixLen > maxLen
+        ? codePoints.slice(0, Math.max(0, maxLen - suffixLen)).join('')
         : baseName;
     return `${base}${suffix}`;
   };
@@ -984,11 +987,20 @@ export const AlarmsPage: React.FC<AlarmsPageProps> = ({
   useEffect(() => {
     const set = inFlightCloneNamesRef.current;
     if (set.size === 0) return;
-    const present = new Set(rules.map((r) => cloneNameKey(r.datasourceId, r.name)));
+    // Mirror `isRuleNameTaken`'s soft-delete filter: a deleted rule can linger
+    // in `rules` (delete only marks `deletedRuleIds`, no immediate refetch), and
+    // `isRuleNameTaken` ignores it — so we must NOT treat its name as "present"
+    // here either, or we'd release the reservation while the name still reads as
+    // free, re-opening the duplicate-name window.
+    const present = new Set(
+      rules
+        .filter((r) => !deletedRuleIds.has(r.id))
+        .map((r) => cloneNameKey(r.datasourceId, r.name))
+    );
     set.forEach((key) => {
       if (present.has(key)) set.delete(key);
     });
-  }, [rules]);
+  }, [rules, deletedRuleIds]);
   // Build a unique clone name that also avoids names reserved by in-flight
   // clones this session, then reserve the chosen name.
   const takeUniqueCloneName = (
