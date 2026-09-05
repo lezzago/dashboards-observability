@@ -43,6 +43,7 @@ import {
   STATUS_COLORS,
   TYPE_LABELS,
 } from '../shared_constants';
+import { TruncatedLabel } from '../../common/truncated_label';
 import { DEFAULT_WIDTHS } from './resizable_columns';
 import { isPending } from './pending_rules';
 
@@ -301,7 +302,12 @@ export function buildTableColumns({
         sortable: (r: UnifiedRuleSummary) =>
           (dsNameMap.get(r.datasourceId) || r.datasourceId).toLowerCase(),
         width: w('datasource'),
-        render: (id: string) => dsNameMap.get(id) || id,
+        // A bare string cell wraps mid-word for long datasource names (e.g.
+        // "ObservabilityStack_Prometheus"). EUI's `truncateText` doesn't
+        // single-line a plain-text render in this table, so use the shared
+        // `TruncatedLabel` (single-line ellipsis + instant full-text tooltip),
+        // matching the datasource facet in the filter panel.
+        render: (id: string) => <TruncatedLabel text={dsNameMap.get(id) || id} />,
       });
     } else if (colId === 'createdBy') {
       cols.push({

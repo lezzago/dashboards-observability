@@ -268,18 +268,32 @@ export const FacetFilterGroup: React.FC<FacetFilterGroupProps> = ({
             aria-controls={isCollapsed ? undefined : `facetGroup-${id}-region`}
             data-test-subj={`facetGroup-${id}-toggle`}
           >
-            <strong>{label}</strong>
+            {/* A long facet key (e.g. "deployment_environment") gets clipped
+                by the narrow filter panel. Render it through `TruncatedLabel`
+                so it ellipsis-truncates AND shows the full name in a hover
+                tooltip — matching the option rows. `minWidth: 0` lets the bold
+                wrapper shrink inside the button's flex content so truncation
+                kicks in instead of overflowing. */}
+            <strong style={{ minWidth: 0, overflow: 'hidden' }}>
+              <TruncatedLabel text={label} />
+            </strong>
             {showOptionCount && (
-              <>
-                {' '}
-                <EuiTextColor
-                  color="subdued"
-                  className="altFacetCount"
-                  data-test-subj={`facetGroup-${id}-optionCount`}
-                >
-                  {options.length}
-                </EuiTextColor>
-              </>
+              // Parenthesize the option count so it reads as a count and
+              // matches the per-option `({count})` style below — a bare
+              // trailing number (e.g. "severity 2") looked like a
+              // superscript/typo next to the label. The label + count sit in a
+              // flex container (the button content), which collapses inter-node
+              // whitespace to zero, so a plain `{' '}` produced no visible gap
+              // ("severity(2)"). Use an explicit left margin for reliable
+              // separation, and never let the count shrink.
+              <EuiTextColor
+                color="subdued"
+                className="altFacetCount"
+                data-test-subj={`facetGroup-${id}-optionCount`}
+                style={{ marginLeft: 4, flexShrink: 0 }}
+              >
+                ({options.length})
+              </EuiTextColor>
             )}
           </EuiButtonEmpty>
         </EuiFlexItem>

@@ -2691,22 +2691,38 @@ export const CreateAdRuleFlyout: React.FC<CreateAdRuleFlyoutProps> = ({
           hint={i18n.translate('observability.alerting.createAdRuleFlyout.nameHint', {
             defaultMessage: 'Specify a unique and descriptive name that is easy to recognize.',
           })}
-          helpText={i18n.translate('observability.alerting.createAdRuleFlyout.nameHelpText', {
-            defaultMessage:
-              'Detector name must contain 1-64 characters. Valid characters are a-z, A-Z, 0-9, -(hyphen), _(underscore) and .(period).',
-          })}
+          helpText={
+            isDetector
+              ? i18n.translate('observability.alerting.createAdRuleFlyout.detectorNameHelpText', {
+                  defaultMessage:
+                    'Detector name must contain 1-64 characters. Valid characters are a-z, A-Z, 0-9, -(hyphen), _(underscore) and .(period).',
+                })
+              : i18n.translate('observability.alerting.createAdRuleFlyout.forecasterNameHelpText', {
+                  defaultMessage:
+                    'Forecaster name must contain 1-64 characters. Valid characters are a-z, A-Z, 0-9, -(hyphen), _(underscore) and .(period).',
+                })
+          }
           isInvalid={!!visibleErrors.name}
           error={visibleErrors.name}
         >
           <EuiFieldText
             value={form.name}
             onChange={(e) => updateForm('name', e.target.value)}
-            placeholder={i18n.translate(
-              'observability.alerting.createAdRuleFlyout.detectorNamePlaceholder',
-              {
-                defaultMessage: 'Enter detector name',
-              }
-            )}
+            placeholder={
+              isDetector
+                ? i18n.translate(
+                    'observability.alerting.createAdRuleFlyout.detectorNamePlaceholder',
+                    {
+                      defaultMessage: 'Enter detector name',
+                    }
+                  )
+                : i18n.translate(
+                    'observability.alerting.createAdRuleFlyout.forecasterNamePlaceholder',
+                    {
+                      defaultMessage: 'Enter forecaster name',
+                    }
+                  )
+            }
             data-test-subj="alertManagerCreateAdRuleName"
           />
         </AdFormattedFormRow>
