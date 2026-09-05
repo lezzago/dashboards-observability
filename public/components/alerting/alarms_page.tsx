@@ -211,9 +211,13 @@ function buildUniqueCloneName(
   maxLen: number
 ): string {
   const withSuffix = (suffix: string): string => {
+    // Trim by CODE POINTS, not UTF-16 units, so a boundary that falls inside a
+    // surrogate pair (emoji / astral CJK) doesn't split the character into a
+    // lone half (which renders as U+FFFD). `[...str]` iterates code points.
+    const codePoints = [...baseName];
     const base =
-      baseName.length + suffix.length > maxLen
-        ? baseName.slice(0, Math.max(0, maxLen - suffix.length))
+      codePoints.length + suffix.length > maxLen
+        ? codePoints.slice(0, Math.max(0, maxLen - suffix.length)).join('')
         : baseName;
     return `${base}${suffix}`;
   };
@@ -961,7 +965,38 @@ export const AlarmsPage: React.FC<AlarmsPageProps> = ({
     }
   };
 
+  // Names of clones issued this session but not yet reconciled into `rules` by
+  // a refetch. `isRuleNameTaken` only sees the fetched list, so cloning the
+  // same rule twice in quick succession (before the background refetch lands)
+  // would otherwise re-pick the same suffix and mint a duplicate name — the
+  // very bug the unique-naming aims to prevent. This ref bridges that window;
+  // entries are keyed by (datasourceId, lowercased name). A reserved name is
+  // released only if the create fails (see the catch) — on success it stays
+  // reserved until the refetch surfaces it in `rules` (which then covers it).
+  const inFlightCloneNamesRef = useRef<Set<string>>(new Set());
+  const cloneNameKey = (dsId: string, name: string) => `${dsId}\n${name.trim().toLowerCase()}`;
+  // Build a unique clone name that also avoids names reserved by in-flight
+  // clones this session, then reserve the chosen name.
+  const takeUniqueCloneName = (
+    baseName: string,
+    makeSuffix: (n: number) => string,
+    dsId: string
+  ): string => {
+    const name = buildUniqueCloneName(
+      baseName,
+      makeSuffix,
+      (candidate) =>
+        isRuleNameTaken(candidate, dsId, undefined) ||
+        inFlightCloneNamesRef.current.has(cloneNameKey(dsId, candidate)),
+      PPL_MONITOR_NAME_MAX
+    );
+    inFlightCloneNamesRef.current.add(cloneNameKey(dsId, name));
+    return name;
+  };
+
   const handleCloneRule = async (monitor: UnifiedRuleSummary) => {
+    // Tracked so a failed create can release the reserved clone name.
+    let reservedCloneName: string | null = null;
     try {
       // Fetch the full rule detail to get the raw backend payload — the
       // summary shape doesn't carry the wire format needed for re-creation.
@@ -980,12 +1015,12 @@ export const AlarmsPage: React.FC<AlarmsPageProps> = ({
         // of two identical names. Prometheus rule identity is scoped by group,
         // but the clone POST omits the group (server defaults it to the rule
         // name), so we check datasource-wide to keep display names distinct.
-        const clonedName = buildUniqueCloneName(
+        const clonedName = takeUniqueCloneName(
           monitor.name,
           (n) => (n === 1 ? '-copy' : `-copy-${n}`),
-          (candidate) => isRuleNameTaken(candidate, monitor.datasourceId, undefined),
-          PPL_MONITOR_NAME_MAX
+          monitor.datasourceId
         );
+        reservedCloneName = clonedName;
 
         // Extract rule details from the unified shape + raw
         const rawDetail: unknown = detail.raw ?? {};
@@ -1053,12 +1088,16 @@ export const AlarmsPage: React.FC<AlarmsPageProps> = ({
       // wrapped, type-specific triggers we need for a valid re-create. Strip
       // the server-owned / response-derived fields that must NOT be re-POSTed:
       // identity + audit stamps (`id`, `*_time`, `schema_version`, `version`),
-      // ownership/routing (`owner`, `data_sources`), and the read-only
-      // enrichments the alerting API adds on GET (`item_type`,
+      // ownership/principal/routing (`owner`, `user`, `data_sources`), and the
+      // read-only enrichments the alerting API adds on GET (`item_type`,
       // `associated_workflows`, `associatedCompositeMonitorCnt`,
-      // `last_run_context`). Legit create-time fields (e.g. the doc-level
-      // `delete_query_index_in_every_run` / `should_create_single_alert_for_findings`)
-      // fall through in `...rest`.
+      // `last_run_context`). `user` (the security principal: name/backend_roles)
+      // is stripped for parity with `owner` so the clone is attributed to and
+      // access-scoped by the CALLER — the alerting plugin re-assigns it from the
+      // request's auth context — rather than inheriting the original creator's
+      // roles on any config that doesn't override it. Legit create-time fields
+      // (e.g. the doc-level `delete_query_index_in_every_run` /
+      // `should_create_single_alert_for_findings`) fall through in `...rest`.
       const {
         id: _id,
         last_update_time: _t,
@@ -1066,6 +1105,7 @@ export const AlarmsPage: React.FC<AlarmsPageProps> = ({
         schema_version: _sv,
         version: _v,
         owner: _ow,
+        user: _user,
         data_sources: _ds,
         item_type: _it,
         associated_workflows: _aw,
@@ -1100,12 +1140,12 @@ export const AlarmsPage: React.FC<AlarmsPageProps> = ({
       // Disambiguate the clone name so cloning the same monitor twice yields
       // `X (Copy)`, `X (Copy 2)`, … rather than two identical `X (Copy)`.
       // OpenSearch monitors have no group, so the check is datasource-wide.
-      const clonedName = buildUniqueCloneName(
+      const clonedName = takeUniqueCloneName(
         monitor.name,
         (n) => (n === 1 ? ' (Copy)' : ` (Copy ${n})`),
-        (candidate) => isRuleNameTaken(candidate, monitor.datasourceId, undefined),
-        PPL_MONITOR_NAME_MAX
+        monitor.datasourceId
       );
+      reservedCloneName = clonedName;
       // `rest.monitor_type` is the real upstream type (e.g.
       // `cluster_metrics_monitor`, `bucket_level_monitor`), so it round-trips
       // as-is — no reconstruction needed now that `raw` is faithful.
@@ -1123,6 +1163,10 @@ export const AlarmsPage: React.FC<AlarmsPageProps> = ({
       );
       refetchRules();
     } catch (e: unknown) {
+      // The create failed, so free the reserved name for the next attempt.
+      if (reservedCloneName) {
+        inFlightCloneNamesRef.current.delete(cloneNameKey(monitor.datasourceId, reservedCloneName));
+      }
       addToast(
         i18n.translate('observability.alerting.alarmsPage.toast.cloneMonitorFailed', {
           defaultMessage: 'Failed to clone alert rule',

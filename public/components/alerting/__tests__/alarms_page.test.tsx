@@ -639,6 +639,168 @@ describe('AlarmsPage', () => {
     expect((inner.actions as Array<Record<string, unknown>>)[0].id).toBeUndefined();
   });
 
+  it('strips server-owned / response-derived fields from the clone payload', async () => {
+    // The faithful upstream doc carries identity/audit/ownership/principal
+    // fields and GET-only enrichments that must NOT be re-POSTed on create.
+    const fakeRaw = {
+      id: 'mon-strip',
+      name: 'Strip Mon',
+      type: 'monitor',
+      monitor_type: 'query_level_monitor',
+      inputs: [{ search: { indices: ['logs-*'], query: {} } }],
+      triggers: [{ query_level_trigger: { id: 't', name: 't', actions: [] } }],
+      // fields that must be dropped:
+      version: 7,
+      last_update_time: 123,
+      enabled_time: 456,
+      schema_version: 5,
+      owner: 'alerting',
+      user: { name: 'creator', backend_roles: ['admin'], roles: ['all_access'] },
+      data_sources: { tenant: 't1' },
+      item_type: 'query_level_monitor',
+      associated_workflows: [{ id: 'wf1' }],
+      associatedCompositeMonitorCnt: 2,
+      last_run_context: { lastFired: 0 },
+    };
+    mockGetRuleDetail.mockResolvedValue({ raw: fakeRaw });
+    mockCreateMonitor.mockResolvedValue({ id: 'new-strip' });
+
+    await act(async () => {
+      render(<AlarmsPage {...defaultProps} />);
+    });
+    fireEvent.click(screen.getByTestId('alertManagerTabs-rules'));
+    const tableProps = mockMonitorsTable.mock.calls[mockMonitorsTable.mock.calls.length - 1][0] as {
+      onClone: (monitor: unknown) => Promise<void>;
+    };
+    await act(async () => {
+      await tableProps.onClone({
+        id: 'mon-strip',
+        name: 'Strip Mon',
+        datasourceId: 'ds-1',
+        definitionType: 'monitor',
+      });
+    });
+
+    const payload = mockCreateMonitor.mock.calls[0][0] as Record<string, unknown>;
+    for (const stripped of [
+      'id',
+      'version',
+      'last_update_time',
+      'enabled_time',
+      'schema_version',
+      'owner',
+      'user',
+      'data_sources',
+      'item_type',
+      'associated_workflows',
+      'associatedCompositeMonitorCnt',
+      'last_run_context',
+    ]) {
+      expect(payload[stripped]).toBeUndefined();
+    }
+    // …while legitimate create fields still round-trip.
+    expect(payload.monitor_type).toBe('query_level_monitor');
+    expect(payload.type).toBe('monitor');
+  });
+
+  it('clones a doc-level monitor preserving the document_level_trigger + doc-only fields', async () => {
+    const fakeRaw = {
+      id: 'mon-doc',
+      name: 'Doc Mon',
+      type: 'monitor',
+      monitor_type: 'doc_level_monitor',
+      // doc-level create-time fields that MUST survive in ...rest:
+      delete_query_index_in_every_run: true,
+      should_create_single_alert_for_findings: false,
+      inputs: [
+        {
+          doc_level_input: {
+            description: '',
+            indices: ['logs-*'],
+            queries: [{ id: 'q1', name: 'q1', query: 'x:1' }],
+          },
+        },
+      ],
+      triggers: [
+        {
+          document_level_trigger: {
+            id: 'trig-doc',
+            name: 'd1',
+            severity: '2',
+            condition: { script: { source: 'true', lang: 'painless' } },
+            actions: [{ id: 'act-doc', name: 'notify' }],
+          },
+        },
+      ],
+    };
+    mockGetRuleDetail.mockResolvedValue({ raw: fakeRaw });
+    mockCreateMonitor.mockResolvedValue({ id: 'new-doc' });
+
+    await act(async () => {
+      render(<AlarmsPage {...defaultProps} />);
+    });
+    fireEvent.click(screen.getByTestId('alertManagerTabs-rules'));
+    const tableProps = mockMonitorsTable.mock.calls[mockMonitorsTable.mock.calls.length - 1][0] as {
+      onClone: (monitor: unknown) => Promise<void>;
+    };
+    await act(async () => {
+      await tableProps.onClone({
+        id: 'mon-doc',
+        name: 'Doc Mon',
+        datasourceId: 'ds-1',
+        definitionType: 'monitor',
+      });
+    });
+
+    const payload = mockCreateMonitor.mock.calls[0][0] as Record<string, unknown>;
+    expect(payload.monitor_type).toBe('doc_level_monitor');
+    // doc-only create fields preserved
+    expect(payload.delete_query_index_in_every_run).toBe(true);
+    expect(payload.should_create_single_alert_for_findings).toBe(false);
+    const inner = (payload.triggers as Array<Record<string, unknown>>)[0]
+      .document_level_trigger as Record<string, unknown>;
+    expect(inner).toBeDefined();
+    expect(inner.id).toBeUndefined();
+    expect((inner.actions as Array<Record<string, unknown>>)[0].id).toBeUndefined();
+  });
+
+  it('gives distinct names to two clones fired before the list refetches (in-flight dedup)', async () => {
+    // Regression for the double-clone race: the first clone is not yet in
+    // `rules` (no refetch has landed), so the dedup must remember the name it
+    // just issued and hand the second clone `(Copy 2)`.
+    const fakeRaw = {
+      id: 'mon-race',
+      name: 'Race Mon',
+      type: 'monitor',
+      monitor_type: 'query_level_monitor',
+      inputs: [{ search: { indices: ['logs-*'], query: {} } }],
+      triggers: [{ query_level_trigger: { id: 't', name: 't', actions: [] } }],
+    };
+    mockGetRuleDetail.mockResolvedValue({ raw: fakeRaw });
+    mockCreateMonitor.mockResolvedValue({ id: 'new-race' });
+
+    await act(async () => {
+      render(<AlarmsPage {...defaultProps} />);
+    });
+    fireEvent.click(screen.getByTestId('alertManagerTabs-rules'));
+    const tableProps = mockMonitorsTable.mock.calls[mockMonitorsTable.mock.calls.length - 1][0] as {
+      onClone: (monitor: unknown) => Promise<void>;
+    };
+    const rule = {
+      id: 'mon-race',
+      name: 'Race Mon',
+      datasourceId: 'ds-1',
+      definitionType: 'monitor',
+    };
+    await act(async () => {
+      await tableProps.onClone(rule);
+      await tableProps.onClone(rule);
+    });
+
+    const names = mockCreateMonitor.mock.calls.map((c) => (c[0] as Record<string, unknown>).name);
+    expect(names).toEqual(['Race Mon (Copy)', 'Race Mon (Copy 2)']);
+  });
+
   it('gives an OpenSearch clone a unique name when the copy already exists', async () => {
     // A prior clone of the same monitor already sits in the list, so the bare
     // ` (Copy)` name is taken — the next clone must fall through to ` (Copy 2)`

@@ -281,16 +281,14 @@ export const FacetFilterGroup: React.FC<FacetFilterGroupProps> = ({
               // Parenthesize the option count so it reads as a count and
               // matches the per-option `({count})` style below — a bare
               // trailing number (e.g. "severity 2") looked like a
-              // superscript/typo next to the label. The label + count sit in a
-              // flex container (the button content), which collapses inter-node
-              // whitespace to zero, so a plain `{' '}` produced no visible gap
-              // ("severity(2)"). Use an explicit left margin for reliable
-              // separation, and never let the count shrink.
+              // superscript/typo next to the label. Spacing + flex-shrink live
+              // in the `.altFacetCount` SCSS rule (RTL-safe `margin-inline-start:
+              // $euiSizeXS`) — a plain `{' '}` collapses to zero inside the
+              // button's flex content, so the margin is required.
               <EuiTextColor
                 color="subdued"
                 className="altFacetCount"
                 data-test-subj={`facetGroup-${id}-optionCount`}
-                style={{ marginLeft: 4, flexShrink: 0 }}
               >
                 ({options.length})
               </EuiTextColor>

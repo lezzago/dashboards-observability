@@ -240,6 +240,13 @@
 .altFacetCount {
   display: inline-block;
   line-height: 18px;
+  // Logical (RTL-safe) separation from the label, using the EUI spacing token
+  // rather than a magic pixel value. The label + count share a flex container
+  // (the facet-group button) whose inter-node whitespace collapses to zero, so
+  // a plain space would render no gap — the margin is required, not cosmetic.
+  margin-inline-start: $euiSizeXS;
+  // Never let the count be squeezed out when the label truncates.
+  flex-shrink: 0;
 }
 
 // Monitors table wrapper — keeps the table content scrollable horizontally

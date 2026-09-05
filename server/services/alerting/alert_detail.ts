@@ -292,8 +292,16 @@ export async function getOSRuleDetail(
     notificationRouting: [],
     // Suppression rules from the in-memory service (not from OS API)
     suppressionRules: [],
-    // Faithful upstream document (not the lossy `mapMonitor` projection) so
-    // the clone flow re-creates the exact monitor_type + wrapped triggers.
+    // Faithful upstream monitor document (not the lossy `mapMonitor`
+    // projection) so the clone flow re-creates the exact monitor_type +
+    // wrapped triggers. CAUTION: the declared type `UnifiedRule['raw']`
+    // (OSMonitor) models triggers in the FLATTENED shape, but for OpenSearch
+    // rules this value is the UNTOUCHED upstream doc — `monitor_type` is the
+    // real value (e.g. `cluster_metrics_monitor`) and `triggers[]` are still
+    // WRAPPED (`query_level_trigger`/`bucket_level_trigger`/…). The double-cast
+    // is therefore a deliberate shape assertion, not a true type match: treat
+    // `raw` for OS rules as an opaque backend document and re-derive fields
+    // rather than reading `raw.triggers[i].severity` as if it were flat.
     raw: (source as unknown) as UnifiedRule['raw'],
   };
 }

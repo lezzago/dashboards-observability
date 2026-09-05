@@ -29,7 +29,7 @@
  * `min-width: 0`); this component fills its parent and truncates within it.
  */
 
-import React, { useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import './truncated_label.scss';
 
@@ -51,17 +51,47 @@ export const TruncatedLabel: React.FC<TruncatedLabelProps> = ({ text, fontSize, 
   if (fontSize !== undefined) labelStyle.fontSize = fontSize;
   if (lineHeight !== undefined) labelStyle.lineHeight = `${lineHeight}px`;
 
-  const onEnter = () => {
+  const reveal = useCallback(() => {
     const el = ref.current;
     // Only show the tooltip when the text is actually clipped right now.
     if (!el || el.scrollWidth <= el.clientWidth) return;
     const rect = el.getBoundingClientRect();
     setTooltipPos({ top: rect.top - 28, left: rect.left });
+  }, []);
+  const hide = useCallback(() => setTooltipPos(null), []);
+
+  // Reveal on keyboard focus too, not just mouse hover (WCAG 1.4.13): when this
+  // label sits inside a focusable control (e.g. a collapsible facet-group
+  // button), a keyboard-only or screen-magnifier user must be able to read the
+  // clipped full text. Focus lands on the ANCESTOR control, not this span, and
+  // native focus/blur don't bubble — so `onFocus`/`onBlur` on the wrap alone
+  // wouldn't fire. Attach directly to the nearest focusable ancestor. When the
+  // label isn't inside a focusable control (e.g. a plain table cell) there's no
+  // ancestor and this is a no-op. Esc dismisses (dismissable requirement).
+  useEffect(() => {
+    const focusable = ref.current?.closest('button, a, [role="button"], [tabindex]');
+    if (!focusable) return undefined;
+    focusable.addEventListener('focus', reveal);
+    focusable.addEventListener('blur', hide);
+    return () => {
+      focusable.removeEventListener('focus', reveal);
+      focusable.removeEventListener('blur', hide);
+    };
+  }, [reveal, hide, text]);
+
+  const onKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Escape') hide();
   };
-  const onLeave = () => setTooltipPos(null);
 
   return (
-    <span className="obsTruncatedLabelWrap" onMouseEnter={onEnter} onMouseLeave={onLeave}>
+    <span
+      className="obsTruncatedLabelWrap"
+      onMouseEnter={reveal}
+      onMouseLeave={hide}
+      onFocus={reveal}
+      onBlur={hide}
+      onKeyDown={onKeyDown}
+    >
       <span ref={ref} className="obsTruncatedLabel" style={labelStyle}>
         {text}
       </span>
