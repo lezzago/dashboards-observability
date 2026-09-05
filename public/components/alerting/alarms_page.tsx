@@ -1048,13 +1048,29 @@ export const AlarmsPage: React.FC<AlarmsPageProps> = ({
 
       const rawDetail: unknown = detail.raw ?? {};
       const raw = rawDetail as Record<string, unknown>;
+      // `detail.raw` is the faithful upstream monitor document (see
+      // getOSRuleDetail), so it carries the real `monitor_type` and the fully
+      // wrapped, type-specific triggers we need for a valid re-create. Strip
+      // the server-owned / response-derived fields that must NOT be re-POSTed:
+      // identity + audit stamps (`id`, `*_time`, `schema_version`, `version`),
+      // ownership/routing (`owner`, `data_sources`), and the read-only
+      // enrichments the alerting API adds on GET (`item_type`,
+      // `associated_workflows`, `associatedCompositeMonitorCnt`,
+      // `last_run_context`). Legit create-time fields (e.g. the doc-level
+      // `delete_query_index_in_every_run` / `should_create_single_alert_for_findings`)
+      // fall through in `...rest`.
       const {
         id: _id,
         last_update_time: _t,
         enabled_time: _et,
         schema_version: _sv,
+        version: _v,
         owner: _ow,
         data_sources: _ds,
+        item_type: _it,
+        associated_workflows: _aw,
+        associatedCompositeMonitorCnt: _acmc,
+        last_run_context: _lrc,
         ...rest
       } = raw;
       // Strip trigger IDs so the backend assigns fresh ones. Triggers live
@@ -1090,25 +1106,11 @@ export const AlarmsPage: React.FC<AlarmsPageProps> = ({
         (candidate) => isRuleNameTaken(candidate, monitor.datasourceId, undefined),
         PPL_MONITOR_NAME_MAX
       );
-      // Rebuild the create-time `monitor_type`. The server's `mapMonitor`
-      // normalizes every non-PPL/bucket/doc monitor down to
-      // `query_level_monitor` (cluster-metrics monitors share that wire type),
-      // so `rest.monitor_type` here is the normalized value, not the real one.
-      // Re-POSTing it would store a cluster-metrics monitor (whose input is a
-      // `uri`, not a `search`) as a plain query-level monitor; the classic
-      // editor then reads `inputs[0].search.indices` on edit and throws,
-      // rendering a blank page. Detect the cluster-metrics shape from the input
-      // and restore the correct `cluster_metrics_monitor` type; all other types
-      // already round-trip correctly through `rest.monitor_type`.
-      const inputs = Array.isArray(rest.inputs) ? (rest.inputs as unknown[]) : [];
-      const isClusterMetrics =
-        !!inputs[0] && typeof inputs[0] === 'object' && 'uri' in (inputs[0] as object);
-      const clonedMonitorType = isClusterMetrics
-        ? 'cluster_metrics_monitor'
-        : ((rest.monitor_type as string | undefined) ?? 'query_level_monitor');
+      // `rest.monitor_type` is the real upstream type (e.g.
+      // `cluster_metrics_monitor`, `bucket_level_monitor`), so it round-trips
+      // as-is — no reconstruction needed now that `raw` is faithful.
       const payload: Record<string, unknown> = {
         ...rest,
-        monitor_type: clonedMonitorType,
         triggers: cleanTriggers,
         name: clonedName,
         type: 'monitor',

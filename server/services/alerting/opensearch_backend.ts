@@ -152,6 +152,42 @@ export class HttpOpenSearchBackend implements OpenSearchBackend {
     }
   }
 
+  /**
+   * Like {@link getMonitor}, but also returns the FAITHFUL upstream monitor
+   * document alongside the narrowed {@link OSMonitor} projection.
+   *
+   * `mapMonitor` is lossy by design — it coerces `monitor_type` to a small
+   * union (so `cluster_metrics_monitor` becomes `query_level_monitor`) and
+   * FLATTENS each type-specific trigger wrapper (`bucket_level_trigger`,
+   * `document_level_trigger`, …) into a bare trigger, dropping wrapper-only
+   * fields like a bucket trigger's `parent_bucket_path` / `buckets_path`. That
+   * projection is right for list/summary rendering, but callers that need to
+   * faithfully RE-CREATE the monitor (clone) must have the untouched document
+   * — otherwise the re-POST is rejected ("Incompatible trigger for monitor
+   * type …") or silently mistyped. `source` is that untouched document, with
+   * the OpenSearch `_id` attached for parity with the projection.
+   */
+  async getMonitorWithSource(
+    client: AlertingOSClient,
+    monitorId: string
+  ): Promise<{ monitor: OSMonitor; source: Record<string, unknown> } | null> {
+    try {
+      const resp = await this.req<OSGetMonitorResponse>(
+        client,
+        'GET',
+        `/_plugins/_alerting/monitors/${encodeURIComponent(monitorId)}`
+      );
+      const source: Record<string, unknown> = {
+        ...(resp.body.monitor as Record<string, unknown>),
+        id: resp.body._id,
+      };
+      return { monitor: this.mapMonitor(resp.body._id, resp.body.monitor), source };
+    } catch (err) {
+      if (this.is404(err)) return null;
+      throw err;
+    }
+  }
+
   async createMonitor(
     client: AlertingOSClient,
     monitor: Omit<OSMonitor, 'id'>

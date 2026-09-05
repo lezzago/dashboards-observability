@@ -204,8 +204,13 @@ export async function getOSRuleDetail(
   ds: Datasource,
   monitorId: string
 ): Promise<UnifiedRule | null> {
-  const monitor = await osBackend.getMonitor(client, monitorId);
-  if (!monitor) return null;
+  const fetched = await osBackend.getMonitorWithSource(client, monitorId);
+  if (!fetched) return null;
+  // `monitor` is the narrowed projection used for summary/description/preview
+  // rendering; `source` is the faithful upstream document exposed as `raw` so
+  // the clone flow can re-create the monitor without losing its real
+  // `monitor_type` or wrapped triggers.
+  const { monitor, source } = fetched;
 
   const summary = osMonitorToUnifiedRuleSummary(monitor, ds.id);
 
@@ -287,7 +292,9 @@ export async function getOSRuleDetail(
     notificationRouting: [],
     // Suppression rules from the in-memory service (not from OS API)
     suppressionRules: [],
-    raw: monitor,
+    // Faithful upstream document (not the lossy `mapMonitor` projection) so
+    // the clone flow re-creates the exact monitor_type + wrapped triggers.
+    raw: (source as unknown) as UnifiedRule['raw'],
   };
 }
 

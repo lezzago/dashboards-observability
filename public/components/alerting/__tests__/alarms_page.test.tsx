@@ -532,17 +532,18 @@ describe('AlarmsPage', () => {
   });
 
   it('clones a cluster-metrics monitor with a valid cluster_metrics_monitor type', async () => {
-    // The server's `mapMonitor` normalizes a cluster-metrics monitor's wire
-    // type down to `query_level_monitor`, so `detail.raw.monitor_type` arrives
-    // coerced. Re-POSTing that value would store the clone as a query-level
-    // monitor with a `uri` input, and the classic editor then crashes on edit
-    // (reads `inputs[0].search.indices`) → blank page. The clone path must
-    // restore `cluster_metrics_monitor` from the `uri` input shape.
+    // `detail.raw` is now the faithful upstream document (getOSRuleDetail no
+    // longer returns the lossy `mapMonitor` projection), so it carries the real
+    // `cluster_metrics_monitor` type. Re-POSTing the normalized
+    // `query_level_monitor` used to store the clone as a query-level monitor
+    // with a `uri` input, and the classic editor then crashed on edit (read
+    // `inputs[0].search.indices`) → blank page. The clone must preserve the
+    // real type verbatim.
     const fakeRaw = {
       id: 'mon-cm',
       name: 'Cluster Health',
       type: 'monitor',
-      monitor_type: 'query_level_monitor',
+      monitor_type: 'cluster_metrics_monitor',
       last_update_time: 123,
       schema_version: 1,
       inputs: [{ uri: { api_type: 'CLUSTER_HEALTH', path: '/_cluster/health' } }],
@@ -575,6 +576,67 @@ describe('AlarmsPage', () => {
       }),
       'ds-1'
     );
+  });
+
+  it('clones a bucket-level monitor preserving its wrapped trigger + type', async () => {
+    // Regression: `mapMonitor` used to FLATTEN the `bucket_level_trigger`
+    // wrapper (dropping `parent_bucket_path` / `buckets_path`) and expose that
+    // in `raw`, so the clone re-POSTed a bare trigger → the backend rejected it
+    // with "Incompatible trigger for monitor type [bucket_level_monitor]".
+    // Now `raw` is faithful: the wrapper + its condition survive, and the clone
+    // only strips the trigger id (and any nested action ids).
+    const fakeRaw = {
+      id: 'mon-bkt',
+      name: 'Bucket Mon',
+      type: 'monitor',
+      monitor_type: 'bucket_level_monitor',
+      inputs: [{ search: { indices: ['logs-*'], query: {} } }],
+      triggers: [
+        {
+          bucket_level_trigger: {
+            id: 'trig-bkt',
+            name: 'b1',
+            severity: '1',
+            condition: {
+              parent_bucket_path: 'composite_agg',
+              buckets_path: { _count: '_count' },
+              script: { source: 'params._count > 0', lang: 'painless' },
+            },
+            actions: [{ id: 'act-bkt', name: 'notify' }],
+          },
+        },
+      ],
+    };
+    mockGetRuleDetail.mockResolvedValue({ raw: fakeRaw });
+    mockCreateMonitor.mockResolvedValue({ id: 'new-mon-bkt' });
+
+    await act(async () => {
+      render(<AlarmsPage {...defaultProps} />);
+    });
+    fireEvent.click(screen.getByTestId('alertManagerTabs-rules'));
+
+    const tableProps = mockMonitorsTable.mock.calls[mockMonitorsTable.mock.calls.length - 1][0] as {
+      onClone: (monitor: unknown) => Promise<void>;
+    };
+    await act(async () => {
+      await tableProps.onClone({
+        id: 'mon-bkt',
+        name: 'Bucket Mon',
+        datasourceId: 'ds-1',
+        definitionType: 'monitor',
+      });
+    });
+
+    const payload = mockCreateMonitor.mock.calls[0][0] as Record<string, unknown>;
+    expect(payload.monitor_type).toBe('bucket_level_monitor');
+    expect(payload.name).toBe('Bucket Mon (Copy)');
+    const trigger = (payload.triggers as Array<Record<string, unknown>>)[0];
+    const inner = trigger.bucket_level_trigger as Record<string, unknown>;
+    // Wrapper + bucket-specific condition preserved; ids stripped.
+    expect(inner).toBeDefined();
+    expect(inner.id).toBeUndefined();
+    expect((inner.condition as Record<string, unknown>).parent_bucket_path).toBe('composite_agg');
+    expect((inner.actions as Array<Record<string, unknown>>)[0].id).toBeUndefined();
   });
 
   it('gives an OpenSearch clone a unique name when the copy already exists', async () => {
