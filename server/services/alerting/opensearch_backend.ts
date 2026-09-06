@@ -250,7 +250,7 @@ export class HttpOpenSearchBackend implements OpenSearchBackend {
     // `...input` spread. Re-spreading the originals from `rawUpstream`
     // after `input` makes the precedence explicit: client cannot edit
     // these fields through this route.
-    const rawUpstream = (getResp.body.monitor as unknown) as Record<string, unknown>;
+    const rawUpstream = getResp.body.monitor as unknown as Record<string, unknown>;
     const preserved: Record<string, unknown> = {};
     for (const key of PLUGIN_OWNED_KEYS) {
       if (key in rawUpstream) preserved[key] = rawUpstream[key];

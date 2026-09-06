@@ -18,9 +18,7 @@ const mockLogger: Logger = {
  * sequence. Each call in `responses` is either the body object (wrapped as
  * `{ body }`) or a rejected Error.
  */
-function makeClient(
-  responses: Array<{ body: unknown } | Error>
-): {
+function makeClient(responses: Array<{ body: unknown } | Error>): {
   client: AlertingOSClient;
   request: jest.Mock;
 } {
@@ -30,7 +28,7 @@ function makeClient(
     else request.mockResolvedValueOnce(r);
   });
   return {
-    client: ({ transport: { request } } as unknown) as AlertingOSClient,
+    client: { transport: { request } } as unknown as AlertingOSClient,
     request,
   };
 }
@@ -872,14 +870,14 @@ describe('HttpOpenSearchBackend — updateMonitor round-trip', () => {
       { body: { _id: 'mon-1', monitor: upstreamSource } },
     ]);
 
-    await backend.updateMonitor(client, 'mon-1', ({
+    await backend.updateMonitor(client, 'mon-1', {
       name: 'renamed',
       // Hostile input: try to clobber tenant scoping + ownership + state.
       data_sources: { tenant: 'evil-tenant' },
       last_run_context: { lastFiredAt: 0 },
       owner: 'attacker',
       enabled_time: 0,
-    } as unknown) as Parameters<typeof backend.updateMonitor>[2]);
+    } as unknown as Parameters<typeof backend.updateMonitor>[2]);
 
     const putBody = captureBody(request, 1);
     expect(putBody.data_sources).toEqual({ tenant: 'tenant-a' });

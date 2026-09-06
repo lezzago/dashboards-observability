@@ -302,7 +302,7 @@ export async function getOSRuleDetail(
     // is therefore a deliberate shape assertion, not a true type match: treat
     // `raw` for OS rules as an opaque backend document and re-derive fields
     // rather than reading `raw.triggers[i].severity` as if it were flat.
-    raw: (source as unknown) as UnifiedRule['raw'],
+    raw: source as unknown as UnifiedRule['raw'],
   };
 }
 
