@@ -79,13 +79,14 @@ export const TruncatedLabel: React.FC<TruncatedLabelProps> = ({ text, fontSize, 
   useEffect(() => {
     const el = ref.current;
     if (!el) return undefined;
-    let control: Element | null = el.closest(
-      'button, a, [role="button"], [tabindex]:not([tabindex="-1"])'
-    );
-    if (!control) {
-      const label = el.closest('label');
-      control = (label && (label as HTMLLabelElement).control) || null;
-    }
+    // Resolve the focusable control once into a `const` so the cleanup closure
+    // provably detaches from the same node (no reassignment, no null-narrowing
+    // ambiguity): the nearest genuine tab stop, else the enclosing label's
+    // associated control.
+    const control =
+      el.closest('button, a, [role="button"], [tabindex]:not([tabindex="-1"])') ??
+      (el.closest('label') as HTMLLabelElement | null)?.control ??
+      null;
     if (!control) return undefined;
     const onKeyDown = (e: Event) => {
       if ((e as KeyboardEvent).key === 'Escape') hide();
