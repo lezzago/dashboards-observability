@@ -186,7 +186,8 @@ describe('HttpOpenSearchBackend', () => {
           },
         ],
         owner: 'alerting',
-        data_sources: {},
+        user: { name: 'creator', backend_roles: ['admin'], roles: ['all_access'] },
+        data_sources: { tenant: 'tenant-a' },
       };
       const { client } = makeClient([{ body: { _id: 'mon-bkt', monitor: bucketSource } }]);
 
@@ -201,6 +202,11 @@ describe('HttpOpenSearchBackend', () => {
       const inner = trig.bucket_level_trigger as Record<string, unknown>;
       expect(inner).toBeDefined();
       expect((inner.condition as Record<string, unknown>).parent_bucket_path).toBe('agg');
+      // SECURITY: RBAC/tenant principal fields must be stripped from the source
+      // (never transmitted to the browser as UnifiedRule.raw).
+      expect(result!.source.user).toBeUndefined();
+      expect(result!.source.owner).toBeUndefined();
+      expect(result!.source.data_sources).toBeUndefined();
     });
 
     it('returns null when the monitor is missing (statusCode 404)', async () => {

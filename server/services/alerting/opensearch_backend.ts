@@ -164,8 +164,18 @@ export class HttpOpenSearchBackend implements OpenSearchBackend {
    * projection is right for list/summary rendering, but callers that need to
    * faithfully RE-CREATE the monitor (clone) must have the untouched document
    * — otherwise the re-POST is rejected ("Incompatible trigger for monitor
-   * type …") or silently mistyped. `source` is that untouched document, with
-   * the OpenSearch `_id` attached for parity with the projection.
+   * type …") or silently mistyped. `source` is that document with the
+   * OpenSearch `_id` attached for parity with the projection.
+   *
+   * SECURITY: the upstream document also carries the RBAC/tenant principal
+   * (`user.name` / `user.backend_roles` / `user.roles`, `owner`, and
+   * `data_sources.tenant`). `source` is surfaced to the browser as
+   * `UnifiedRule.raw`, and the clone flow does NOT need those fields (it
+   * re-creates the monitor under the caller's own auth context). Strip them
+   * HERE so RBAC role assignments are never transmitted to the frontend —
+   * closing the information-disclosure surface that shipping the full document
+   * would otherwise open. (The client also drops them before the clone re-POST;
+   * this server-side removal is the authoritative guard.)
    */
   async getMonitorWithSource(
     client: AlertingOSClient,
@@ -177,10 +187,13 @@ export class HttpOpenSearchBackend implements OpenSearchBackend {
         'GET',
         `/_plugins/_alerting/monitors/${encodeURIComponent(monitorId)}`
       );
-      const source: Record<string, unknown> = {
-        ...(resp.body.monitor as Record<string, unknown>),
-        id: resp.body._id,
-      };
+      const {
+        user: _user,
+        owner: _owner,
+        data_sources: _dataSources,
+        ...safeMonitor
+      } = resp.body.monitor as Record<string, unknown>;
+      const source: Record<string, unknown> = { ...safeMonitor, id: resp.body._id };
       return { monitor: this.mapMonitor(resp.body._id, resp.body.monitor), source };
     } catch (err) {
       if (this.is404(err)) return null;
