@@ -184,14 +184,22 @@ export function buildExpr(state: ConditionBuilderState): string {
   switch (state.conditionOp) {
     case 'none':
       return inner;
-    case 'outside':
-      return Number.isFinite(a as number) && Number.isFinite(b as number)
-        ? `(${inner} < ${num(a)} or ${inner} > ${num(b)})`
-        : inner;
-    case 'within':
-      return Number.isFinite(a as number) && Number.isFinite(b as number)
-        ? `(${inner} >= ${num(a)} and ${inner} <= ${num(b)})`
-        : inner;
+    case 'outside': {
+      // Normalize the bounds (lo <= hi) so an inverted range entered as A > B
+      // can't silently emit an always-true `outside` (`x < hi or x > lo` matches
+      // everything). Same normalization for `within` below (which would
+      // otherwise be never-true). `parseExpr` reads the ordered bounds back.
+      if (!(Number.isFinite(a as number) && Number.isFinite(b as number))) return inner;
+      const lo = Math.min(a as number, b as number);
+      const hi = Math.max(a as number, b as number);
+      return `(${inner} < ${num(lo)} or ${inner} > ${num(hi)})`;
+    }
+    case 'within': {
+      if (!(Number.isFinite(a as number) && Number.isFinite(b as number))) return inner;
+      const lo = Math.min(a as number, b as number);
+      const hi = Math.max(a as number, b as number);
+      return `(${inner} >= ${num(lo)} and ${inner} <= ${num(hi)})`;
+    }
     default:
       return Number.isFinite(a as number)
         ? `${inner} ${SIMPLE_OP_TO_SYMBOL[state.conditionOp]} ${num(a)}`
@@ -203,6 +211,11 @@ const NUMBER = String.raw`-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?`;
 const SELECTOR_RE = new RegExp(
   String.raw`^([a-zA-Z_:][a-zA-Z0-9_:]*)(?:\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*(=~|!~|!=|=)\s*"((?:[^"\\]|\\.)*)"\s*\})?$`
 );
+// Only a single-unit integer duration (`\d+[smhdwy]`) seeds the builder. A
+// compound duration (`1h30m`) or a `ms` window parses to `null` here, dropping
+// the whole expression to Code mode — the safe direction (the builder never
+// silently mis-represents it). Prometheus still accepts `90m`, so a 90-minute
+// window has an escape hatch; only the builder's window picker is limited.
 const RANGE_FN_RE = new RegExp(
   String.raw`^(${RANGE_FNS.join('|')})\(\s*(.+?)\s*\[\s*(\d+[smhdwy])\s*\]\s*\)$`
 );
@@ -316,6 +329,12 @@ export function parseExpr(query: string): ConditionBuilderState | null {
  * strings first, so a real threshold (`… > 5`) is never flagged; only a bare
  * selector (or function/aggregation with no comparison) trips it. Empty input is
  * NOT always-firing (there's simply nothing yet).
+ *
+ * Known limitations (acceptable — the callout is a non-blocking hint, not a
+ * gate): the `bool` modifier (`up > bool 0`) always returns a 0/1 sample so it
+ * effectively always fires, but the `>` makes this heuristic stay quiet;
+ * conversely `absent(metric)` carries no comparison yet is a legitimate
+ * conditional alert, so it gets the warning. Neither is worth special-casing.
  */
 export function isAlwaysFiring(query: string): boolean {
   const q = (query || '').trim();

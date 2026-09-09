@@ -369,8 +369,9 @@ describe('CreateMetricsMonitor', () => {
     );
 
     // Fill in required fields: monitorName + an explicit builder selection
-    // (the form seeds query: '' — no invisible default expression). The flyout
-    // opens in Code mode now, so switch to Builder to reach the mock builder.
+    // (the form seeds query: '' — no invisible default expression). An empty
+    // flyout already defaults to Builder mode; the Builder click below is
+    // defensive (a no-op if already selected) before the mock builder emits.
     const nameInput = document.querySelector('input[aria-label="Rule name"]') as HTMLInputElement;
     fireEvent.change(nameInput, { target: { value: 'my-test-rule' } });
     fireEvent.click(screen.getByText('Builder'));

@@ -129,6 +129,17 @@ describe('buildExpr', () => {
     );
   });
 
+  it('normalizes an inverted range so it is never always-true / never-true', () => {
+    // A > B entered by mistake must not silently produce an always-true `outside`
+    // or never-true `within`; the bounds are ordered (lo <= hi) on emit.
+    expect(buildExpr(state({ conditionOp: 'outside', thresholdA: 90, thresholdB: 10 }))).toBe(
+      '(cpu_usage < 10 or cpu_usage > 90)'
+    );
+    expect(buildExpr(state({ conditionOp: 'within', thresholdA: 90, thresholdB: 10 }))).toBe(
+      '(cpu_usage >= 10 and cpu_usage <= 90)'
+    );
+  });
+
   it('never emits NaN for a threshold', () => {
     // A finite threshold renders normally; a missing one drops the comparison
     // entirely (see "omits the comparison when a chosen operator has no threshold
