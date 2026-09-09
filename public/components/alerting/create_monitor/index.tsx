@@ -47,7 +47,7 @@ import {
   validateMonitorForm,
   validatePplForm,
 } from '../../../../common/services/alerting/validators';
-import { validatePromQL } from '../promql_editor';
+import { validatePromQL } from '../promql_validation';
 import { MonitorTemplateWizard, AlertTemplate } from '../monitor_template_wizard';
 import { MonitorBackendType } from '../monitor_form_components';
 import {
