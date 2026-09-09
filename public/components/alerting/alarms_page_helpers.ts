@@ -213,8 +213,6 @@ export function formStateToRule(
       },
       alertHistory: [],
       conditionPreviewData: [],
-      notificationRouting: [],
-      suppressionRules: [],
       // eslint-disable-next-line @typescript-eslint/no-explicit-any -- raw field is empty for new monitors
       raw: {} as any,
     };
@@ -263,8 +261,6 @@ export function formStateToRule(
     },
     alertHistory: [],
     conditionPreviewData: [],
-    notificationRouting: [],
-    suppressionRules: [],
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- raw field is empty for new monitors
     raw: {} as any,
   };
