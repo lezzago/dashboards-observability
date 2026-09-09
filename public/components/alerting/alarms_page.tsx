@@ -1066,15 +1066,19 @@ export const AlarmsPage: React.FC<AlarmsPageProps> = ({
             : String(raw.for || detail.pendingPeriod || '5m');
         const evalInterval = detail.evaluationInterval || '1m';
 
-        // Parse threshold from expression (e.g. "up == 0" → operator "==", threshold 0)
-        const parsed = detail.threshold || { operator: '>', value: 0 };
-
+        // Clone the stored PromQL expression VERBATIM. The expression itself is
+        // the complete alert condition, and the create/edit paths already send
+        // `query` unchanged for the server to use as-is. The clone path used to
+        // strip a trailing comparison and re-append a separately-parsed
+        // operator/threshold, which corrupted any expression whose trailing
+        // comparison differed from the first one — or had none at all. Examples
+        // that broke: `(a) > 0.8 and cap > 0` became `... and cap > 0.8`;
+        // `sum(rate(x[5m]))` gained a spurious `> 0`; `errors > 1e-05` became
+        // `errors > 1`. Sending `expr` as-is keeps the clone identical to its
+        // source.
         const payload = {
           name: clonedName,
-          query:
-            expr.replace(/\s*(>|>=|<|<=|==|!=)\s*[\d.]+(?:[eE][+-]?\d+)?\s*$/, '').trim() || expr,
-          operator: parsed.operator || '>',
-          threshold: parsed.value ?? 0,
+          query: expr,
           forDuration: duration,
           evaluationInterval: evalInterval,
           labels: rawLabels,
@@ -1452,6 +1456,23 @@ export const AlarmsPage: React.FC<AlarmsPageProps> = ({
         // _ruleGroup is a form-transport metadata label — extract it into
         // groupName and strip it from persisted labels.
         const ruleGroupLabel = promForm.labels.find((l) => l.key === '_ruleGroup')?.value;
+
+        // Resolve the rule's ORIGINAL identity (group, name) before building the
+        // payload so we can tell an in-place edit from a rename/group move.
+        // `ruleId` is the rule the user opened from the table, so it is always
+        // present in the loaded `rules`.
+        const originalRule = rules.find((r) => r.id === ruleId);
+        const originalName = originalRule?.name || promForm.name;
+        const originalGroupName = originalRule?.group || originalName;
+        const newGroupName = ruleGroupLabel || promForm.name;
+        // Only overwrite when the edit keeps the SAME (group, name): that is the
+        // rule replacing itself, which the server's create-collision guard would
+        // otherwise reject with a 409. For a rename or group move we must NOT
+        // force overwrite — doing so lets the create silently destroy a
+        // DIFFERENT, pre-existing rule that happens to occupy the new
+        // (group, name). Leaving overwrite off makes the server return 409 so the
+        // collision surfaces as an error instead of silent data loss.
+        const isInPlaceEdit = originalGroupName === newGroupName && originalName === promForm.name;
         const payload = buildPrometheusRulePayload({
           name: promForm.name,
           query: promForm.query,
@@ -1466,23 +1487,17 @@ export const AlarmsPage: React.FC<AlarmsPageProps> = ({
             promForm.annotations.filter((a) => a.key && a.value).map((a) => [a.key, a.value])
           ),
           enabled: promForm.enabled,
-          groupName: ruleGroupLabel || promForm.name,
-          // Edit intends to replace the existing rule (same name+group) —
-          // opt into overwrite so the server's create-collision guard allows it.
-          overwrite: true,
+          groupName: newGroupName,
+          overwrite: isInPlaceEdit,
         });
         // Create new rule first, then delete old on success (prevents data loss
         // if create fails — worst case is a harmless duplicate).
         await mutations.createPrometheusRule(payload, dsId);
 
-        const originalRule = rules.find((r) => r.id === ruleId);
-        const originalName = originalRule?.name || promForm.name;
-        const originalGroupName = originalRule?.group || originalName;
-        const newGroupName = ruleGroupLabel || promForm.name;
         // If the rule was renamed or moved to a different group, remove the
         // old copy. The rule-level delete splices it out of the old group,
         // preserving any sibling rules that share the group.
-        if (originalGroupName !== newGroupName || originalName !== promForm.name) {
+        if (!isInPlaceEdit) {
           try {
             await mutations.deletePrometheusRule(dsId, originalGroupName, originalName);
           } catch {
