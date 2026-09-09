@@ -194,7 +194,13 @@ export class HttpOpenSearchBackend implements OpenSearchBackend {
         ...safeMonitor
       } = resp.body.monitor as Record<string, unknown>;
       const source: Record<string, unknown> = { ...safeMonitor, id: resp.body._id };
-      return { monitor: this.mapMonitor(resp.body._id, resp.body.monitor), source };
+      // Build BOTH returned values from the sanitized body so neither can carry
+      // the principal fields. `mapMonitor` is a fixed-field projection today
+      // (it doesn't read user/owner/data_sources), so this is defensive — it
+      // keeps the "server-side removal is authoritative" guarantee true even if
+      // `mapMonitor` ever starts spreading unknown keys.
+      const monitor = this.mapMonitor(resp.body._id, safeMonitor as unknown as OSMonitorSource);
+      return { monitor, source };
     } catch (err) {
       if (this.is404(err)) return null;
       throw err;

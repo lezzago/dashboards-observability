@@ -978,6 +978,9 @@ export const AlarmsPage: React.FC<AlarmsPageProps> = ({
   // reserved until the refetch surfaces it in `rules` (which then covers it),
   // at which point the reconcile effect below drops it.
   const inFlightCloneNamesRef = useRef<Set<string>>(new Set());
+  // Normalized `trim().toLowerCase()` to match `isRuleNameTaken` (which is
+  // itself case-insensitive) — both sides compare names the same way, so a
+  // name differing only by case can't slip past the dedup.
   const cloneNameKey = (dsId: string, name: string) => `${dsId}\n${name.trim().toLowerCase()}`;
   // Once a reserved clone name lands in the fetched `rules`, `isRuleNameTaken`
   // covers it, so drop it from the reservation set. This bounds the set to
@@ -1076,7 +1079,10 @@ export const AlarmsPage: React.FC<AlarmsPageProps> = ({
           evaluationInterval: evalInterval,
           labels: rawLabels,
           annotations: rawAnnotations,
-          enabled: true,
+          // Start the clone DISABLED: enabling it immediately would spin up a
+          // second live rule firing the same notifications before the user has
+          // reviewed/renamed it. The user enables it explicitly afterwards.
+          enabled: false,
         };
         await mutations.createPrometheusRule(payload, monitor.datasourceId);
         // Optimistic pending row — the clone POST has no groupName, so the
@@ -1180,6 +1186,10 @@ export const AlarmsPage: React.FC<AlarmsPageProps> = ({
         triggers: cleanTriggers,
         name: clonedName,
         type: 'monitor',
+        // Start the clone DISABLED (overriding the source's inherited `enabled`
+        // in `...rest`): a freshly-cloned monitor shouldn't fire the same alerts
+        // before the user reviews it. Matches the Prometheus clone path.
+        enabled: false,
       };
       await mutations.createMonitor(payload, monitor.datasourceId);
       addToast(

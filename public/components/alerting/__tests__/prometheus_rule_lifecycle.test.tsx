@@ -172,6 +172,8 @@ describe('Prometheus rule clone', () => {
         name: 'HighMemory-copy',
         forDuration: '120s',
         evaluationInterval: '60s',
+        // Clones start disabled so they don't fire before the user reviews them.
+        enabled: false,
       }),
       'ds-1'
     );

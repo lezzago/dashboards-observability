@@ -701,6 +701,8 @@ describe('AlarmsPage', () => {
     // …while legitimate create fields still round-trip.
     expect(payload.monitor_type).toBe('query_level_monitor');
     expect(payload.type).toBe('monitor');
+    // Clones start disabled regardless of the source's enabled state.
+    expect(payload.enabled).toBe(false);
   });
 
   it('clones a doc-level monitor preserving the document_level_trigger + doc-only fields', async () => {
