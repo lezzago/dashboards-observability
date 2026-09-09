@@ -194,6 +194,46 @@ function buildPrometheusRulePayload(opts: {
   };
 }
 
+/**
+ * Build a clone name that doesn't collide with an existing rule on the same
+ * datasource. Tries the bare suffix first (`makeSuffix(1)`, e.g. ` (Copy)`),
+ * then numbered variants (`makeSuffix(2)` → ` (Copy 2)`, …) until it finds a
+ * name the `isTaken` predicate reports as free. Each candidate is capped at
+ * `maxLen` by trimming the BASE name — never the suffix — so the disambiguator
+ * is always preserved. A bounded attempt count guarantees termination even
+ * against a pathological set of existing names; the final fallback appends a
+ * timestamp to stay unique.
+ */
+function buildUniqueCloneName(
+  baseName: string,
+  makeSuffix: (n: number) => string,
+  isTaken: (candidate: string) => boolean,
+  maxLen: number
+): string {
+  const withSuffix = (suffix: string): string => {
+    // Trim by CODE POINTS, not UTF-16 units, so a boundary that falls inside a
+    // surrogate pair (emoji / astral CJK) doesn't split the character into a
+    // lone half (which renders as U+FFFD). `[...str]` iterates code points.
+    // Measure the suffix in code points too so the budget stays consistent (all
+    // current suffixes are ASCII, so this is defensive against future ones).
+    const codePoints = [...baseName];
+    const suffixLen = [...suffix].length;
+    const base =
+      codePoints.length + suffixLen > maxLen
+        ? codePoints.slice(0, Math.max(0, maxLen - suffixLen)).join('')
+        : baseName;
+    return `${base}${suffix}`;
+  };
+  const MAX_ATTEMPTS = 1000;
+  for (let n = 1; n <= MAX_ATTEMPTS; n++) {
+    const candidate = withSuffix(makeSuffix(n));
+    if (!isTaken(candidate)) return candidate;
+  }
+  // Practically unreachable — a thousand same-named clones on one datasource.
+  // Guarantee a unique name rather than loop forever.
+  return withSuffix(`${makeSuffix(1)}-${Date.now()}`);
+}
+
 export const AlarmsPage: React.FC<AlarmsPageProps> = ({
   datasources,
   datasourcesLoading,
@@ -928,7 +968,64 @@ export const AlarmsPage: React.FC<AlarmsPageProps> = ({
     }
   };
 
+  // Names of clones issued this session but not yet reconciled into `rules` by
+  // a refetch. `isRuleNameTaken` only sees the fetched list, so cloning the
+  // same rule twice in quick succession (before the background refetch lands)
+  // would otherwise re-pick the same suffix and mint a duplicate name — the
+  // very bug the unique-naming aims to prevent. This ref bridges that window;
+  // entries are keyed by (datasourceId, lowercased name). A reserved name is
+  // released only if the create fails (see the catch) — on success it stays
+  // reserved until the refetch surfaces it in `rules` (which then covers it),
+  // at which point the reconcile effect below drops it.
+  const inFlightCloneNamesRef = useRef<Set<string>>(new Set());
+  // Normalized `trim().toLowerCase()` to match `isRuleNameTaken` (which is
+  // itself case-insensitive) — both sides compare names the same way, so a
+  // name differing only by case can't slip past the dedup.
+  const cloneNameKey = (dsId: string, name: string) => `${dsId}\n${name.trim().toLowerCase()}`;
+  // Once a reserved clone name lands in the fetched `rules`, `isRuleNameTaken`
+  // covers it, so drop it from the reservation set. This bounds the set to
+  // genuinely in-flight names (no unbounded per-session growth) and frees a
+  // name for reuse if that clone is later deleted (it left `rules`, so it's no
+  // longer reserved either).
+  useEffect(() => {
+    const set = inFlightCloneNamesRef.current;
+    if (set.size === 0) return;
+    // Mirror `isRuleNameTaken`'s soft-delete filter: a deleted rule can linger
+    // in `rules` (delete only marks `deletedRuleIds`, no immediate refetch), and
+    // `isRuleNameTaken` ignores it — so we must NOT treat its name as "present"
+    // here either, or we'd release the reservation while the name still reads as
+    // free, re-opening the duplicate-name window.
+    const present = new Set(
+      rules
+        .filter((r) => !deletedRuleIds.has(r.id))
+        .map((r) => cloneNameKey(r.datasourceId, r.name))
+    );
+    set.forEach((key) => {
+      if (present.has(key)) set.delete(key);
+    });
+  }, [rules, deletedRuleIds]);
+  // Build a unique clone name that also avoids names reserved by in-flight
+  // clones this session, then reserve the chosen name.
+  const takeUniqueCloneName = (
+    baseName: string,
+    makeSuffix: (n: number) => string,
+    dsId: string
+  ): string => {
+    const name = buildUniqueCloneName(
+      baseName,
+      makeSuffix,
+      (candidate) =>
+        isRuleNameTaken(candidate, dsId, undefined) ||
+        inFlightCloneNamesRef.current.has(cloneNameKey(dsId, candidate)),
+      PPL_MONITOR_NAME_MAX
+    );
+    inFlightCloneNamesRef.current.add(cloneNameKey(dsId, name));
+    return name;
+  };
+
   const handleCloneRule = async (monitor: UnifiedRuleSummary) => {
+    // Tracked so a failed create can release the reserved clone name.
+    let reservedCloneName: string | null = null;
     try {
       // Fetch the full rule detail to get the raw backend payload — the
       // summary shape doesn't carry the wire format needed for re-creation.
@@ -942,13 +1039,17 @@ export const AlarmsPage: React.FC<AlarmsPageProps> = ({
       // OpenSearch Alerting monitor API (which requires `schedule`).
       if (detail.datasourceType === 'prometheus') {
         // Use a suffix that's safe for the ruleId regex [A-Za-z0-9_-]+
-        // (no spaces or parentheses).
-        const suffix = '-copy';
-        const baseName =
-          monitor.name.length + suffix.length > PPL_MONITOR_NAME_MAX
-            ? monitor.name.slice(0, PPL_MONITOR_NAME_MAX - suffix.length)
-            : monitor.name;
-        const clonedName = `${baseName}${suffix}`;
+        // (no spaces or parentheses), and disambiguate against existing rules
+        // so cloning the same rule twice yields `-copy`, `-copy-2`, … instead
+        // of two identical names. Prometheus rule identity is scoped by group,
+        // but the clone POST omits the group (server defaults it to the rule
+        // name), so we check datasource-wide to keep display names distinct.
+        const clonedName = takeUniqueCloneName(
+          monitor.name,
+          (n) => (n === 1 ? '-copy' : `-copy-${n}`),
+          monitor.datasourceId
+        );
+        reservedCloneName = clonedName;
 
         // Extract rule details from the unified shape + raw
         const rawDetail: unknown = detail.raw ?? {};
@@ -978,7 +1079,10 @@ export const AlarmsPage: React.FC<AlarmsPageProps> = ({
           evaluationInterval: evalInterval,
           labels: rawLabels,
           annotations: rawAnnotations,
-          enabled: true,
+          // Start the clone DISABLED: enabling it immediately would spin up a
+          // second live rule firing the same notifications before the user has
+          // reviewed/renamed it. The user enables it explicitly afterwards.
+          enabled: false,
         };
         await mutations.createPrometheusRule(payload, monitor.datasourceId);
         // Optimistic pending row — the clone POST has no groupName, so the
@@ -1011,13 +1115,34 @@ export const AlarmsPage: React.FC<AlarmsPageProps> = ({
 
       const rawDetail: unknown = detail.raw ?? {};
       const raw = rawDetail as Record<string, unknown>;
+      // `detail.raw` is the faithful upstream monitor document (see
+      // getOSRuleDetail), so it carries the real `monitor_type` and the fully
+      // wrapped, type-specific triggers we need for a valid re-create. Strip
+      // the server-owned / response-derived fields that must NOT be re-POSTed:
+      // identity + audit stamps (`id`, `*_time`, `schema_version`, `version`),
+      // ownership/principal/routing (`owner`, `user`, `data_sources`), and the
+      // read-only enrichments the alerting API adds on GET (`item_type`,
+      // `associated_workflows`, `associatedCompositeMonitorCnt`,
+      // `last_run_context`). `user` (the security principal: name/backend_roles)
+      // is stripped for parity with `owner` so the clone is attributed to and
+      // access-scoped by the CALLER — the alerting plugin re-assigns it from the
+      // request's auth context — rather than inheriting the original creator's
+      // roles on any config that doesn't override it. Legit create-time fields
+      // (e.g. the doc-level `delete_query_index_in_every_run` /
+      // `should_create_single_alert_for_findings`) fall through in `...rest`.
       const {
         id: _id,
         last_update_time: _t,
         enabled_time: _et,
         schema_version: _sv,
+        version: _v,
         owner: _ow,
+        user: _user,
         data_sources: _ds,
+        item_type: _it,
+        associated_workflows: _aw,
+        associatedCompositeMonitorCnt: _acmc,
+        last_run_context: _lrc,
         ...rest
       } = raw;
       // Strip trigger IDs so the backend assigns fresh ones. Triggers live
@@ -1044,16 +1169,27 @@ export const AlarmsPage: React.FC<AlarmsPageProps> = ({
         }
         return cleaned;
       });
-      const suffix = ' (Copy)';
-      const baseName =
-        monitor.name.length + suffix.length > PPL_MONITOR_NAME_MAX
-          ? monitor.name.slice(0, PPL_MONITOR_NAME_MAX - suffix.length)
-          : monitor.name;
+      // Disambiguate the clone name so cloning the same monitor twice yields
+      // `X (Copy)`, `X (Copy 2)`, … rather than two identical `X (Copy)`.
+      // OpenSearch monitors have no group, so the check is datasource-wide.
+      const clonedName = takeUniqueCloneName(
+        monitor.name,
+        (n) => (n === 1 ? ' (Copy)' : ` (Copy ${n})`),
+        monitor.datasourceId
+      );
+      reservedCloneName = clonedName;
+      // `rest.monitor_type` is the real upstream type (e.g.
+      // `cluster_metrics_monitor`, `bucket_level_monitor`), so it round-trips
+      // as-is — no reconstruction needed now that `raw` is faithful.
       const payload: Record<string, unknown> = {
         ...rest,
         triggers: cleanTriggers,
-        name: `${baseName}${suffix}`,
+        name: clonedName,
         type: 'monitor',
+        // Start the clone DISABLED (overriding the source's inherited `enabled`
+        // in `...rest`): a freshly-cloned monitor shouldn't fire the same alerts
+        // before the user reviews it. Matches the Prometheus clone path.
+        enabled: false,
       };
       await mutations.createMonitor(payload, monitor.datasourceId);
       addToast(
@@ -1063,6 +1199,10 @@ export const AlarmsPage: React.FC<AlarmsPageProps> = ({
       );
       refetchRules();
     } catch (e: unknown) {
+      // The create failed, so free the reserved name for the next attempt.
+      if (reservedCloneName) {
+        inFlightCloneNamesRef.current.delete(cloneNameKey(monitor.datasourceId, reservedCloneName));
+      }
       addToast(
         i18n.translate('observability.alerting.alarmsPage.toast.cloneMonitorFailed', {
           defaultMessage: 'Failed to clone alert rule',

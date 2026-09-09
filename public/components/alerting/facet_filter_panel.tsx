@@ -299,18 +299,32 @@ export const FacetFilterGroup: React.FC<FacetFilterGroupProps> = ({
             aria-controls={isCollapsed ? undefined : `facetGroup-${id}-region`}
             data-test-subj={`facetGroup-${id}-toggle`}
           >
-            <strong>{label}</strong>
+            {/* A long facet key (e.g. "deployment_environment") gets clipped
+                by the narrow filter panel. Render it through `TruncatedLabel`
+                so it ellipsis-truncates AND shows the full name in a hover
+                tooltip — matching the option rows. `minWidth: 0` lets the bold
+                wrapper shrink inside the button's flex content so truncation
+                kicks in instead of overflowing. */}
+            <strong style={{ minWidth: 0, overflow: 'hidden' }}>
+              <TruncatedLabel text={label} />
+            </strong>
             {showOptionCount && (
-              <>
-                {' '}
-                <EuiTextColor
-                  color="subdued"
-                  className="altFacetCount"
-                  data-test-subj={`facetGroup-${id}-optionCount`}
-                >
-                  {options.length}
-                </EuiTextColor>
-              </>
+              // Parenthesize the option count so it reads as a count and
+              // matches the per-option `({count})` style below — a bare
+              // trailing number (e.g. "severity 2") looked like a
+              // superscript/typo next to the label. Spacing + flex-shrink live
+              // in the KEY-only `.altFacetGroupCount` SCSS modifier (RTL-safe
+              // `margin-inline-start: $euiSizeXS`) — a plain `{' '}` collapses to
+              // zero inside the button's flex content, so the margin is required
+              // here; the per-option count keeps plain `.altFacetCount` (its row
+              // supplies its own gap) to avoid a double margin.
+              <EuiTextColor
+                color="subdued"
+                className="altFacetCount altFacetGroupCount"
+                data-test-subj={`facetGroup-${id}-optionCount`}
+              >
+                ({options.length})
+              </EuiTextColor>
             )}
           </EuiButtonEmpty>
         </EuiFlexItem>
