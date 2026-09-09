@@ -73,6 +73,7 @@ import type { OpenSearchFormState } from './create_monitor/create_monitor_types'
 import {
   extractPplValidationError,
   extractServerErrorMessage,
+  extractServerErrorStatus,
   formStateToRule,
   resolveDatasourceTokens,
 } from './alarms_page_helpers';
@@ -1457,22 +1458,25 @@ export const AlarmsPage: React.FC<AlarmsPageProps> = ({
         // groupName and strip it from persisted labels.
         const ruleGroupLabel = promForm.labels.find((l) => l.key === '_ruleGroup')?.value;
 
-        // Resolve the rule's ORIGINAL identity (group, name) before building the
-        // payload so we can tell an in-place edit from a rename/group move.
-        // `ruleId` is the rule the user opened from the table, so it is always
-        // present in the loaded `rules`.
+        // Resolve the rule's ORIGINAL identity (group, name) so we can tell an
+        // in-place edit from a rename/group move. `ruleId` is normally the row
+        // the user opened, so the rule is in the loaded `rules` — but a stale
+        // list or a background-refetch race could miss it, which we treat as the
+        // unsafe case (see below).
         const originalRule = rules.find((r) => r.id === ruleId);
-        const originalName = originalRule?.name || promForm.name;
-        const originalGroupName = originalRule?.group || originalName;
         const newGroupName = ruleGroupLabel || promForm.name;
-        // Only overwrite when the edit keeps the SAME (group, name): that is the
-        // rule replacing itself, which the server's create-collision guard would
-        // otherwise reject with a 409. For a rename or group move we must NOT
-        // force overwrite — doing so lets the create silently destroy a
-        // DIFFERENT, pre-existing rule that happens to occupy the new
-        // (group, name). Leaving overwrite off makes the server return 409 so the
-        // collision surfaces as an error instead of silent data loss.
-        const isInPlaceEdit = originalGroupName === newGroupName && originalName === promForm.name;
+        // Overwrite ONLY for a confirmed in-place edit: the rule was found AND
+        // its (group, name) is unchanged — the rule replacing itself, which the
+        // server's create-collision guard would otherwise reject with a 409. For
+        // a rename, a group move, OR when the original rule can't be resolved, we
+        // must NOT force overwrite: doing so could let the create silently
+        // destroy a DIFFERENT rule already occupying the target (group, name).
+        // Without overwrite the server returns 409 and the collision surfaces as
+        // an error instead of causing silent data loss.
+        const isInPlaceEdit =
+          !!originalRule &&
+          (originalRule.group || originalRule.name) === newGroupName &&
+          originalRule.name === promForm.name;
         const payload = buildPrometheusRulePayload({
           name: promForm.name,
           query: promForm.query,
@@ -1494,10 +1498,14 @@ export const AlarmsPage: React.FC<AlarmsPageProps> = ({
         // if create fails — worst case is a harmless duplicate).
         await mutations.createPrometheusRule(payload, dsId);
 
-        // If the rule was renamed or moved to a different group, remove the
-        // old copy. The rule-level delete splices it out of the old group,
-        // preserving any sibling rules that share the group.
-        if (!isInPlaceEdit) {
+        // Remove the old copy only when we KNOW the original identity AND it
+        // changed (rename/group move). The rule-level delete splices it out of
+        // the old group, preserving siblings. When the original rule wasn't
+        // resolved we skip the delete entirely — deleting a guessed name could
+        // remove the rule we just created.
+        if (originalRule && !isInPlaceEdit) {
+          const originalName = originalRule.name;
+          const originalGroupName = originalRule.group || originalRule.name;
           try {
             await mutations.deletePrometheusRule(dsId, originalGroupName, originalName);
           } catch {
@@ -1523,10 +1531,22 @@ export const AlarmsPage: React.FC<AlarmsPageProps> = ({
       const message = extractServerErrorMessage(e);
       const pplError = extractPplValidationError(message);
       if (pplError) setPplSubmitError(pplError);
+      // A rename/group-move that lands on an existing rule now reaches the user
+      // as a 409 (the edit no longer force-overwrites). Special-case it into an
+      // actionable title instead of the generic failure, keeping the raw server
+      // message as the toast detail.
+      const isNameCollision =
+        extractServerErrorStatus(e) === 409 || /already exists/i.test(message);
       addToast(
-        i18n.translate('observability.alerting.alarmsPage.toast.updateMonitorFailed', {
-          defaultMessage: 'Failed to update alert rule',
-        }),
+        isNameCollision
+          ? i18n.translate('observability.alerting.alarmsPage.toast.updateMonitorNameCollision', {
+              defaultMessage:
+                'A rule named "{name}" already exists in this group. Rename it or pick a different group.',
+              values: { name: formState.name },
+            })
+          : i18n.translate('observability.alerting.alarmsPage.toast.updateMonitorFailed', {
+              defaultMessage: 'Failed to update alert rule',
+            }),
         'danger',
         message
       );

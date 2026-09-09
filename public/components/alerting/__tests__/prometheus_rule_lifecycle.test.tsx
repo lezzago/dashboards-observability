@@ -403,6 +403,17 @@ describe('Prometheus rule edit — overwrite only for an in-place edit', () => {
     // Rename removes the old copy after the new one is created.
     expect(mockDeletePrometheusRule).toHaveBeenCalledWith('ds-1', 'OldName', 'OldName');
   });
+
+  it('does NOT overwrite (and does not delete) when the edited rule is not in the loaded list', async () => {
+    // Edge (stale list / background-refetch race): if `rules.find(id)` misses,
+    // we must default to the SAFE path — no overwrite (avoid clobbering a rule
+    // that occupies the target name) and no delete (a guessed old-name delete
+    // could remove the rule we just created).
+    seedRule({ id: 'someOtherRule', name: 'Unrelated', group: 'Unrelated', datasourceId: 'ds-1' });
+    const payload = await editAndGetPayload(promForm('GhostRule'), 'missing-id');
+    expect(payload.overwrite).toBeUndefined();
+    expect(mockDeletePrometheusRule).not.toHaveBeenCalled();
+  });
 });
 
 describe('Prometheus rule delete', () => {
