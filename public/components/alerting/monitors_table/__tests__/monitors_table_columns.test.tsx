@@ -28,7 +28,12 @@ const renderCell = (field: string, value: unknown) => {
   const col = cols.find((c) => c.field === field) as
     { render?: (v: unknown, item?: UnifiedRuleSummary) => React.ReactNode } | undefined;
   if (!col?.render) throw new Error(`no render for column "${field}"`);
-  return render(<div>{col.render(value)}</div>);
+  // The table always hands the cell renderer the row as the 2nd arg; the status
+  // renderer reads it to detect optimistic "pending" rows. Pass a minimal
+  // non-pending row (real id, so isPending() is false) so we exercise the
+  // label path the assertions below check.
+  const item = { status: value, id: 'rule-1' } as UnifiedRuleSummary;
+  return render(<div>{col.render(value, item)}</div>);
 };
 
 describe('monitors_table_columns cell labels', () => {
