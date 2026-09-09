@@ -298,6 +298,18 @@ export function extractPplValidationError(message: string): string | null {
  * one level deeper. Prefer `body.message` and fall back through a few
  * other shapes before settling on the bare message.
  */
+/**
+ * The HTTP status of a failed request, when the error carries one. OSD's
+ * `HttpFetchError` exposes `response.status`; some paths surface
+ * `body.statusCode`. Returns `undefined` when neither is present.
+ */
+export function extractServerErrorStatus(e: unknown): number | undefined {
+  if (e == null || typeof e !== 'object') return undefined;
+  const errorish = e as { response?: { status?: unknown }; body?: { statusCode?: unknown } };
+  const status = errorish.response?.status ?? errorish.body?.statusCode;
+  return typeof status === 'number' ? status : undefined;
+}
+
 export function extractServerErrorMessage(e: unknown): string {
   if (e == null) return 'Unknown error';
   if (typeof e === 'string') return e;
