@@ -1518,39 +1518,6 @@ export const AlarmsPage: React.FC<AlarmsPageProps> = ({
     }
   };
 
-  const handleBatchCreateMonitors = async (forms: MonitorFormState[]) => {
-    const succeededRules: UnifiedRule[] = [];
-    for (let i = 0; i < forms.length; i++) {
-      const dsId = resolveDatasourceId(forms[i]);
-      if (!dsId) continue;
-      try {
-        await mutations.createMonitor(buildPayload(forms[i]), dsId);
-        succeededRules.push(buildOptimisticRule(forms[i], i));
-      } catch (e: unknown) {
-        addToast(
-          i18n.translate('observability.alerting.alarmsPage.toast.createMonitorFailed', {
-            defaultMessage: 'Failed to create alert rule',
-          }),
-          'danger',
-          extractServerErrorMessage(e)
-        );
-      }
-    }
-    if (succeededRules.length > 0) {
-      addToast(
-        i18n.translate('observability.alerting.alarmsPage.toast.monitorsCreated', {
-          defaultMessage: '{count} alert rule(s) created successfully',
-          values: { count: succeededRules.length },
-        })
-      );
-      // Batch create is OpenSearch-only (`createMonitor`), which confirms with
-      // no querier lag — so no optimistic pending rows (they'd wrongly render as
-      // disabled spinners). The foreground refetch surfaces the new rows.
-      refetchRules();
-    }
-    // Don't close flyout — AI wizard shows its own summary step and "Done" button
-  };
-
   // ---- Render ----
 
   const tabs = [
@@ -1816,7 +1783,6 @@ export const AlarmsPage: React.FC<AlarmsPageProps> = ({
       ) : showCreateMonitor ? (
         <CreateMonitor
           onSave={handleCreateMonitor}
-          onBatchSave={handleBatchCreateMonitors}
           onCancel={() => {
             setShowCreateMonitor(false);
             setCreateBackendType(null);
