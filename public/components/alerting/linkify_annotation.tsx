@@ -64,5 +64,7 @@ export const LinkifyAnnotation: React.FC<LinkifyAnnotationProps> = ({
       </EuiLink>
     );
   }
-  return <span data-test-subj={dataTestSubj}>{value}</span>;
+  // Render `trimmed` (not raw `value`) so a whitespace-padded annotation reads
+  // identically whether or not it linkifies.
+  return <span data-test-subj={dataTestSubj}>{trimmed}</span>;
 };

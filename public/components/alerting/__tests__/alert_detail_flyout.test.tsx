@@ -449,6 +449,29 @@ describe('AlertDetailFlyout', () => {
       });
     });
 
+    it('prefers the SLO name over a copied monitor_name for an SLO alert', () => {
+      // An SLO alert that also carries a monitor_name must still name the SLO in
+      // the "Source SLO" row — not the monitor — to stay consistent with the
+      // "Open SLO" action.
+      const sloAlert: UnifiedAlertSummary = {
+        ...baseAlert,
+        datasourceType: 'prometheus',
+        labels: { slo_id: 'slo-1', slo_name: 'API availability', monitor_name: 'High latency' },
+      };
+      const { getByText, getByTestId } = render(
+        <AlertDetailFlyout
+          alert={sloAlert}
+          datasources={datasources}
+          onClose={jest.fn()}
+          onAcknowledge={jest.fn()}
+        />
+      );
+      expect(getByText('Source SLO')).toBeInTheDocument();
+      const sourceRow = getByTestId('alertDetailSourceRuleLink');
+      expect(sourceRow).toHaveTextContent('API availability');
+      expect(sourceRow).not.toHaveTextContent('High latency');
+    });
+
     it('does not cross apps for a monitor rule deep-link', () => {
       const monitorAlert: UnifiedAlertSummary = {
         ...baseAlert,

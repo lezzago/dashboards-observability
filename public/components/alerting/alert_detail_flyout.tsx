@@ -210,18 +210,18 @@ export const AlertDetailFlyout: React.FC<AlertDetailFlyoutProps> = ({
   // The description-list row names the *source*, so it must never fall back to
   // the action label (`sourceLinkLabel`) — that both duplicates the header
   // button verbatim and mislabels an SLO as if "Open SLO" were its name.
-  // Preference order per backend: the monitor's own name (OpenSearch), the SLO
-  // name then its id (SLO burn-rate alerts, both carry `slo_name`/`slo_id` per
-  // `slo_promql_generator`), then the Prometheus `alertname`, then the raw
-  // `monitor_id`. `sourceLink` only exists when one of `slo_id` / `monitor_id` /
-  // `alertname` is present, so this chain always resolves to a string.
+  // Preference order per backend: SLO burn-rate alerts (any `slo_id`, matching
+  // the "Source SLO" title and "Open SLO" action) resolve to the SLO name then
+  // its id first — never the copied `monitor_name`, which would otherwise render
+  // a monitor's name in a row titled "Source SLO". Non-SLO alerts prefer the
+  // monitor's own name (OpenSearch), then the Prometheus `alertname`, then the
+  // raw `monitor_id`. `sourceLink` only exists when one of `slo_id` /
+  // `monitor_id` / `alertname` is present, so this chain always resolves to a
+  // string.
   const labelRecord = allLabels as Record<string, string>;
-  const sourceDisplayName =
-    labelRecord?.monitor_name ??
-    labelRecord?.slo_name ??
-    sloId ??
-    labelRecord?.alertname ??
-    labelRecord?.monitor_id;
+  const sourceDisplayName = sloId
+    ? (labelRecord?.slo_name ?? sloId)
+    : (labelRecord?.monitor_name ?? labelRecord?.alertname ?? labelRecord?.monitor_id);
   const sourceRowTitle = sloId
     ? i18n.translate('observability.alerting.alertDetailFlyout.sourceSlo', {
         defaultMessage: 'Source SLO',
@@ -239,9 +239,12 @@ export const AlertDetailFlyout: React.FC<AlertDetailFlyoutProps> = ({
       // `application.navigateToApp` to switch apps (workspace-aware), then
       // fire a synthetic hashchange for the target app's HashRouter to pick
       // up the route \u2014 navigateToApp uses pushState, which does not emit
-      // hashchange on its own.
-      coreRefs?.application?.navigateToApp(sourceLink.appId, { path: sourceLink.path });
-      window.dispatchEvent(new HashChangeEvent('hashchange'));
+      // hashchange on its own. Chain the dispatch off the returned promise so
+      // it fires after the target app has mounted, not while the source app's
+      // router is still active (dispatching synchronously races both routers).
+      Promise.resolve(
+        coreRefs?.application?.navigateToApp(sourceLink.appId, { path: sourceLink.path })
+      ).then(() => window.dispatchEvent(new HashChangeEvent('hashchange')));
       return;
     }
     // Same-app navigation: directly update the hash and dispatch a synthetic

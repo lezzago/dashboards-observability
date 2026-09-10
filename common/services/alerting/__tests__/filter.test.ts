@@ -168,8 +168,18 @@ describe('filter', () => {
     it('matches a single labelKey:value term against the label, not as a substring', () => {
       expect(alertMatchesSearch(alert, 'slo_id:abc-123')).toBe(true);
       expect(alertMatchesSearch(alert, 'slo_id:abc')).toBe(true); // includes()
-      expect(alertMatchesSearch(alert, 'slo_id:zzz')).toBe(false);
-      expect(alertMatchesSearch(alert, 'other:abc-123')).toBe(false); // wrong key
+      expect(alertMatchesSearch(alert, 'slo_id:zzz')).toBe(false); // real key, no value match
+    });
+
+    it('falls back to substring match when the colon-term key is not a label', () => {
+      // `other` is not a label on the alert, so the term is treated as free text.
+      const withColonInMessage = {
+        name: 'HighCpu',
+        message: 'saw error:timeout in logs',
+        labels: { slo_id: 'abc-123' },
+      };
+      expect(alertMatchesSearch(withColonInMessage, 'error:timeout')).toBe(true); // substring hit
+      expect(alertMatchesSearch(alert, 'other:abc-123')).toBe(false); // no label, no substring
     });
 
     it('keeps whole-string substring behavior for free-text (with a space)', () => {

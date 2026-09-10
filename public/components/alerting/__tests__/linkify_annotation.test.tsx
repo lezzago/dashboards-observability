@@ -58,4 +58,13 @@ describe('LinkifyAnnotation', () => {
     const { getByText } = render(<LinkifyAnnotation value="" fallback="—" data-test-subj="v" />);
     expect(getByText('—')).toBeInTheDocument();
   });
+
+  it('trims whitespace-padded plain text (consistent with the link path)', () => {
+    const { getByTestId } = render(
+      <LinkifyAnnotation value="  oncall handbook  " data-test-subj="v" />
+    );
+    const node = getByTestId('v');
+    expect(node.tagName).not.toBe('A');
+    expect(node.textContent).toBe('oncall handbook');
+  });
 });

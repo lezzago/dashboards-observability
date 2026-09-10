@@ -63,9 +63,13 @@ export function matchesSearch(
  * against the label rather than as a literal substring — the SLO detail
  * "View alerts" pivot deep-links with exactly this shape, and a plain substring
  * search would never match because the label value doesn't contain the `key:`
- * prefix. Any other query keeps the original whole-string substring behavior
- * over name / message / label values, so multi-word free-text search is
- * unchanged.
+ * prefix. The label interpretation only applies when the parsed key is actually
+ * a label on the alert; otherwise the term is treated as free text and falls
+ * through to the substring path below. This keeps free-text queries that happen
+ * to contain a colon (e.g. a pasted `error:timeout` message fragment or URL)
+ * from silently matching nothing. Any other query keeps the original
+ * whole-string substring behavior over name / message / label values, so
+ * multi-word free-text search is unchanged.
  */
 export function alertMatchesSearch(
   alert: { name: string; message?: string; labels: Record<string, string> },
@@ -76,9 +80,13 @@ export function alertMatchesSearch(
   const colonIdx = raw.indexOf(':');
   if (colonIdx > 0 && !/\s/.test(raw)) {
     const key = raw.slice(0, colonIdx).toLowerCase();
-    const val = raw.slice(colonIdx + 1).toLowerCase();
     const labelVal = alert.labels[key];
-    return Boolean(labelVal && labelVal.toLowerCase().includes(val));
+    // Only interpret as a label search when the key names a real label on this
+    // alert; otherwise fall through to substring matching on the raw term.
+    if (labelVal !== undefined) {
+      const val = raw.slice(colonIdx + 1).toLowerCase();
+      return labelVal.toLowerCase().includes(val);
+    }
   }
   const q = raw.toLowerCase();
   return (
