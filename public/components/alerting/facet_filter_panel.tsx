@@ -290,10 +290,19 @@ export const FacetFilterGroup: React.FC<FacetFilterGroupProps> = ({
             //      whole line and wrapped the count underneath. A flex row lets
             //      the truncating title (`flex: 1`) and the fixed-width count
             //      (`flex-shrink: 0`, in `.altFacetGroupCount`) sit inline.
+            //
+            // `textAlign: 'start'` is also required, NOT just the flex row:
+            // EuiButtonEmpty's `text-align: center` is inherited into the
+            // `TruncatedLabel` inner span (`display: block; width: 100%`), so a
+            // short title (e.g. "Type", or a label key like "monitor_name"
+            // whose `<strong>` is widened by the flex row) renders its glyphs
+            // centered WITHIN that full-width span even though the span itself
+            // sits flush-left. `start` (not `left`) keeps it RTL-safe.
             textProps={{
               style: {
                 display: 'flex',
                 alignItems: 'center',
+                textAlign: 'start',
                 flex: 1,
                 minWidth: 0,
                 maxWidth: '100%',
