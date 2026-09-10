@@ -6,10 +6,11 @@
 /**
  * Tests for the Prometheus form section (simplified Create Rule flyout).
  *
- * The form is builder-only: the PromQL query assembled from the metric and
- * label filters is the complete alert expression. There is no Code mode,
- * Trigger condition, or per-rule evaluation settings (those are rule-group
- * concerns in managed Prometheus).
+ * The Query section offers a Builder ⇄ Code toggle: the point-and-click builder
+ * OR a raw PromQL expression (the complete alert condition). An existing rule
+ * the builder can't represent opens in Code so it is never silently clobbered.
+ * There is still no Trigger condition or per-rule evaluation settings (those are
+ * rule-group concerns in managed Prometheus).
  *
  * Note: label-based queries (getByLabelText) are unreliable here because the
  * test environment stubs htmlIdGenerator, giving every form control the same
@@ -20,6 +21,14 @@ import { render, screen, fireEvent } from '@testing-library/react';
 import { PrometheusFormSection } from '../create_monitor/prometheus_form_section';
 import { parseExpr } from '../create_monitor/prom_query_builder';
 import type { PrometheusFormState } from '../create_monitor/create_monitor_types';
+import type { LabelEntry } from '../monitor_form_components';
+
+/** The subset of LabelEditor props the sync tests capture and assert against. */
+interface CapturedLabelEditorProps {
+  labels: LabelEntry[];
+  onChange: (labels: LabelEntry[]) => void;
+  context?: { service?: string; team?: string };
+}
 
 // Mock dependencies that PrometheusFormSection uses
 jest.mock('../monitor_form_components', () => ({
@@ -86,7 +95,7 @@ describe('PrometheusFormSection — simplified layout', () => {
     expect(screen.getByText('up')).toBeInTheDocument();
   });
 
-  it('does not render Code mode, Trigger condition, or Evaluation Settings', () => {
+  it('renders the Builder/Code toggle but not Trigger condition or Evaluation Settings', () => {
     render(
       <PrometheusFormSection
         form={baseForm}
@@ -96,7 +105,11 @@ describe('PrometheusFormSection — simplified layout', () => {
       />
     );
 
-    expect(screen.queryByText('Code')).not.toBeInTheDocument();
+    // The Builder ⇄ Code toggle is present (so a builder-unrepresentable rule
+    // can be edited as raw PromQL instead of a blank builder).
+    expect(screen.getByTestId('prometheusQueryModeToggle')).toBeInTheDocument();
+    // ...but the query-driven simplifications still apply: no Trigger condition,
+    // operator, or per-rule evaluation settings.
     expect(screen.queryByText(/Query library/)).not.toBeInTheDocument();
     expect(screen.queryByText(/Metric browser/)).not.toBeInTheDocument();
     expect(screen.queryByText('Trigger condition')).not.toBeInTheDocument();
@@ -286,10 +299,10 @@ describe('PrometheusFormSection — rule group', () => {
 
   it('hides _ruleGroup from the label editor and preserves it through label edits', () => {
     const onUpdate = jest.fn();
-    const labelEditorProps: any[] = [];
+    const labelEditorProps: CapturedLabelEditorProps[] = [];
     // Capture what LabelEditor receives via the module mock
     const { LabelEditor } = jest.requireMock('../monitor_form_components');
-    LabelEditor.mockImplementation((props: any) => {
+    LabelEditor.mockImplementation((props: CapturedLabelEditorProps) => {
       labelEditorProps.push(props);
       return <div data-test-subj="label-editor" />;
     });
@@ -528,5 +541,97 @@ describe('PrometheusFormSection — notification routing', () => {
     expect(screen.queryByText('Notification routing')).not.toBeInTheDocument();
     // The Labels section hint still conveys the routing relationship
     expect(screen.getByText('Categorize and route alerts')).toBeInTheDocument();
+  });
+});
+
+describe('PrometheusFormSection — Builder ⇄ Code toggle', () => {
+  // An `or`-joined expression the builder cannot represent (parseExpr → null).
+  const complexExpr = 'rate(a[5m]) > 0 or rate(b[5m]) > 0';
+
+  it('opens a builder-unrepresentable rule in Code mode showing the raw expression', () => {
+    render(
+      <PrometheusFormSection
+        form={{ ...baseForm, query: complexExpr }}
+        onUpdate={jest.fn()}
+        validationErrors={{}}
+        hasSubmitted={false}
+      />
+    );
+
+    const textarea = screen.getByTestId('prometheusPromQlExpression') as HTMLTextAreaElement;
+    expect(textarea).toBeInTheDocument();
+    expect(textarea.value).toBe(complexExpr);
+    // The builder's metric picker is not mounted in Code mode.
+    expect(screen.queryByText('Metric')).not.toBeInTheDocument();
+  });
+
+  it('opens a builder-representable rule in Builder mode (no Code textarea)', () => {
+    render(
+      <PrometheusFormSection
+        form={baseForm}
+        onUpdate={jest.fn()}
+        validationErrors={{}}
+        hasSubmitted={false}
+      />
+    );
+
+    expect(screen.queryByTestId('prometheusPromQlExpression')).not.toBeInTheDocument();
+    expect(screen.getByText('Metric')).toBeInTheDocument();
+  });
+
+  it('edits raw PromQL in Code mode without routing through the builder', () => {
+    const onUpdate = jest.fn();
+    render(
+      <PrometheusFormSection
+        form={{ ...baseForm, query: complexExpr }}
+        onUpdate={onUpdate}
+        validationErrors={{}}
+        hasSubmitted={false}
+      />
+    );
+
+    const next = `${complexExpr} or rate(c[5m]) > 0`;
+    fireEvent.change(screen.getByTestId('prometheusPromQlExpression'), { target: { value: next } });
+    expect(onUpdate).toHaveBeenCalledWith('query', next);
+  });
+
+  it('warns before the builder would overwrite an unrepresentable expression', () => {
+    render(
+      <PrometheusFormSection
+        form={{ ...baseForm, query: complexExpr }}
+        onUpdate={jest.fn()}
+        validationErrors={{}}
+        hasSubmitted={false}
+      />
+    );
+
+    // No warning in Code mode (the expression is shown as-is).
+    expect(screen.queryByTestId('prometheusBuilderOverwriteWarning')).not.toBeInTheDocument();
+
+    // Switching to Builder surfaces the overwrite guard — the raw expression is
+    // preserved until the user actually picks a metric.
+    fireEvent.click(screen.getByText('Builder'));
+    expect(screen.getByTestId('prometheusBuilderOverwriteWarning')).toBeInTheDocument();
+  });
+
+  it('does not emit a query update when the Builder mounts with an unrepresentable expression', () => {
+    const onUpdate = jest.fn();
+    render(
+      <PrometheusFormSection
+        form={{ ...baseForm, query: complexExpr }}
+        onUpdate={onUpdate}
+        validationErrors={{}}
+        hasSubmitted={false}
+      />
+    );
+
+    // Toggle from the default Code mode into Builder, mounting PromQueryBuilder
+    // with a query parseExpr() can't represent. This is the guarantee the
+    // overwrite-warning callout promises: the builder seeds inert and must NOT
+    // emit onQueryChange on mount — the hand-written expression is preserved
+    // until the user actually picks a metric.
+    fireEvent.click(screen.getByText('Builder'));
+    expect(screen.getByText('Metric')).toBeInTheDocument();
+    expect(onUpdate).not.toHaveBeenCalledWith('query', expect.anything());
   });
 });
