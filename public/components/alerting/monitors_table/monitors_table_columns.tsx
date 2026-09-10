@@ -43,6 +43,7 @@ import {
   TYPE_LABELS,
 } from '../shared_constants';
 import { TruncatedLabel } from '../../common/truncated_label';
+import { getMonitorStateLabel, getSeverityLabel } from '../enum_labels';
 import { DEFAULT_WIDTHS } from './resizable_columns';
 import { isPending } from './pending_rules';
 
@@ -217,7 +218,9 @@ export function buildTableColumns({
               </EuiToolTip>
             );
           }
-          return <EuiHealth color={STATUS_COLORS[s] || 'subdued'}>{s}</EuiHealth>;
+          return (
+            <EuiHealth color={STATUS_COLORS[s] || 'subdued'}>{getMonitorStateLabel(s)}</EuiHealth>
+          );
         },
       });
     } else if (colId === 'severity') {
@@ -229,7 +232,7 @@ export function buildTableColumns({
         sortable: true,
         width: w('severity'),
         render: (s: UnifiedAlertSeverity) => (
-          <EuiBadge color={SEVERITY_COLORS[s] || 'default'}>{s}</EuiBadge>
+          <EuiBadge color={SEVERITY_COLORS[s] || 'default'}>{getSeverityLabel(s)}</EuiBadge>
         ),
       });
     } else if (colId === 'monitorType') {
@@ -251,7 +254,7 @@ export function buildTableColumns({
         sortable: true,
         width: w('healthStatus'),
         render: (h: MonitorHealthStatus) => (
-          <EuiHealth color={HEALTH_COLORS[h] || 'subdued'}>{h}</EuiHealth>
+          <EuiHealth color={HEALTH_COLORS[h] || 'subdued'}>{getMonitorStateLabel(h)}</EuiHealth>
         ),
       });
     } else if (colId === 'datasource') {
