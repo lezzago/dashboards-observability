@@ -107,7 +107,8 @@ export const PrometheusFormSection: React.FC<{
   // A non-empty expression the builder cannot represent. Selecting a metric in
   // the builder would overwrite it, so warn (and offer Code) rather than
   // silently replacing what the user has.
-  const builderWouldOverwrite = form.query.trim() !== '' && parseExpr(form.query) === null;
+  const builderWouldOverwrite =
+    (form.query ?? '').trim() !== '' && parseExpr(form.query ?? '') === null;
 
   // Use a ref for form.labels to avoid circular dependency:
   // handleRuleGroupChange → onUpdate('labels') → parent re-renders → new form.labels → new callback

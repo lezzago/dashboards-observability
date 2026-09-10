@@ -21,6 +21,14 @@ import { render, screen, fireEvent } from '@testing-library/react';
 import { PrometheusFormSection } from '../create_monitor/prometheus_form_section';
 import { parseExpr } from '../create_monitor/prom_query_builder';
 import type { PrometheusFormState } from '../create_monitor/create_monitor_types';
+import type { LabelEntry } from '../monitor_form_components';
+
+/** The subset of LabelEditor props the sync tests capture and assert against. */
+interface CapturedLabelEditorProps {
+  labels: LabelEntry[];
+  onChange: (labels: LabelEntry[]) => void;
+  context?: { service?: string; team?: string };
+}
 
 // Mock dependencies that PrometheusFormSection uses
 jest.mock('../monitor_form_components', () => ({
@@ -291,10 +299,10 @@ describe('PrometheusFormSection — rule group', () => {
 
   it('hides _ruleGroup from the label editor and preserves it through label edits', () => {
     const onUpdate = jest.fn();
-    const labelEditorProps: any[] = [];
+    const labelEditorProps: CapturedLabelEditorProps[] = [];
     // Capture what LabelEditor receives via the module mock
     const { LabelEditor } = jest.requireMock('../monitor_form_components');
-    LabelEditor.mockImplementation((props: any) => {
+    LabelEditor.mockImplementation((props: CapturedLabelEditorProps) => {
       labelEditorProps.push(props);
       return <div data-test-subj="label-editor" />;
     });
@@ -604,5 +612,26 @@ describe('PrometheusFormSection — Builder ⇄ Code toggle', () => {
     // preserved until the user actually picks a metric.
     fireEvent.click(screen.getByText('Builder'));
     expect(screen.getByTestId('prometheusBuilderOverwriteWarning')).toBeInTheDocument();
+  });
+
+  it('does not emit a query update when the Builder mounts with an unrepresentable expression', () => {
+    const onUpdate = jest.fn();
+    render(
+      <PrometheusFormSection
+        form={{ ...baseForm, query: complexExpr }}
+        onUpdate={onUpdate}
+        validationErrors={{}}
+        hasSubmitted={false}
+      />
+    );
+
+    // Toggle from the default Code mode into Builder, mounting PromQueryBuilder
+    // with a query parseExpr() can't represent. This is the guarantee the
+    // overwrite-warning callout promises: the builder seeds inert and must NOT
+    // emit onQueryChange on mount — the hand-written expression is preserved
+    // until the user actually picks a metric.
+    fireEvent.click(screen.getByText('Builder'));
+    expect(screen.getByText('Metric')).toBeInTheDocument();
+    expect(onUpdate).not.toHaveBeenCalledWith('query', expect.anything());
   });
 });
